@@ -1,0 +1,15 @@
+# Node / build
+node_modules/
+out/
+*.tsbuildinfo
+
+# Artefacte de build (VSIX se generează la nevoie; nu se comit)
+*.vsix
+
+# Profilul Chrome al extensiei (NU se urcă niciodată — poate avea GB întregi)
+chrome-profile/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log

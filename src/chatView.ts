@@ -9,8 +9,16 @@ import {
   PROVIDER_LABELS,
   BROWSER_PROVIDER_IDS,
   getProviderStatus,
+  ollamaInstallState,
   ProviderStatusInfo
 } from './providers';
+import { pullOllamaModel } from './providers/ollama';
+import {
+  detectHardware,
+  fitsThisMachine,
+  hardwareSummary,
+  recommendModels
+} from './hardware';
 import { AIProvider } from './providers/types';
 import { configInfo, selectors } from './selectors';
 import { BrowserManager } from './browser';
@@ -115,6 +123,14 @@ const CHECKPOINTS_MAX = 50;
 
 // v1.9.0: id-uri sigure de mesaj (leagă mesajul de checkpoint / conversație)
 const MSG_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** v2.0.2: „4.4 GB" / „512 MB" pentru dimensiunea unui model Ollama instalat. */
+function formatModelSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '';
+  const gb = bytes / 1024 ** 3;
+  if (gb >= 1) return gb.toFixed(1) + ' GB';
+  return Math.round(bytes / 1024 ** 2) + ' MB';
+}
 
 interface StoredMessage {
   role: 'user' | 'assistant';
@@ -828,12 +844,61 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // FAZA E: butonul Clear golește și istoricul persistat
     // v1.9.0: golește conversația activă (conversația rămâne în lista de conversații)
     if (msg.type === 'clear') {
-      await this.state.update(HISTORY_KEY, []);
-      await this.conversations.clearActive();
-      this.attachments = [];
-      this.postAttachments();
-      this.postConversations();
-      log('history cleared');
+      await this.clearActiveChat();
+      return;
+    }
+
+    // v2.0.2: „Clear chat" cere confirmare (modal) înainte de a executa
+    if (msg.type === 'confirm_clear') {
+      const pick = await vscode.window.showWarningMessage(
+        'Clear this chat? The messages of the current conversation are removed ' +
+          '(the conversation stays in the list). This cannot be undone.',
+        { modal: true },
+        'Yes, clear'
+      );
+      if (pick !== 'Yes, clear') return; // Cancel → nu se întâmplă nimic
+      if (this.abortController) {
+        this.abortRequested = true;
+        this.abortController.abort();
+      }
+      await this.clearActiveChat();
+      this.post('cleared', '');
+      return;
+    }
+
+    // v2.0.2: „Reset repaired selectors" cere confirmare (modal)
+    if (msg.type === 'reset_selectors') {
+      const pick = await vscode.window.showWarningMessage(
+        'Reset the automatically repaired selectors? Freekit forgets what it ' +
+          'learned and falls back to the configured selectors (bundled or remote).',
+        { modal: true },
+        'Reset'
+      );
+      if (pick !== 'Reset') return; // Cancel → nu se întâmplă nimic
+      await vscode.commands.executeCommand('freekit.resetSelectors');
+      return;
+    }
+
+    // v2.0.2: acțiunile de context din meniul „⋯"
+    if (msg.type === 'open_browser') {
+      await vscode.commands.executeCommand('freekit.openBrowser');
+      return;
+    }
+    if (msg.type === 'stop_dev_servers') {
+      await vscode.commands.executeCommand('freekit.stopDevServers');
+      return;
+    }
+
+    // v2.0.2: „Install Ollama" (meniul de model / meniul „⋯")
+    if (msg.type === 'install_ollama') {
+      await vscode.commands.executeCommand('freekit.installOllama');
+      return;
+    }
+
+    // v2.0.2: descarcă un model recomandat pentru hardware-ul detectat
+    if (msg.type === 'pull_model') {
+      const model = typeof msg.modelId === 'string' ? msg.modelId.trim() : '';
+      if (model) await this.pullModel(model);
       return;
     }
 
@@ -943,6 +1008,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       });
       // v1.9.0: lista de conversații (dropdown-ul de comutare)
       this.postConversations();
+      // v2.0.2: sincronizează starea de generare (webview reîncărcat în timpul
+      // unui răspuns → butonul Stop trebuie să fie vizibil)
+      this.post('busy', this.abortController ? '1' : '0');
       // v0.4.0: status providers pentru badge-ul din toolbar
       void this.refreshProviderStatus();
       return;
@@ -993,7 +1061,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (msg.type === 'delete_conversation') {
-      await this.handleDeleteConversation();
+      // v2.0.3: context menu (dreapta-click) trimite id-ul conversației alese;
+      // fără id se șterge conversația activă (comportamentul vechi).
+      await this.handleDeleteConversation(String(msg.id ?? ''));
       return;
     }
 
@@ -1072,6 +1142,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     this.abortRequested = false;
     this.abortController = new AbortController();
+    // v2.0.2: semnal explicit de „se generează" → webview-ul arată butonul Stop
+    this.post('busy', '1');
     const signal = this.abortController.signal;
 
     // v0.2.1: contorul anti-spam al scrierilor se resetează la fiecare mesaj
@@ -1564,6 +1636,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.finishThinking();
       this.abortController = undefined;
       this.active = undefined;
+      // v2.0.2: generarea s-a terminat → webview-ul ascunde butonul Stop
+      this.post('busy', '0');
       // v0.4.0: badge-ul de status reflectă realitatea după fiecare mesaj
       void this.refreshProviderStatus();
     }
@@ -2211,6 +2285,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  /**
+   * v2.0.2: golește chatul (istoricul persistat + conversația activă + atașamente)
+   * și reîmprospătează lista de conversații în webview.
+   */
+  private async clearActiveChat(): Promise<void> {
+    await this.state.update(HISTORY_KEY, []);
+    await this.conversations.clearActive();
+    this.attachments = [];
+    this.postAttachments();
+    this.postConversations();
+    log('history cleared');
+  }
+
   /** v1.9.0: comută la altă conversație (dropdown-ul din bara de conversații). */
   private async handleSwitchConversation(id: string): Promise<void> {
     if (this.abortController) {
@@ -2248,21 +2335,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.rerenderActive();
   }
 
-  /** v1.9.0: șterge conversația activă (cu confirmare nativă). */
-  private async handleDeleteConversation(): Promise<void> {
+  /**
+   * v1.9.0: șterge o conversație (cu confirmare nativă).
+   * v2.0.3: `id` opțional — meniul contextual din lista de conversații poate
+   * șterge orice conversație, nu doar cea activă.
+   */
+  private async handleDeleteConversation(id = ''): Promise<void> {
     if (this.abortController) {
       this.post('notice', '⏳ Stop the current response first (Stop), then delete the conversation.');
       this.postConversations();
       return;
     }
-    const active = this.conversations.getActive();
-    if (!active) {
+    const target =
+      (id ? this.conversations.list().find((c) => c.id === id) : undefined) ??
+      this.conversations.getActive();
+    if (!target) {
       this.post('notice', 'ℹ️ There is no conversation to delete.');
       this.postConversations();
       return;
     }
     const pick = await vscode.window.showWarningMessage(
-      '🗑 Delete the conversation "' + active.title + '"? (' + active.messages.length +
+      '🗑 Delete the conversation "' + target.title + '"? (' + target.messages.length +
         ' messages — the action cannot be undone; git checkpoints stay in their history.)',
       { modal: true },
       'Delete'
@@ -2271,11 +2364,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.postConversations();
       return;
     }
-    await this.conversations.deleteConversation(active.id);
-    log('conversation deleted: ' + active.id);
-    this.post('heal', '🗑 The conversation "' + active.title + '" was deleted.');
+    const wasActive = this.conversations.getActiveId() === target.id;
+    await this.conversations.deleteConversation(target.id);
+    log('conversation deleted: ' + target.id);
+    this.post('heal', '🗑 The conversation "' + target.title + '" was deleted.');
     this.postConversations();
-    this.rerenderActive();
+    // doar conversația activă schimbă ce se vede în chat
+    if (wasActive) this.rerenderActive();
   }
 
   /** v1.9.0: fork (ᛉ) — conversație nouă din mesajul ales; cea veche NU se șterge. */
@@ -2424,7 +2519,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       this.view?.webview.postMessage({ type: 'provider_status', color, title });
       // v2.0.1: lista pentru meniul chip-ului de model (browser + Ollama local)
-      this.postProvidersList(info);
+      await this.postProvidersList(info);
     } catch (e: any) {
       log('status refresh failed: ' + (e?.message ?? String(e)));
     } finally {
@@ -2437,11 +2532,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * Grupare: browser (conturi web) vs local (Ollama). Punctele colorate urmează
    * starea reală: verde = browser logat, albastru = Ollama local, portocaliu =
    * necesită login / browser indisponibil.
+   *
+   * v2.0.2: secțiunea locală primește hardware-ul detectat (VRAM/RAM), modelele
+   * recomandate pentru mașina respectivă și rândul „Install Ollama" când
+   * Ollama nu e prezent.
    */
-  private postProvidersList(info: ProviderStatusInfo): void {
+  private async postProvidersList(info: ProviderStatusInfo): Promise<void> {
     const cfg = vscode.workspace.getConfiguration('freekit');
     const activeModel = cfg.get<string>('ollamaModel', 'qwen2.5-coder:7b');
     const selected = this.currentProviderId();
+
+    const hw = await detectHardware();
+    const recommendations = recommendModels(hw);
+    const installState = ollamaInstallState(info);
 
     interface Row {
       id: string;
@@ -2451,6 +2554,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       dot: 'green' | 'orange' | 'blue';
       modelId?: string;
       active?: boolean;
+      /** v2.0.2: modelul instalat e recomandat pentru hardware-ul detectat. */
+      recommended?: boolean;
+      /** v2.0.2: recomandare care nu e instalată încă (rândul descarcă modelul). */
+      missing?: boolean;
     }
 
     const browserDot = (id: string): 'green' | 'orange' => {
@@ -2477,24 +2584,142 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         dot: browserDot(id)
       });
     }
+
+    const sizeByModel = new Map(
+      info.ollamaModelDetails.map((m) => [m.name.toLowerCase(), m.sizeBytes])
+    );
     const models = info.ollamaModels.length ? info.ollamaModels : [activeModel];
     for (const model of models) {
+      const recommended = fitsThisMachine(model, hw);
+      const size = formatModelSize(sizeByModel.get(model.toLowerCase()) ?? 0);
       providers.push({
         id: 'ollama',
         label: model,
-        sub: '',
+        sub: [recommended ? 'recommended' : '', size].filter(Boolean).join(' · '),
         group: 'local',
         dot: info.ollama ? 'blue' : 'orange',
-        modelId: model
+        modelId: model,
+        recommended
       });
     }
+
+    // v2.0.2: recomandările care lipsesc — se descarcă direct din meniu.
+    // Doar când serverul răspunde (altfel `ollama pull` nu are unde rula).
+    if (info.ollama) {
+      const installed = new Set(models.map((m) => m.toLowerCase()));
+      for (const rec of recommendations) {
+        if (installed.has(rec.id.toLowerCase())) continue;
+        providers.push({
+          id: 'ollama',
+          label: rec.id,
+          sub: rec.size + ' · download',
+          group: 'local',
+          dot: 'orange',
+          modelId: rec.id,
+          missing: true
+        });
+      }
+    }
+
     for (const p of providers) {
       p.active =
         p.group === 'local'
           ? selected === 'ollama' && p.modelId === activeModel
           : p.id === selected;
     }
-    this.view?.webview.postMessage({ type: 'providers_list', providers });
+
+    this.view?.webview.postMessage({
+      type: 'providers_list',
+      providers,
+      hardware: {
+        summary: hardwareSummary(hw),
+        gpu: hw.gpus[0]?.name ?? '',
+        vramGb: hw.vramGb,
+        ramGb: hw.ramGb,
+        cpu: hw.cpuModel,
+        cpuCores: hw.cpuCores,
+        note: hw.note ?? ''
+      },
+      recommendations,
+      ollama: { state: installState, running: info.ollama, installed: info.ollamaCli }
+    });
+  }
+
+  /**
+   * v2.0.2: descarcă un model Ollama (`ollama pull`) cu progres în bara de
+   * notificări. La reușită, modelul devine providerul activ.
+   */
+  private async pullModel(model: string): Promise<void> {
+    const info = await getProviderStatus();
+    if (!info.ollama) {
+      const pick = await vscode.window.showWarningMessage(
+        'Freekit: Ollama is not reachable, so "' + model + '" cannot be downloaded.',
+        { modal: true },
+        'Install Ollama'
+      );
+      if (pick === 'Install Ollama') {
+        await vscode.commands.executeCommand('freekit.installOllama');
+      }
+      return;
+    }
+
+    const ac = new AbortController();
+    let ok = false;
+
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'Freekit: downloading Ollama model "' + model + '"',
+        cancellable: true
+      },
+      async (prog, token) => {
+        const sub = token.onCancellationRequested(() => ac.abort());
+        let lastStatus = '';
+        try {
+          await pullOllamaModel(
+            model,
+            (p) => {
+              const line =
+                p.status + (p.percent != null ? ' — ' + p.percent + '%' : '');
+              if (line === lastStatus) return;
+              lastStatus = line;
+              prog.report({ message: line });
+            },
+            ac.signal
+          );
+          ok = true;
+        } catch (e: any) {
+          if (ac.signal.aborted) {
+            vscode.window.showWarningMessage(
+              'Freekit: download cancelled — "' + model + '" was not installed completely.'
+            );
+          } else {
+            const msg = e?.message ?? String(e);
+            vscode.window.showErrorMessage('Freekit: download failed — ' + msg);
+            this.postNotice('🦙 ⚠️ Ollama pull failed: ' + msg);
+          }
+        } finally {
+          sub.dispose();
+        }
+      }
+    );
+
+    if (!ok) return;
+
+    await vscode.workspace
+      .getConfiguration('freekit')
+      .update('provider', 'ollama', vscode.ConfigurationTarget.Global);
+    await vscode.workspace
+      .getConfiguration('freekit')
+      .update('ollamaModel', model, vscode.ConfigurationTarget.Global);
+
+    log('pulled and selected model ' + model);
+    this.post('provider', 'ollama');
+    vscode.window.showInformationMessage(
+      'Freekit: "' + model + '" is installed and selected (local Ollama).'
+    );
+    this.postNotice('🦙 "' + model + '" downloaded and selected ✓');
+    await this.refreshProviderStatus();
   }
 
   /** v0.4.0: raport detaliat (comanda "Show Provider Status" + click pe badge). */
@@ -2546,8 +2771,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         );
       }
     } else {
-      lines.push('  (start Ollama with "ollama serve" for local mode)');
+      lines.push(
+        info.ollamaCli
+          ? '  (installed, but the server is not running — start it with "ollama serve")'
+          : '  (not installed — run "Freekit: Install Ollama" for the download page)'
+      );
     }
+
+    // v2.0.2: hardware detectat + recomandări de modele locale
+    const hw = await detectHardware();
+    const recs = recommendModels(hw);
+    lines.push('Hardware: ' + hardwareSummary(hw));
+    lines.push('  CPU: ' + hw.cpuModel + ' (' + hw.cpuCores + ' threads)');
+    if (hw.note) lines.push('  Note: ' + hw.note);
+    if (recs.length) {
+      lines.push('  Recommended local models (best first):');
+      for (const r of recs) {
+        lines.push(
+          '    • ' + r.id + ' (' + r.size + ', ~' + r.needGb + ' GB) — ' + r.why
+        );
+      }
+    }
+
     // v1.1.0: starea serverelor MCP + numărul de unelte expuse
     lines.push(...mcp.statusLines());
     lines.push('Recommendation: ' + this.statusRecommendation(selected, info));
@@ -3100,6 +3345,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const jsUri = toUri('chat.js');
     const cssUri = toUri('chat.css');
+    // v2.0.3: fontul de iconițe @vscode/codicons (vendorizat în media/ — doar
+    // codicon.css + codicon.ttf, ca VSIX-ul să nu care tot pachetul npm)
+    const codiconUri = toUri('codicon.css');
     const markedUri = toUri('marked.min.js');
     const purifyUri = toUri('purify.min.js');
 
@@ -3107,14 +3355,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <html><head>
 <meta charset="UTF-8"/>
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${webview.cspSource}; style-src ${webview.cspSource}; img-src ${webview.cspSource} https: data:; font-src ${webview.cspSource};"/>
+<link rel="stylesheet" href="${codiconUri}"/>
 <link rel="stylesheet" href="${cssUri}"/>
 </head><body>
-<!-- v2.0.1: icon sprite (structura din mockup) -->
+<!-- v2.0.1: icon sprite (structura din mockup) — v2.0.3: redus la iconițele
+     care nu sunt în meniuri (meniurile folosesc acum codicons) -->
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></symbol>
   <symbol id="i-more" viewBox="0 0 16 16"><circle cx="3" cy="8" r="1.2" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r="1.2" fill="currentColor" stroke="none"/><circle cx="13" cy="8" r="1.2" fill="currentColor" stroke="none"/></symbol>
   <symbol id="i-chev" viewBox="0 0 16 16"><path d="M4 6l4 4 4-4"/></symbol>
-  <symbol id="i-check" viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-6.5"/></symbol>
   <symbol id="i-attach" viewBox="0 0 16 16"><path d="M13 7.2L8 12.2a3 3 0 0 1-4.2-4.2l5-5a2 2 0 0 1 2.8 2.8l-5 5a1 1 0 0 1-1.4-1.4l4.5-4.5"/></symbol>
   <symbol id="i-folder" viewBox="0 0 16 16"><path d="M1.5 3.5h4L7 5h7.5v7.5h-13z"/></symbol>
   <symbol id="i-mic" viewBox="0 0 16 16"><rect x="6" y="2" width="4" height="7" rx="2"/><path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2"/></symbol>
@@ -3122,12 +3371,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <symbol id="i-send" viewBox="0 0 16 16"><path d="M8 13V3M4 7l4-4 4 4"/></symbol>
   <symbol id="i-bulb" viewBox="0 0 16 16"><path d="M6 12h4M6.5 14h3M8 2a4 4 0 0 0-2.2 7.3c.3.3.4.6.4 1V11h3.6v-.7c0-.4.1-.7.4-1A4 4 0 0 0 8 2z"/></symbol>
   <symbol id="i-file" viewBox="0 0 16 16"><path d="M4 2h5l3 3v9H4zM9 2v3h3"/></symbol>
-  <symbol id="i-eye" viewBox="0 0 16 16"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="1.8"/></symbol>
-  <symbol id="i-list" viewBox="0 0 16 16"><path d="M3 4h10M3 8h10M3 12h6"/></symbol>
-  <symbol id="i-pulse" viewBox="0 0 16 16"><path d="M1.5 8h3L6 4l3 8 1.5-4h4"/></symbol>
-  <symbol id="i-plug" viewBox="0 0 16 16"><path d="M6 2v3M10 2v3M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0zM8 11v3"/></symbol>
-  <symbol id="i-trash" viewBox="0 0 16 16"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.5 8.5h6l.5-8.5"/></symbol>
-  <symbol id="i-gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></symbol>
 </svg>
 
 <div class="side">
@@ -3139,22 +3382,44 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <button class="ibtn" id="conv-new" title="New chat" aria-label="New chat"><svg class="ic"><use href="#i-plus"/></svg></button>
     <div class="pop">
       <button class="ibtn" id="moreBtn" title="More actions" aria-label="More actions" aria-haspopup="true" aria-expanded="false" data-menu="menuMore"><svg class="ic"><use href="#i-more"/></svg></button>
+      <!-- v2.0.2: meniul „⋯" grupat pe secțiuni (Context / Session / Debug / Settings) -->
+      <!-- v2.0.3: iconițele din meniuri sunt CODNICONS (fontul @vscode/codicons),
+           nu mai folosesc sprite-ul SVG propriu; „Delete conversation" a trecut în
+           meniul contextual (dreapta-click pe conversație). -->
       <div class="menu down" id="menuMore" role="menu">
+        <div class="mh">Context</div>
+        <button class="mi plain" id="mShowChrome" role="menuitem"><i class="codicon codicon-eye"></i>Show Chrome</button>
+        <button class="mi plain" id="mOpenBrowser" role="menuitem"><i class="codicon codicon-globe"></i>Open Browser</button>
+        <button class="mi plain" id="mStopDev" role="menuitem"><i class="codicon codicon-debug-stop"></i>Stop dev servers</button>
+        <button class="mi plain" id="mStatus" role="menuitem"><i class="codicon codicon-pulse"></i>Provider status</button>
+        <button class="mi plain" id="mInstallOllama" role="menuitem" hidden><i class="codicon codicon-cloud-download"></i>Install Ollama</button>
+        <div class="sep"></div>
+
+        <div class="mh">Session</div>
+        <button class="mi plain" id="mNew" role="menuitem"><i class="codicon codicon-add"></i>New chat</button>
         <div class="mh">Conversations</div>
         <div id="conv-list"></div>
-        <button class="mi plain danger" id="conv-delete" role="menuitem"><svg class="ic"><use href="#i-trash"/></svg>Delete chat</button>
         <div class="sep"></div>
-        <button class="mi plain" id="mShowChrome" role="menuitem"><svg class="ic"><use href="#i-eye"/></svg>Show Chrome</button>
-        <button class="mi plain" id="mStatus" role="menuitem"><svg class="ic"><use href="#i-pulse"/></svg>Provider status</button>
-        <button class="mi plain" id="mVerbose" role="menuitemcheckbox" aria-checked="false" data-toggle><svg class="ic"><use href="#i-list"/></svg>Verbose logs<span class="sub">Off</span></button>
-        <button class="mi plain" id="mDiagnostics" role="menuitem"><svg class="ic"><use href="#i-pulse"/></svg>Diagnostics</button>
-        <button class="mi plain" id="mMcp" role="menuitem"><svg class="ic"><use href="#i-plug"/></svg>MCP servers</button>
+
+        <div class="mh">Debug</div>
+        <button class="mi plain" id="mVerbose" role="menuitemcheckbox" aria-checked="false" data-toggle><i class="codicon codicon-list-flat"></i>Verbose logs<span class="sub">Off</span></button>
+        <button class="mi plain" id="mDiagnostics" role="menuitem"><i class="codicon codicon-pulse"></i>Diagnostics</button>
+        <button class="mi plain" id="mMcp" role="menuitem"><i class="codicon codicon-plug"></i>MCP servers</button>
+        <button class="mi plain" id="mResetSelectors" role="menuitem"><i class="codicon codicon-wrench"></i>Reset repaired selectors</button>
         <div class="sep"></div>
-        <button class="mi plain" id="mSettings" role="menuitem"><svg class="ic"><use href="#i-gear"/></svg>Settings</button>
-        <button class="mi plain danger" id="mClear" role="menuitem"><svg class="ic"><use href="#i-trash"/></svg>Clear chat</button>
+
+        <div class="mh">Settings</div>
+        <button class="mi plain" id="mSettings" role="menuitem"><i class="codicon codicon-settings-gear"></i>Settings</button>
+        <div class="sep"></div>
+        <button class="mi plain" id="mClear" role="menuitem"><i class="codicon codicon-trash"></i>Clear chat</button>
       </div>
     </div>
   </header>
+
+  <!-- v2.0.3: meniul contextual al conversațiilor (dreapta-click pe un rând) -->
+  <div class="menu ctx" id="convCtxMenu" role="menu">
+    <button class="mi plain" id="convCtxDelete" role="menuitem"><i class="codicon codicon-trash"></i>Delete conversation</button>
+  </div>
 
   <main class="chat" id="chat"></main>
 
@@ -3175,6 +3440,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           <div class="sep"></div>
           <div class="mh">Local &middot; Ollama</div>
           <div id="model-local"></div>
+          <div class="mnote" id="model-hw" hidden></div>
         </div>
       </div>
 
@@ -3184,10 +3450,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         </button>
         <div class="menu up" id="menuThink" role="menu" data-radio data-label="#thinkLabel" style="min-width:200px">
           <div class="mh">Thinking level</div>
-          <button class="mi" role="menuitemradio" aria-checked="false" data-value="off" data-label="Off"><svg class="ic sm ck"><use href="#i-check"/></svg>Off<span class="sub">fastest</span></button>
-          <button class="mi" role="menuitemradio" aria-checked="false" data-value="low" data-label="Low"><svg class="ic sm ck"><use href="#i-check"/></svg>Low<span class="sub">quick</span></button>
-          <button class="mi" role="menuitemradio" aria-checked="true" data-value="medium" data-label="Medium"><svg class="ic sm ck"><use href="#i-check"/></svg>Medium<span class="sub">balanced</span></button>
-          <button class="mi" role="menuitemradio" aria-checked="false" data-value="high" data-label="High"><svg class="ic sm ck"><use href="#i-check"/></svg>High<span class="sub">deepest</span></button>
+          <button class="mi" role="menuitemradio" aria-checked="false" data-value="off" data-label="Off"><i class="codicon codicon-check ck"></i>Off<span class="sub">fastest</span></button>
+          <button class="mi" role="menuitemradio" aria-checked="false" data-value="low" data-label="Low"><i class="codicon codicon-check ck"></i>Low<span class="sub">quick</span></button>
+          <button class="mi" role="menuitemradio" aria-checked="true" data-value="medium" data-label="Medium"><i class="codicon codicon-check ck"></i>Medium<span class="sub">balanced</span></button>
+          <button class="mi" role="menuitemradio" aria-checked="false" data-value="high" data-label="High"><i class="codicon codicon-check ck"></i>High<span class="sub">deepest</span></button>
         </div>
       </div>
 

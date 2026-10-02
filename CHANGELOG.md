@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.0.3 — 2026-10-02
+
+**The ⋯ dropdown becomes the single control surface** — real codicons, no top toolbar, no red actions, and per-conversation delete on right-click.
+
+- **Top toolbar removed** — the `menus.view/title` contribution is gone, so the 12 icon buttons that used to sit in the chat view's header no longer take up space there. Every one of those commands is still in the command palette (`Freekit: …`).
+- **Codicons in the dropdowns** — all menu icons (the **⋯** menu, the model chip's provider/model list, the thinking-level menu, the conversation list and the new context menu) are now real VS Code codicons (`<i class="codicon codicon-…">`) instead of the hand-drawn SVG sprite. `@vscode/codicons` is a dependency, but only `codicon.css` + `codicon.ttf` are vendored into `media/` and the rest of the npm package is excluded from the VSIX. The sprite shrank from 21 symbols to the 10 still used outside menus (header buttons, composer, in-chat rows).
+- **Delete conversation moved to a context menu** — the item is gone from the ⋯ menu: **right-click any row** in the Conversations list to get a small menu at the cursor with **Delete conversation**. It deletes *that* conversation (the host now accepts an id) instead of only the active one, and the chat is re-rendered only when the deleted conversation was the active one. The native modal confirmation is unchanged, and the row tooltip mentions the gesture.
+- **Clear chat is no longer red** — the last `.mi.danger` item lost its colour, and the now-unused `.danger` rule was removed, so no menu entry shouts at you any more.
+
+## 2.0.2 — 2026-10-02
+
+**Ollama install helper + hardware-aware model recommendations**, plus UX polish for the chat panel's ⋯ menu.
+
+### Ollama — install button and hardware detection
+
+- **`Freekit: Install Ollama` (`freekit.installOllama`, `$(cloud-download)`)** — opens <https://ollama.com/download> in the external browser. If a binary is already present but the server is not running, the page is **not** opened: the command says to start it with `ollama serve`.
+- **Install row in the model menu** — when no `ollama` binary can be found, the **Local · Ollama** section of the model chip starts with *Install Ollama…*, and an *Install Ollama* entry shows up in the ⋯ menu (Context) **only** while Ollama is missing. Both send `install_ollama` to the Extension Host.
+- **Hardware detection** (new `src/hardware.ts`, pure Node — no `vscode` import) — RAM and CPU via `os`, VRAM via `nvidia-smi`, then Windows (`Win32_VideoController` + `HardwareInformation.qwMemorySize` from the registry — `AdapterRAM` is a 32-bit field capped at ~4 GB), then macOS (`system_profiler SPDisplaysDataType -json`), then Linux sysfs (`mem_info_vram_total`). Virtual adapters (RDP / streaming / virtual displays) are filtered out and the result is cached for the session.
+- **Recommended models in the model menu** — a catalog of Ollama models with their approximate Q4_K_M memory needs is filtered against ~70 % of the detected RAM, ranked largest-first, and each entry explains what will happen (*fits in 8 GB VRAM — runs on the GPU* / *partial GPU offload on 8 GB VRAM, the rest on the CPU* / *runs on the CPU*). Recommendations that are already installed are tagged **recommended** next to their disk size; the ones that are not become one-click **download** rows — `ollama pull` runs with live progress in the notification bar (cancellable) and the pulled model becomes the active one.
+- **Hardware line under the model list** — e.g. `Radeon RX 580 Series · 8 GB VRAM · 15.9 GB RAM`, with the full recommendation list and its reasons in the tooltip. `Freekit: Show Provider Status` now also prints the hardware summary, the CPU (threads) and the recommendations.
+
+### Chat panel ⋯ menu polish
+
+- **⋯ menu grouped into sections** — the flat list became four labelled groups (`.mh` header + `.sep`): **Context** (*Show Chrome*, *Open Browser*, *Stop dev servers*, *Provider status*), **Session** (*New chat*, the conversation list, *Delete conversation*), **Debug** (*Verbose logs*, *Diagnostics*, *MCP servers*, *Reset repaired selectors*) and **Settings** (*Settings*, then *Clear chat* in red).
+- **New menu actions** — *Open Browser* (`freekit.openBrowser`), *Stop dev servers* (`freekit.stopDevServers`) and *Reset repaired selectors* (`freekit.resetSelectors`) are now reachable from the ⋯ menu (they were previously only in the command palette / view title). *New chat* is also mirrored in the menu. Three new sprite icons (`i-globe`, `i-power`, `i-wrench`).
+- **Confirmation for destructive actions** — *Clear chat* and *Reset repaired selectors* no longer run on the first click: the Extension Host shows a **modal** warning (`Yes, clear` / `Reset`), and *Cancel* does nothing. The chat UI is cleared only after the confirmation arrives back in the webview (`cleared` message), and an in-flight response is stopped first.
+- **Stop button state** — the Stop button is now driven by an explicit `busy` message from the Extension Host (`1` while a response runs, `0` when it ends, plus a re-sync on webview reload), so it is hidden when nothing is generating. Rendering the final reply / stopped / error message now runs in a `try`/`finally`, so `busy` can never stay stuck if rendering the answer throws.
+
 ## 2.0.1 — 2026-10-02
 
 **UX redesign of the chat panel** (implementation of the Claude mockup): same features, new layout, plus inline file-change rows.

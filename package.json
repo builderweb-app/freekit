@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen, Kimi) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.0.1",
+  "version": "2.0.3",
   "publisher": "builderweb",
   "homepage": "https://builderweb.app/agent",
   "icon": "media/icon.png",
@@ -114,6 +114,11 @@
         "icon": "$(mic)"
       },
       {
+        "command": "freekit.installOllama",
+        "title": "Freekit: Install Ollama",
+        "icon": "$(cloud-download)"
+      },
+      {
         "command": "freekit.stopDevServers",
         "title": "Freekit: Stop Dev Servers",
         "icon": "$(debug-stop)"
@@ -134,70 +139,6 @@
         "icon": "$(trash)"
       }
     ],
-    "menus": {
-      "view/title": [
-        {
-          "command": "freekit.openBrowser",
-          "when": "view == freekit.chatView",
-          "group": "navigation"
-        },
-        {
-          "command": "freekit.closeBrowser",
-          "when": "view == freekit.chatView",
-          "group": "navigation"
-        },
-        {
-          "command": "freekit.resetSelectors",
-          "when": "view == freekit.chatView",
-          "group": "navigation"
-        },
-        {
-          "command": "freekit.diagnostics",
-          "when": "view == freekit.chatView",
-          "group": "navigation"
-        },
-        {
-          "command": "freekit.showChrome",
-          "when": "view == freekit.chatView",
-          "group": "navigation"
-        },
-        {
-          "command": "freekit.showProviderStatus",
-          "when": "view == freekit.chatView",
-          "group": "navigation"
-        },
-        {
-          "command": "freekit.clearNoAsk",
-          "when": "view == freekit.chatView",
-          "group": "navigation"
-        },
-        {
-          "command": "freekit.updateSelectors",
-          "when": "view == freekit.chatView",
-          "group": "navigation"
-        },
-        {
-          "command": "freekit.mcpManage",
-          "when": "view == freekit.chatView",
-          "group": "navigation"
-        },
-        {
-          "command": "freekit.stopDevServers",
-          "when": "view == freekit.chatView",
-          "group": "navigation"
-        },
-        {
-          "command": "freekit.indexWorkspace",
-          "when": "view == freekit.chatView",
-          "group": "navigation"
-        },
-        {
-          "command": "freekit.indexStatus",
-          "when": "view == freekit.chatView",
-          "group": "navigation"
-        }
-      ]
-    },
     "configuration": {
       "title": "Freekit",
       "properties": {
@@ -406,6 +347,7 @@
     "watch": "tsc -watch -p ./"
   },
   "dependencies": {
+    "@vscode/codicons": "^0.0.46-24",
     "node-audiorecorder": "^3.0.0",
     "playwright": "^1.48.0"
   },

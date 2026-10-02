@@ -21,7 +21,8 @@ import {
   semanticConfig,
   workspaceRoot
 } from './indexer';
-import { ollamaBaseUrl } from './providers/ollama';
+import { ollamaBaseUrl, OLLAMA_DOWNLOAD_URL } from './providers/ollama';
+import { getProviderStatus, ollamaInstallState } from './providers';
 
 /** v0.3.0 (P0.1): opțiunile browserului, citite live din setări. */
 function browserOptionsFromConfig(ctx: vscode.ExtensionContext) {
@@ -179,6 +180,34 @@ export async function activate(ctx: vscode.ExtensionContext) {
             );
           }
         }
+      );
+    })
+  );
+
+  // v2.0.2: „Install Ollama" — butonul care duce la pagina oficială de download.
+  // Dacă Ollama e deja prezent, nu mai deschidem pagina: spunem ce lipsește
+  // (serverul pornit cu „ollama serve").
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand('freekit.installOllama', async () => {
+      const state = ollamaInstallState(await getProviderStatus());
+      if (state === 'running') {
+        vscode.window.showInformationMessage(
+          'Freekit: Ollama is already running at ' + ollamaBaseUrl() + '.'
+        );
+        return;
+      }
+      if (state === 'installed') {
+        vscode.window.showInformationMessage(
+          'Freekit: Ollama is installed but not running — start the server with "ollama serve".'
+        );
+        return;
+      }
+      await vscode.env.openExternal(vscode.Uri.parse(OLLAMA_DOWNLOAD_URL));
+      vscode.window.showInformationMessage(
+        'Freekit: install Ollama from the page that just opened, then run "ollama serve".'
+      );
+      chatView.postNotice(
+        '🦙 Ollama is not installed — the download page was opened. After installing it, run "ollama serve".'
       );
     })
   );

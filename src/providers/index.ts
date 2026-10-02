@@ -4,7 +4,7 @@ import { DeepSeekProvider } from './deepseek';
 import { ChatGPTProvider } from './chatgpt';
 import { GeminiProvider } from './gemini';
 import { ClaudeProvider } from './claude';
-import { OllamaProvider, ollamaBaseUrl } from './ollama';
+import { OllamaProvider, ollamaBaseUrl, detectOllamaCli, listOllamaModelsDetailed } from './ollama';
 import { MistralProvider } from './mistral';
 import { QwenProvider } from './qwen';
 import { KimiProvider } from './kimi';
@@ -104,6 +104,23 @@ export interface ProviderStatusInfo {
   port: number;
   /** URL-ul Ollama configurat (freekit.ollamaUrl). */
   ollamaUrl: string;
+  /** v2.0.2: binarul `ollama` există pe mașină (chiar dacă serverul nu răspunde). */
+  ollamaCli: boolean;
+  /** v2.0.2: detaliile modelelor instalate (nume + dimensiune pe disc). */
+  ollamaModelDetails: Array<{ name: string; sizeBytes: number }>;
+}
+
+/**
+ * v2.0.2: starea instalării Ollama, pentru butonul „Install Ollama".
+ *  - `running`   — serverul răspunde (nimic de instalat);
+ *  - `installed` — binarul există, dar serverul nu rulează („ollama serve");
+ *  - `missing`   — nimic instalat → are sens pagina de download.
+ */
+export type OllamaInstallState = 'running' | 'installed' | 'missing';
+
+export function ollamaInstallState(info: ProviderStatusInfo): OllamaInstallState {
+  if (info.ollama) return 'running';
+  return info.ollamaCli ? 'installed' : 'missing';
 }
 
 /** Starea tuturor providerilor: browser (CDP), logare DeepSeek, Ollama + modele. */
@@ -121,6 +138,7 @@ export async function getProviderStatus(): Promise<ProviderStatusInfo> {
 
   let deepseekLoggedIn = false;
   let ollamaModels: string[] = [];
+  let ollamaModelDetails: ProviderStatusInfo['ollamaModelDetails'] = [];
 
   if (browser) {
     try {
@@ -138,14 +156,22 @@ export async function getProviderStatus(): Promise<ProviderStatusInfo> {
   }
 
   if (ollama) {
-    try {
-      const res = await fetch(`${ollamaUrl}/api/tags`);
-      const data = (await res.json()) as any;
-      ollamaModels = (data.models || []).map((m: any) => m.name);
-    } catch {
-      /* ignoră */
-    }
+    ollamaModelDetails = await listOllamaModelsDetailed();
+    ollamaModels = ollamaModelDetails.map((m) => m.name);
   }
 
-  return { browser, ollama, deepseekLoggedIn, ollamaModels, port, ollamaUrl };
+  // v2.0.2: binarul poate exista chiar dacă serverul nu rulează (deci „Install"
+  // nu mai are sens, dar „start ollama serve" da) — proba e cache-uită 60 s.
+  const ollamaCli = await detectOllamaCli();
+
+  return {
+    browser,
+    ollama,
+    deepseekLoggedIn,
+    ollamaModels,
+    port,
+    ollamaUrl,
+    ollamaCli,
+    ollamaModelDetails
+  };
 }

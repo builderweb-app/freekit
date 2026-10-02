@@ -39,11 +39,20 @@ const verboseBtn = document.getElementById('mVerbose');
 const diagBtn = document.getElementById('mDiagnostics');
 const mcpBtn = document.getElementById('mMcp');
 const settingsBtn = document.getElementById('mSettings');
+// v2.0.2: meniul „⋯" grupat pe secțiuni — acțiuni noi (Context / Session / Debug)
+const openBrowserBtn = document.getElementById('mOpenBrowser');
+const stopDevBtn = document.getElementById('mStopDev');
+const resetSelBtn = document.getElementById('mResetSelectors');
+const newChatBtn = document.getElementById('mNew');
 // v2.0.1: chip-ul de model (înlocuiește vechiul <select id="provider">)
 const modelLabel = document.getElementById('modelLabel');
 const modelDot = document.getElementById('modelDot');
 const modelBrowserEl = document.getElementById('model-browser');
 const modelLocalEl = document.getElementById('model-local');
+// v2.0.2: hardware detectat (VRAM/RAM) afișat sub lista de modele locale
+const modelHwEl = document.getElementById('model-hw');
+// v2.0.2: „Install Ollama" din meniul „⋯" (vizibil doar când Ollama lipsește)
+const installOllamaBtn = document.getElementById('mInstallOllama');
 // v2.0.1: chip-ul de „thinking level"
 const thinkLabel = document.getElementById('thinkLabel');
 // FIX v0.1.1: două butoane separate (fișiere / foldere)
@@ -54,7 +63,9 @@ const micBtn = document.getElementById('mic-btn');
 // v1.9.0: conversațiile (lista din meniul „⋯")
 const convListEl = document.getElementById('conv-list');
 const convNewBtn = document.getElementById('conv-new');
-const convDelBtn = document.getElementById('conv-delete');
+// v2.0.3: ștergerea a trecut din meniul „⋯" în meniul contextual (dreapta-click)
+const convCtxMenu = document.getElementById('convCtxMenu');
+const convCtxDelete = document.getElementById('convCtxDelete');
 const attsEl = document.getElementById('attachments');
 const inputArea = document.getElementById('input-area');
 
@@ -129,6 +140,7 @@ function convLabel(c) {
 }
 
 // v2.0.1: conversațiile sunt o listă radio în meniul „⋯" (nu mai există <select>).
+// v2.0.3: dreapta-click pe un rând deschide meniul contextual (Delete conversation).
 function setConversations(items, activeId) {
   if (!convListEl) return;
   convListEl.innerHTML = '';
@@ -146,17 +158,21 @@ function setConversations(items, activeId) {
     mi.className = 'mi';
     mi.setAttribute('role', 'menuitemradio');
     mi.setAttribute('aria-checked', String(c.id === activeId));
-    mi.innerHTML =
-      '<svg class="ic sm ck"><use href="#i-check"/></svg><span class="lbl"></span>';
+    mi.innerHTML = '<i class="codicon codicon-check ck"></i><span class="lbl"></span>';
     const lbl = mi.querySelector('.lbl');
     lbl.textContent = convLabel(c);
     lbl.title =
       (c.title || 'Conversation') +
-      (typeof c.count === 'number' ? ' (' + c.count + ' messages)' : '');
+      (typeof c.count === 'number' ? ' (' + c.count + ' messages)' : '') +
+      ' — right-click to delete';
     mi.onclick = () => {
       closeAllMenus();
       vscode.postMessage({ type: 'switch_conversation', id: c.id });
     };
+    mi.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      openConvCtxMenu(e.clientX, e.clientY, c.id);
+    });
     convListEl.appendChild(mi);
   }
 }
@@ -165,8 +181,26 @@ convNewBtn?.addEventListener('click', () => {
   vscode.postMessage({ type: 'new_conversation' });
 });
 
-convDelBtn?.addEventListener('click', () => {
-  vscode.postMessage({ type: 'delete_conversation' });
+// v2.0.3: meniul contextual al conversațiilor
+let ctxConvId = '';
+
+function openConvCtxMenu(x, y, convId) {
+  if (!convCtxMenu) return;
+  ctxConvId = convId;
+  closeAllMenus(convCtxMenu);
+  convCtxMenu.classList.add('open');
+  const rect = convCtxMenu.getBoundingClientRect();
+  convCtxMenu.style.left =
+    Math.max(4, Math.min(x, window.innerWidth - rect.width - 4)) + 'px';
+  convCtxMenu.style.top =
+    Math.max(4, Math.min(y, window.innerHeight - rect.height - 4)) + 'px';
+}
+
+convCtxMenu?.addEventListener('contextmenu', (e) => e.preventDefault());
+
+convCtxDelete?.addEventListener('click', () => {
+  closeAllMenus();
+  vscode.postMessage({ type: 'delete_conversation', id: ctxConvId || undefined });
 });
 
 // ===== Iconițe + timp (FAZA F) =====
@@ -1157,9 +1191,14 @@ stopBtn.addEventListener('click', () => {
 });
 
 // ===== Clear =====
-clearBtn.addEventListener('click', () => {
-  if (busy) vscode.postMessage({ type: 'stop' });
-  vscode.postMessage({ type: 'clear' });
+// v2.0.2: nu se mai golește la primul click — Extension Host-ul cere confirmare
+// (modal) și trimite înapoi „cleared" doar dacă utilizatorul confirmă.
+clearBtn?.addEventListener('click', () => {
+  vscode.postMessage({ type: 'confirm_clear' });
+});
+
+/** v2.0.2: golește UI-ul chatului (după confirmarea din Extension Host). */
+function resetChatUi() {
   stopSpeaking(); // v1.5.0
   if (sttState === 'recording' || sttState === 'starting') stopDictation(); // v1.6.0/v1.7.3
   messages.innerHTML = '';
@@ -1169,7 +1208,7 @@ clearBtn.addEventListener('click', () => {
   setBusy(false);
   stick = true;
   jumpBtn.hidden = true;
-});
+}
 
 // ===== v2.0.1: punctul colorat de pe chip-ul de model =====
 // (înlocuiește vechiul badge emoji 🟢🟡🔴 din toolbar)
@@ -1206,6 +1245,31 @@ mcpBtn?.addEventListener('click', () => {
 
 settingsBtn?.addEventListener('click', () => {
   vscode.postMessage({ type: 'open_settings' });
+});
+
+// v2.0.2: acțiunile noi din meniul „⋯" grupat pe secțiuni
+openBrowserBtn?.addEventListener('click', () => {
+  vscode.postMessage({ type: 'open_browser' });
+});
+
+stopDevBtn?.addEventListener('click', () => {
+  vscode.postMessage({ type: 'stop_dev_servers' });
+});
+
+// Reset repaired selectors — periculos, cere confirmare modală în host
+resetSelBtn?.addEventListener('click', () => {
+  vscode.postMessage({ type: 'reset_selectors' });
+});
+
+// „New chat" din meniu (același flux ca butonul „+" din header)
+newChatBtn?.addEventListener('click', () => {
+  vscode.postMessage({ type: 'new_conversation' });
+});
+
+// „Install Ollama" (vizibil doar când Ollama nu e instalat) — deschide pagina
+// oficială de download în browserul extern
+installOllamaBtn?.addEventListener('click', () => {
+  vscode.postMessage({ type: 'install_ollama' });
 });
 
 // reîmprospătează periodic starea (port CDP / Ollama se pot schimba oricând)
@@ -1428,12 +1492,23 @@ function setModelDot(dot) {
   modelDot.className = 'dot' + (dot ? ' ' + dot : '');
 }
 
-function renderProviderMenu(providers) {
+function renderProviderMenu(providers, payload) {
   if (!modelBrowserEl || !modelLocalEl) return;
+  const ollama = (payload && payload.ollama) || {};
   modelBrowserEl.innerHTML = '';
   modelLocalEl.innerHTML = '';
   let activeLabel = '';
   let activeDot = '';
+
+  // v2.0.2: Ollama lipsește complet → rând de instalare; instalat dar oprit → notă
+  if (ollama.state === 'missing') {
+    modelLocalEl.appendChild(ollamaInstallRow());
+  } else if (ollama.state === 'installed') {
+    modelLocalEl.appendChild(
+      ollamaNote('Installed, but the server is not running — start it with "ollama serve".')
+    );
+  }
+
   for (const p of providers || []) {
     const item = document.createElement('button');
     item.type = 'button';
@@ -1441,11 +1516,17 @@ function renderProviderMenu(providers) {
     item.setAttribute('role', 'menuitemradio');
     item.setAttribute('aria-checked', String(!!p.active));
     item.innerHTML =
-      '<svg class="ic sm ck"><use href="#i-check"/></svg><span class="lbl"></span>' +
+      '<i class="codicon codicon-check ck"></i><span class="lbl"></span>' +
       (p.sub ? '<span class="sub"></span>' : '');
     item.querySelector('.lbl').textContent = p.label || p.id;
     if (p.sub) item.querySelector('.sub').textContent = p.sub;
     item.addEventListener('click', () => {
+      // v2.0.2: rândurile „download" nu selectează modelul, îl descarcă
+      if (p.missing) {
+        closeAllMenus();
+        vscode.postMessage({ type: 'pull_model', modelId: p.modelId });
+        return;
+      }
       for (const mi of Array.from(document.querySelectorAll('#menuModel .mi'))) {
         mi.setAttribute('aria-checked', String(mi === item));
       }
@@ -1464,8 +1545,49 @@ function renderProviderMenu(providers) {
     }
     (p.group === 'local' ? modelLocalEl : modelBrowserEl).appendChild(item);
   }
+
+  // v2.0.2: hardware-ul detectat, sub lista de modele locale
+  if (modelHwEl) {
+    const hw = payload && payload.hardware;
+    if (hw && hw.summary) {
+      modelHwEl.textContent = hw.summary;
+      const recs = (payload.recommendations || [])
+        .map((r) => '• ' + r.id + ' (' + r.size + ', ~' + r.needGb + ' GB) — ' + r.why)
+        .join('\n');
+      modelHwEl.title = recs
+        ? 'Recommended for this machine:\n' + recs
+        : 'No local model recommendation available.';
+      modelHwEl.hidden = false;
+    } else {
+      modelHwEl.hidden = true;
+    }
+  }
+
   if (activeLabel && modelLabel) modelLabel.textContent = activeLabel;
   if (activeDot) setModelDot(activeDot);
+}
+
+/** v2.0.2: rândul „Install Ollama" din meniul de model. */
+function ollamaInstallRow() {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'mi plain';
+  btn.setAttribute('role', 'menuitem');
+  btn.innerHTML =
+    '<i class="codicon codicon-cloud-download"></i><span class="lbl">Install Ollama…</span>';
+  btn.addEventListener('click', () => {
+    closeAllMenus();
+    vscode.postMessage({ type: 'install_ollama' });
+  });
+  return btn;
+}
+
+/** v2.0.2: notă ne-interactivă în meniu (`.mnote`). */
+function ollamaNote(text) {
+  const div = document.createElement('div');
+  div.className = 'mnote';
+  div.textContent = text;
+  return div;
 }
 
 // ===== v2.0.1: chip-ul de „thinking level" =====
@@ -1578,25 +1700,38 @@ window.addEventListener('message', (event) => {
   const msg = event.data;
 
   if (msg.type === 'reply') {
-    if (pendingEl) {
-      pendingEl.classList.remove('streaming');
-      renderMarkdown(pendingEl, msg.text || '(empty)');
-      addCopyButton(pendingEl, msg.text || '');
-      addSpeakButton(pendingEl, msg.text || ''); // v1.5.0
+    try {
+      if (pendingEl) {
+        pendingEl.classList.remove('streaming');
+        renderMarkdown(pendingEl, msg.text || '(empty)');
+        addCopyButton(pendingEl, msg.text || '');
+        addSpeakButton(pendingEl, msg.text || ''); // v1.5.0
+      }
+    } finally {
+      // v2.0.2: Stop rămâne ascuns chiar dacă randarea răspunsului eșuează
+      pendingEl = null;
+      setBusy(false);
+      if (!stick) jumpBtn.hidden = false;
     }
-    pendingEl = null;
-    setBusy(false);
-    if (!stick) jumpBtn.hidden = false;
   } else if (msg.type === 'stopped') {
-    if (pendingEl) setPendingText(msg.text || '(stopped)');
-    pendingEl = null;
-    setBusy(false);
-    if (!stick) jumpBtn.hidden = false;
+    try {
+      if (pendingEl) setPendingText(msg.text || '(stopped)');
+    } finally {
+      pendingEl = null;
+      setBusy(false);
+      if (!stick) jumpBtn.hidden = false;
+    }
   } else if (msg.type === 'error') {
-    if (pendingEl) setPendingText('⚠️ ' + msg.text);
-    pendingEl = null;
-    setBusy(false);
-    if (!stick) jumpBtn.hidden = false;
+    try {
+      if (pendingEl) setPendingText('⚠️ ' + msg.text);
+    } finally {
+      pendingEl = null;
+      setBusy(false);
+      if (!stick) jumpBtn.hidden = false;
+    }
+  } else if (msg.type === 'cleared') {
+    // v2.0.2: confirmarea din host a trecut — abia acum golim UI-ul
+    resetChatUi();
   } else if (msg.type === 'status') {
     if (pendingEl) setPendingText(msg.text);
     keepBottom();
@@ -1652,13 +1787,20 @@ window.addEventListener('message', (event) => {
     keepBottom();
   } else if (msg.type === 'provider_status') {
     setStatusBadge(msg.color, msg.title);
+  } else if (msg.type === 'busy') {
+    // v2.0.2: starea reală de generare din Extension Host — sursa de adevăr
+    // pentru butonul Stop (vizibil doar cât timp rulează un răspuns).
+    const on = msg.text === '1';
+    if (on !== busy) setBusy(on);
   } else if (msg.type === 'history') {
     renderHistory(msg.items);
   } else if (msg.type === 'provider') {
     // v2.0.1: chip-ul de model e actualizat de `providers_list` (nu mai există <select>)
   } else if (msg.type === 'providers_list') {
     // v2.0.1: meniul chip-ului de model (browser + Ollama local)
-    renderProviderMenu(msg.providers);
+    // v2.0.2: + hardware detectat, recomandări și starea instalării Ollama
+    renderProviderMenu(msg.providers, msg);
+    if (installOllamaBtn) installOllamaBtn.hidden = (msg.ollama || {}).state !== 'missing';
   } else if (msg.type === 'thinking_level') {
     // v2.0.1: nivelul de thinking salvat de extensie
     setThinkingUi(msg.value);

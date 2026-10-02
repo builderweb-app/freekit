@@ -962,8 +962,50 @@ pre.code code {
   display: none;
 }
 
-.mi.danger {
-  color: var(--vscode-charts-red, #f14c4c);
+/* `.mi { display: flex }` bate regula UA pentru [hidden] → o repunem explicit */
+.mi[hidden] {
+  display: none;
+}
+
+/* v2.0.3: iconițele din meniuri sunt CODNICONS (@vscode/codicons), nu SVG-uri */
+.mi .codicon {
+  flex: none;
+  font-size: 16px;
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  color: inherit;
+}
+
+/* bifa din meniurile radio (thinking level / model / conversații) */
+.mi .codicon.ck {
+  font-size: 12px;
+  width: 12px;
+  height: 12px;
+  line-height: 12px;
+}
+
+/* v2.0.3: meniul contextual (dreapta-click pe o conversație) — poziționat la cursor */
+.menu.ctx {
+  position: fixed;
+  z-index: 40;
+  min-width: 190px;
+}
+
+/* v2.0.2: notă ne-interactivă în meniul de model (starea Ollama / hardware) */
+.mnote {
+  padding: 4px 8px 6px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--vscode-descriptionForeground);
+  white-space: normal;
+}
+
+#model-hw {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--vscode-widget-border, #454545);
 }
 
 #conv-list .mi .lbl {

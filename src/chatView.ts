@@ -729,7 +729,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    // FIX v0.1.1: două butoane separate — 📎 fișiere / 📁 foldere.
+    // FIX v0.1.1: două butoane separate — fișiere / foldere.
     // Pe Windows, canSelectFiles + canSelectFolders simultan afișa doar un tip.
     if (msg.type === 'pick_files') {
       if (this.abortController) return; // ocupat cu un răspuns
@@ -800,7 +800,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         type: 'history',
         items: this.activeHistoryItems()
       });
-      // v1.4.0: checkpoint-urile git (butoanele ⟲ din istoric)
+      // v1.4.0: checkpoint-urile git (butoanele de restore din istoric)
       this.view?.webview.postMessage({
         type: 'checkpoints',
         items: this.checkpoints
@@ -831,7 +831,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    // v0.4.0: butonul 👁 din toolbar — aduce fereastra Chrome în față
+    // v0.4.0: butonul Show Chrome din toolbar — aduce fereastra Chrome în față
     if (msg.type === 'show_chrome') {
       await this.showChrome();
       return;
@@ -849,13 +849,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    // v1.4.0: restore la checkpoint-ul de dinaintea unui prompt (butonul ⟲)
+    // v1.4.0: restore la checkpoint-ul de dinaintea unui prompt (butonul de restore)
     if (msg.type === 'restore_checkpoint') {
       await this.handleRestoreCheckpoint(String(msg.messageId ?? ''));
       return;
     }
 
-    // v1.9.0: edit prompt (✐), fork (ᛉ) și conversațiile multiple (dropdown)
+    // v1.9.0: edit prompt, fork și conversațiile multiple (dropdown)
     if (msg.type === 'edit_prompt') {
       await this.handleEditPrompt(
         String(msg.messageId ?? ''),
@@ -1844,7 +1844,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!this.checkpointsEnabled()) return;
     try {
       const cp = await createPromptCheckpoint(root, messageId, promptText, {
-        // v1.5.0: folder fără git → `git init` automat, ca butonul ⟲ de
+        // v1.5.0: folder fără git → `git init` automat, ca butonul de
         // restore să apară întotdeauna (înainte: fail tăcut, fără buton)
         autoInit: this.autoInitGitEnabled()
       });
@@ -2811,38 +2811,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <input type="checkbox" id="auto-approve"/>
     <span>⚡ Auto</span>
   </label>
-  <button id="verbose-toggle" title="Verbose mode: shows every AI step in the chat (Thinking / Executing / Result / Decision)">🔍</button>
+  <button id="verbose-toggle" title="Verbose mode: shows every AI step in the chat (Thinking / Executing / Result / Decision)"></button>
   <button id="stop" title="Stop the response" hidden>
-    <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></svg>
+    <svg viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></svg>
   </button>
-  <button id="show-chrome" title="Show the Chrome window (web providers)">
-    <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" d="M8 4C4.9 4 2.4 5.8 1.2 8c1.2 2.2 3.7 4 6.8 4s5.6-1.8 6.8-4C13.6 5.8 11.1 4 8 4Zm0 6.8C6.3 10.8 4.7 9.6 3.8 8c.9-1.6 2.5-2.8 4.2-2.8 1.7 0 3.3 1.2 4.2 2.8-.9 1.6-2.5 2.8-4.2 2.8Z"/><circle cx="8" cy="8" r="1.5"/></svg>
-  </button>
-  <button id="clear" title="Clear the chat">
-    <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M6.5 1h3a.5.5 0 0 1 .5.5V2h3.5a.5.5 0 0 1 0 1H14v9.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12.5V3h.5a.5.5 0 0 1 0-1H6v-.5a.5.5 0 0 1 .5-.5ZM3 3v9.5a.5.5 0 0 0 .5.5h9a.5.5 0 0 0 .5-.5V3H3Zm3.5 2a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5Zm3 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5Z"/></svg>
-  </button>
+  <button id="show-chrome" title="Show the Chrome window (web providers)"></button>
+  <button id="clear" title="Clear the chat"></button>
 </div>
 <div id="conv-bar">
   <select id="conversation" title="Conversations — switch between them (old ones stay in the list)"></select>
-  <button id="conv-new" title="New conversation (the current one stays in the list)">➕</button>
-  <button id="conv-delete" title="Delete the current conversation from the list">🗑️</button>
+  <button id="conv-new" title="New conversation (the current one stays in the list)"></button>
+  <button id="conv-delete" title="Delete the current conversation from the list"></button>
 </div>
 <div id="messages"></div>
 <button id="jump" title="Jump to the latest" hidden>
-  <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M8.53 13.03a.75.75 0 0 1-1.06 0l-5-5a.75.75 0 1 1 1.06-1.06L7.25 10.69V3.75a.75.75 0 0 1 1.5 0v6.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-5 5Z"/></svg>
+  <svg viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M8.53 13.03a.75.75 0 0 1-1.06 0l-5-5a.75.75 0 1 1 1.06-1.06L7.25 10.69V3.75a.75.75 0 0 1 1.5 0v6.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-5 5Z"/></svg>
 </button>
 <div id="input-area">
   <div id="attachments" hidden></div>
   <div id="input-wrapper">
     <textarea id="input" rows="1" placeholder="Type a message..."></textarea>
-    <button id="attach-file" title="Attach files">📎</button>
-    <button id="attach-folder" title="Attach folders">📁</button>
-    <button id="mic-btn" title="Speak (capture runs in the extension + local Whisper)">🎤</button>
-    <button id="send" title="Send (Enter)">
-      <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
-        <path d="M15.854.146a.5.5 0 0 1 .11.54l-5.819 14.547a.75.75 0 0 1-1.329.124l-3.178-4.995L.643 7.184a.75.75 0 0 1 .124-1.33L15.314.037a.5.5 0 0 1 .54.11ZM6.636 10.07l2.761 4.338L14.13 2.576 6.636 10.07Zm6.787-8.201L1.591 6.602l4.339 2.76 7.494-7.493Z"/>
-      </svg>
-    </button>
+    <button id="attach-file" title="Attach files"></button>
+    <button id="attach-folder" title="Attach folders"></button>
+    <button id="mic-btn" title="Speak (capture runs in the extension + local Whisper)"></button>
+    <button id="send" title="Send (Enter)"></button>
   </div>
 </div>
 <script src="${markedUri}"></script>

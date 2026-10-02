@@ -16,6 +16,7 @@ import {
   isLongRunningScript,
   startDevServer
 } from './devServers';
+import { formatSearchResults, isSemanticEnabled } from './indexer';
 
 // Pending approvals: id -> resolver
 export const pendingApprovals = new Map<string, (ok: boolean) => void>();
@@ -419,6 +420,7 @@ Tools:
 9. read_files(paths) — batch read: up to 12 files in ONE call
 10. write_files(files) — array of {"path": "...", "content": "..."}; ONE call for ALL files
 11. project_info()
+12. search_semantic(query) — find code by MEANING (e.g. "where do we validate login"); works only if the workspace was indexed (command "AI Bridge: Index Workspace")
 
 For git you may also use the short names "git_status", "git_diff", "git_log", "git_commit", "git_branch", "git_revert".
 
@@ -623,6 +625,9 @@ export async function executeTool(
 
       case 'project_info':
         return await projectInfoTool(workspaceRoot);
+
+      case 'search_semantic':
+        return await searchSemanticTool(call.args?.query, workspaceRoot);
 
       default:
         return { ok: false, error: 'Unknown tool: ' + call.tool };
@@ -1056,6 +1061,38 @@ async function runNpmTool(
 async function projectInfoTool(root: string): Promise<ToolResult> {
   const info = await detectProject(root);
   return { ok: true, result: formatProjectInfo(info) };
+}
+
+/* =========================================================================
+ * v1.10.0 — search_semantic: căutare de cod după SENS
+ * Folosește indexul semantic local (embeddings Ollama, vezi src/indexer).
+ * E read-only (fără aprobare). Dacă indexul lipsește, întoarce un mesaj clar
+ * care îi spune AI-ului să ruleze comanda „AI Bridge: Index Workspace".
+ * ========================================================================= */
+
+async function searchSemanticTool(
+  query: unknown,
+  root: string
+): Promise<ToolResult> {
+  const q = String(query ?? '').trim();
+  if (!q) {
+    return {
+      ok: false,
+      error: 'search_semantic requires a non-empty "query" argument.'
+    };
+  }
+  if (!isSemanticEnabled()) {
+    return {
+      ok: false,
+      error:
+        'Semantic search is disabled (setting aiBridge.semanticIndex.enabled). Use search_files instead.'
+    };
+  }
+  const text = await formatSearchResults(root, q);
+  if (text.startsWith('Semantic search error:')) {
+    return { ok: false, error: text };
+  }
+  return { ok: true, result: text };
 }
 
 /* =========================================================================

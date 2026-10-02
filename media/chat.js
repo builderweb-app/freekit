@@ -1,4 +1,29 @@
 const vscode = acquireVsCodeApi();
+
+// v1.9.2: iconițe SVG monochrome (design Claude) — moștenesc culoarea din CSS
+// prin `fill="currentColor"` (alb pe temă dark, negru pe temă light)
+const ICONS = {
+  attachFile: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M3 1h6l4 4v10H3zM4 2v12h8V5.4L8.6 2zM7.5 7.5h1v2h2v1h-2v2h-1v-2h-2v-1h2z"/></svg>`,
+  attachFolder: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M1 3h5l1.5 1.5H15V14H1zM2 4v9h12V5.5H7.1L5.6 4zM7.5 7h1v2h2v1h-2v2h-1v-2h-2V9h2z"/></svg>`,
+  microphone: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M8 1a2 2 0 0 0-2 2v5a2 2 0 0 0 4 0V3a2 2 0 0 0-2-2zM4 7h1v1a3 3 0 0 0 6 0V7h1v1a4 4 0 0 1-3.5 3.96V14H10v1H6v-1h1.5v-2.04A4 4 0 0 1 4 8z"/></svg>`,
+  editPrompt: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M11.3 1.7l3 3-8.8 8.8-4 1 1-4zM3.6 11.3l-.5 1.6 1.6-.5 7.9-7.9-1.1-1.1z"/></svg>`,
+  forkConversation: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M2 3a2 2 0 1 0 4 0 2 2 0 1 0-4 0zM3 3a1 1 0 1 0 2 0 1 1 0 1 0-2 0zM2 13a2 2 0 1 0 4 0 2 2 0 1 0-4 0zM3 13a1 1 0 1 0 2 0 1 1 0 1 0-2 0zM10 5a2 2 0 1 0 4 0 2 2 0 1 0-4 0zM11 5a1 1 0 1 0 2 0 1 1 0 1 0-2 0zM3.5 5h1v6h-1zM11 7h1v1a3 3 0 0 1-3 3H4.5v-1H9a2 2 0 0 0 2-2z"/></svg>`,
+  restoreCheckpoint: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M1 5.5L4.5 2v7zM4.5 5h5a3.5 3.5 0 0 1 0 7H5v-1h4.5a2.5 2.5 0 0 0 0-5h-5z"/></svg>`,
+  readAloud: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M2 6h2.5L8 3v10l-3.5-3H2zM10.83 5.17a4 4 0 0 1 0 5.66l-.71-.71a3 3 0 0 0 0-4.24zM12.6 3.4a6.5 6.5 0 0 1 0 9.2l-.71-.71a5.5 5.5 0 0 0 0-7.78z"/></svg>`,
+  copy: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M6 5h8v10H6zM7 6v8h6V6zM2 1h8v3H9V2H3v9h3v1H2z"/></svg>`,
+  send: `<svg viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 1.8L14.7 8 1.5 14.2l1.7-5.4L9 8 3.2 7.2z"/></svg>`,
+  clear: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M6 1h4v2H6zM2 3h12v1H2zM3 5h10v10H3zM4 6v8h8V6zM6 8h1v4H6zM9 8h1v4H9z"/></svg>`,
+  showChrome: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M8 3C4.5 3 2 6 1 8c1 2 3.5 5 7 5s6-3 7-5c-1-2-3.5-5-7-5zM8 4c2.8 0 4.8 2.3 5.8 4-1 1.7-3 4-5.8 4-2.8 0-4.8-2.3-5.8-4 1-1.7 3-4 5.8-4zM8 6a2 2 0 1 0 0 4 2 2 0 1 0 0-4z"/></svg>`,
+  newConversation: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M2 2h12v9H8l-3 3v-3H2zM3 3v7h3v1.6L7.6 10H13V3zM7.5 4h1v2h2v1h-2v2h-1V7h-2V6h2z"/></svg>`,
+  conversationsList: `<svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 3h2v2H2zM6 3.5h8v1H6zM2 7h2v2H2zM6 7.5h8v1H6zM2 11h2v2H2zM6 11.5h8v1H6z"/></svg>`,
+  verboseMode: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M1 2h14v12H1zM2 3v10h12V3zM3.7 5.4l.7-.7L7.7 8l-3.3 3.3-.7-.7L6.3 8zM8.5 10h3v1h-3z"/></svg>`,
+  settings: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M9.2 3.15A5 5 0 0 1 10.58 3.72L12.1 2.2 13.8 3.9 12.28 5.42A5 5 0 0 1 12.85 6.8H15v2.4h-2.15A5 5 0 0 1 12.28 10.58L13.8 12.1 12.1 13.8 10.58 12.28A5 5 0 0 1 9.2 12.85V15H6.8v-2.15A5 5 0 0 1 5.42 12.28L3.9 13.8 2.2 12.1 3.72 10.58A5 5 0 0 1 3.15 9.2H1V6.8h2.15A5 5 0 0 1 3.72 5.42L2.2 3.9 3.9 2.2 5.42 3.72A5 5 0 0 1 6.8 3.15V1h2.4zM8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 1 0 0-5z"/></svg>`
+};
+
+// starea „oprit" (dictare / citire cu voce tare) — nu are corespondent în ICONS
+const ICON_STOP =
+  '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></svg>';
+
 const messages = document.getElementById('messages');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
@@ -6,15 +31,15 @@ const stopBtn = document.getElementById('stop');
 const clearBtn = document.getElementById('clear');
 const providerSel = document.getElementById('provider');
 const jumpBtn = document.getElementById('jump');
-// v0.4.0: badge de status + butonul 👁 (Show Chrome)
+// v0.4.0: badge de status + butonul Show Chrome
 const statusBadge = document.getElementById('status-badge');
 const showChromeBtn = document.getElementById('show-chrome');
 // FIX v0.1.1: două butoane separate (fișiere / foldere)
 const attachFileBtn = document.getElementById('attach-file');
 const attachFolderBtn = document.getElementById('attach-folder');
-// v1.6.0: butonul 🎤 de voice input
+// v1.6.0: butonul de voice input
 const micBtn = document.getElementById('mic-btn');
-// v1.7.1: butonul 🔍 Verbose mode
+// v1.7.1: butonul Verbose mode
 const verboseBtn = document.getElementById('verbose-toggle');
 // v1.9.0: bara conversațiilor (dropdown + conversație nouă + șterge)
 const convSel = document.getElementById('conversation');
@@ -22,6 +47,22 @@ const convNewBtn = document.getElementById('conv-new');
 const convDelBtn = document.getElementById('conv-delete');
 const attsEl = document.getElementById('attachments');
 const inputArea = document.getElementById('input-area');
+
+// v1.9.2: toate butoanele din HTML își primesc pictograma SVG din ICONS
+// (sursă unică — HTML-ul nu mai conține nici emoji, nici SVG inline)
+function applyStaticIcons() {
+  if (verboseBtn) verboseBtn.innerHTML = ICONS.verboseMode;
+  if (showChromeBtn) showChromeBtn.innerHTML = ICONS.showChrome;
+  if (clearBtn) clearBtn.innerHTML = ICONS.clear;
+  if (convNewBtn) convNewBtn.innerHTML = ICONS.newConversation;
+  if (convDelBtn) convDelBtn.innerHTML = ICONS.clear;
+  if (attachFileBtn) attachFileBtn.innerHTML = ICONS.attachFile;
+  if (attachFolderBtn) attachFolderBtn.innerHTML = ICONS.attachFolder;
+  if (micBtn) micBtn.innerHTML = ICONS.microphone;
+  if (sendBtn) sendBtn.innerHTML = ICONS.send;
+}
+
+applyStaticIcons();
 
 // ===== v0.2.1: Auto-approve toggle =====
 const autoApproveCb = document.getElementById('auto-approve');
@@ -132,13 +173,11 @@ convDelBtn?.addEventListener('click', () => {
 
 // ===== Iconițe + timp (FAZA F) =====
 const ICON_USER =
-  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 7.5a2.75 2.75 0 1 0 0-5.5 2.75 2.75 0 0 0 0 5.5ZM2.5 14a5.5 5.5 0 0 1 11 0v.5h-11V14Z"/></svg>';
+  '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 7.5a2.75 2.75 0 1 0 0-5.5 2.75 2.75 0 0 0 0 5.5ZM2.5 14a5.5 5.5 0 0 1 11 0v.5h-11V14Z"/></svg>';
 const ICON_AI =
-  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1l1.8 4.7L14.5 7.5l-4.7 1.8L8 14l-1.8-4.7L1.5 7.5l4.7-1.8L8 1Z"/></svg>';
-const ICON_COPY =
-  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4V3a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-1v1a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h1Zm1 1h5a1 1 0 0 1 1 1v5h1V3H5v2Zm-1 2v6h6V7H4Z"/></svg>';
+  '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1l1.8 4.7L14.5 7.5l-4.7 1.8L8 14l-1.8-4.7L1.5 7.5l4.7-1.8L8 1Z"/></svg>';
 const ICON_CHECK =
-  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></svg>';
+  '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></svg>';
 
 // ===== FAZA II (A): atașamente (chip-uri) =====
 const KIND_ICON = { text: '📄', image: '🖼️', folder: '📁', binary: '📦' };
@@ -243,7 +282,7 @@ function msgBody(el) {
 function add(role, text, ts, atts, msgId) {
   const wrap = document.createElement('div');
   wrap.className = 'msg ' + role;
-  // v1.5.0: id-ul mesajului se leagă din prima clipă (checkpoint → buton ⟲)
+  // v1.5.0: id-ul mesajului se leagă din prima clipă (checkpoint → butonul de restore)
   if (msgId) wrap.dataset.msgId = msgId;
   wrap.appendChild(makeHead(role, ts));
 
@@ -426,14 +465,14 @@ function addCopyButton(el, rawText) {
   const btn = document.createElement('button');
   btn.className = 'copy-btn';
   btn.title = 'Copy response';
-  btn.innerHTML = ICON_COPY;
+  btn.innerHTML = ICONS.copy;
   btn.onclick = () => {
     vscode.postMessage({ type: 'copy', text: rawText });
     btn.classList.add('copied');
     btn.innerHTML = ICON_CHECK;
     setTimeout(() => {
       btn.classList.remove('copied');
-      btn.innerHTML = ICON_COPY;
+      btn.innerHTML = ICONS.copy;
     }, 1500);
   };
   head.appendChild(btn);
@@ -501,7 +540,7 @@ let speaking = null; // { el, btn, token }
 function resetSpeakBtn(btn) {
   if (!btn) return;
   btn.classList.remove('speaking');
-  btn.textContent = '🔊';
+  btn.innerHTML = ICONS.readAloud;
   btn.title = 'Read the response aloud';
 }
 
@@ -532,7 +571,7 @@ function speakEl(el, btn) {
   const token = {};
   speaking = { el, btn, token };
   btn.classList.add('speaking');
-  btn.textContent = '⏹';
+  btn.innerHTML = ICON_STOP;
   btn.title = 'Stop reading';
 
   const voice = pickSpeechVoice();
@@ -567,7 +606,7 @@ function addSpeakButton(el, rawText) {
   rawTexts.set(el, rawText);
   const btn = document.createElement('button');
   btn.className = 'speak-btn';
-  btn.textContent = '🔊';
+  btn.innerHTML = ICONS.readAloud;
   btn.title = 'Read the response aloud';
   btn.onclick = () => speakEl(el, btn);
   // înaintea butonului Copy (care are margin-left:auto) — rămân lipite la dreapta
@@ -593,15 +632,15 @@ function fmtRecTime(sec) {
 }
 
 function sttPlaceholder() {
-  if (sttState === 'starting') return '🎤 Starting the microphone…';
+  if (sttState === 'starting') return 'Starting the microphone…';
   if (sttState === 'recording') {
     return (
-      '🎙 Recording… (' +
+      'Recording… (' +
       fmtRecTime(Math.floor((Date.now() - recStartedAt) / 1000)) +
-      ') — click 🎤 to stop'
+      ') — click the microphone to stop'
     );
   }
-  if (sttState === 'transcribing') return '⏳ Transcribing audio (local Whisper)…';
+  if (sttState === 'transcribing') return 'Transcribing audio (local Whisper)…';
   return 'Type a message...';
 }
 
@@ -650,8 +689,7 @@ function updateMicButton() {
     'transcribing',
     sttState === 'starting' || sttState === 'transcribing'
   );
-  micBtn.textContent =
-    sttState === 'recording' ? '⏹' : sttState === 'idle' ? '🎤' : '⏳';
+  micBtn.innerHTML = sttState === 'recording' ? ICON_STOP : ICONS.microphone;
   micBtn.title =
     sttState === 'recording'
       ? 'Stop recording'
@@ -664,8 +702,8 @@ function updateMicButton() {
 
 micBtn?.addEventListener('click', toggleRecording);
 
-// ===== v1.4.0: checkpoint-uri git — butonul ⟲ de restore pe mesajele user =====
-// ===== v1.9.0: + butoanele ✐ (edit prompt) și ᛉ (fork) pe fiecare mesaj user =====
+// ===== v1.4.0: checkpoint-uri git — butonul de restore pe mesajele user =====
+// ===== v1.9.0: + butoanele de edit prompt și fork pe fiecare mesaj user =====
 const restoreCheckpoints = new Map(); // messageId -> checkpoint
 
 function userActionsBox(wrap) {
@@ -688,22 +726,22 @@ function attachRestoreButtons() {
     const box = userActionsBox(wrap);
     if (!box) continue;
 
-    // v1.9.0: ✐ edit prompt — pe ORICE mesaj user (checkpoint-ul e opțional)
+    // v1.9.0: edit prompt — pe ORICE mesaj user (checkpoint-ul e opțional)
     if (!box.querySelector('.edit-btn')) {
       const edit = document.createElement('button');
       edit.className = 'edit-btn';
-      edit.textContent = '✐';
+      edit.innerHTML = ICONS.editPrompt;
       edit.title =
-        'Edit prompt: ‹⟲› restore the state before it, delete what followed and resend the edited text';
+        'Edit prompt: restore the state before it, delete what followed and resend the edited text';
       edit.onclick = () => startEditPrompt(wrap);
       box.appendChild(edit);
     }
 
-    // v1.9.0: ᛉ fork — conversație nouă pornind din acest prompt
+    // v1.9.0: fork — conversație nouă pornind din acest prompt
     if (!box.querySelector('.fork-btn')) {
       const fork = document.createElement('button');
       fork.className = 'fork-btn';
-      fork.textContent = 'ᛉ';
+      fork.innerHTML = ICONS.forkConversation;
       fork.title =
         'Fork: start a new conversation from this prompt (the current conversation stays in the list)';
       fork.onclick = () => {
@@ -716,12 +754,12 @@ function attachRestoreButtons() {
       box.appendChild(fork);
     }
 
-    // v1.4.0: ⟲ restore — doar dacă mesajul are checkpoint
+    // v1.4.0: restore — doar dacă mesajul are checkpoint
     if (restoreCheckpoints.has(id) && !box.querySelector('.restore-btn')) {
       const cp = restoreCheckpoints.get(id);
       const btn = document.createElement('button');
       btn.className = 'restore-btn';
-      btn.textContent = '⟲';
+      btn.innerHTML = ICONS.restoreCheckpoint;
       btn.title =
         'Restore: go back to the state before "' +
         String(cp.text || '').slice(0, 60) +
@@ -742,12 +780,12 @@ function markRestored(messageId) {
   const btn = wrap && wrap.querySelector('.restore-btn');
   if (btn) {
     btn.classList.add('restored');
-    btn.textContent = '✅';
+    btn.innerHTML = ICON_CHECK;
     btn.title = 'Checkpoint restored';
   }
 }
 
-// ===== v1.9.0: edit prompt inline (✐) =====
+// ===== v1.9.0: edit prompt inline =====
 function closeEditPrompt(messageId) {
   const wrap = messages.querySelector(
     '.msg.user[data-msg-id="' + messageId + '"]'
@@ -784,13 +822,13 @@ function startEditPrompt(wrap) {
 
   const save = document.createElement('button');
   save.className = 'edit-save';
-  save.textContent = '💾 Save & resend';
+  save.textContent = 'Save & resend';
   save.title =
-    '⟲ restore the state before the prompt + delete what followed + resend (Ctrl+Enter)';
+    'Restore the state before the prompt, delete what followed and resend (Ctrl+Enter)';
 
   const cancel = document.createElement('button');
   cancel.className = 'edit-cancel';
-  cancel.textContent = '✕ Cancel';
+  cancel.textContent = 'Cancel';
   cancel.title = 'Close without changes (Esc)';
 
   const finish = () => {
@@ -1357,7 +1395,7 @@ window.addEventListener('message', (event) => {
       setDiffReviewStatus(card, labels[msg.decision] || '⏹ Closed');
     }
   } else if (msg.type === 'checkpoint') {
-    // v1.4.0: checkpoint creat pentru un mesaj → afișează butonul ⟲
+    // v1.4.0: checkpoint creat pentru un mesaj → afișează butonul de restore
     if (msg.messageId) {
       restoreCheckpoints.set(msg.messageId, msg);
       attachRestoreButtons();

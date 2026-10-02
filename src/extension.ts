@@ -10,6 +10,18 @@ import { initAISelectorFinder } from './ai-selector-finder';
 import { mcp } from './mcp/manager';
 import { setupWhisperAssets } from './stt';
 import { stopDevServers } from './devServers';
+import {
+  clearIndex,
+  indexSingleFile,
+  indexStatusText,
+  indexWorkspace,
+  initIndexer,
+  isOllamaUp,
+  isSemanticEnabled,
+  semanticConfig,
+  workspaceRoot
+} from './indexer';
+import { ollamaBaseUrl } from './providers/ollama';
 
 /** v0.3.0 (P0.1): opțiunile browserului, citite live din setări. */
 function browserOptionsFromConfig(ctx: vscode.ExtensionContext) {
@@ -31,6 +43,8 @@ function browserOptionsFromConfig(ctx: vscode.ExtensionContext) {
 export async function activate(ctx: vscode.ExtensionContext) {
   initLogChannel();
   logLine('extension', 'activated — container: aiBridge, view: aiBridge.chatView');
+  // v1.10.0: indexarea semantică (vector store JSON în globalStorage)
+  initIndexer(ctx.globalStorageUri.fsPath);
   const browser = new BrowserManager(() => browserOptionsFromConfig(ctx));
 
   // FAZA I: cache-ul de selectori (override-urile reparate în globalState)
@@ -284,6 +298,156 @@ export async function activate(ctx: vscode.ExtensionContext) {
             : '') +
           (report.failed.length ? ' — ' + report.failed.length + ' failed' : '')
       );
+    })
+  );
+
+  /* =======================================================================
+   * v1.10.0 — INDEXARE SEMANTICĂ (embeddings Ollama + vector store local)
+   * Trei comenzi: Index Workspace / Index Status / Clear Index. Indexarea
+   * rulează cu progres anulabil în bara de notificări; căutarea semantică e
+   * expusă AI-ului prin unealta `search_semantic`.
+   * ===================================================================== */
+
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand('aiBridge.indexWorkspace', async () => {
+      const root = workspaceRoot();
+      if (!root) {
+        vscode.window.showWarningMessage(
+          'AI Bridge: open a folder (workspace) before indexing.'
+        );
+        return;
+      }
+      const cfg = semanticConfig();
+      if (!(await isOllamaUp())) {
+        const msg =
+          'Ollama is not reachable at ' + ollamaBaseUrl() + '. Start it with "ollama serve".';
+        vscode.window.showErrorMessage('AI Bridge: ' + msg);
+        chatView.postNotice('🔎 ⚠️ Semantic index: ' + msg);
+        return;
+      }
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'AI Bridge: indexing workspace with ' + cfg.model,
+          cancellable: true
+        },
+        async (prog, token) => {
+          const ac = new AbortController();
+          const sub = token.onCancellationRequested(() => ac.abort());
+          try {
+            const stats = await indexWorkspace(root, {
+              signal: ac.signal,
+              onProgress: (p) =>
+                prog.report({ message: p.done + '/' + p.total + ' — ' + p.file })
+            });
+            const summary =
+              stats.indexed +
+              ' files indexed, ' +
+              stats.unchanged +
+              ' unchanged, ' +
+              stats.removed +
+              ' removed, ' +
+              stats.chunks +
+              ' chunks' +
+              (stats.skipped ? ', ' + stats.skipped + ' skipped' : '') +
+              (stats.failed ? ', ' + stats.failed + ' chunks failed' : '') +
+              (stats.cancelled ? ' — cancelled' : '') +
+              ' (' +
+              Math.round(stats.durationMs / 1000) +
+              's)';
+            if (stats.cancelled) {
+              vscode.window.showWarningMessage('AI Bridge: indexing cancelled — ' + summary);
+            } else {
+              vscode.window.showInformationMessage('AI Bridge: semantic index ready — ' + summary);
+            }
+            chatView.postNotice('🔎 Semantic index: ' + summary);
+          } catch (e: any) {
+            const msg = e?.message ?? String(e);
+            logLine('indexer', 'index workspace failed: ' + msg);
+            vscode.window.showErrorMessage('AI Bridge: indexing failed — ' + msg);
+            chatView.postNotice('🔎 ⚠️ Indexing failed: ' + msg);
+          } finally {
+            sub.dispose();
+          }
+        }
+      );
+    })
+  );
+
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand('aiBridge.indexStatus', async () => {
+      const root = workspaceRoot();
+      if (!root) {
+        vscode.window.showWarningMessage(
+          'AI Bridge: open a folder (workspace) to see the index status.'
+        );
+        return;
+      }
+      const text = await indexStatusText(root);
+      logLine('indexer', text.replace(/\n/g, ' | '));
+      vscode.window.showInformationMessage(
+        'AI Bridge: ' + text.split('\n').slice(0, 4).join(' · ')
+      );
+      chatView.postNotice('🔎 ' + text.split('\n').join('\n'));
+    })
+  );
+
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand('aiBridge.clearIndex', async () => {
+      const root = workspaceRoot();
+      if (!root) {
+        vscode.window.showWarningMessage(
+          'AI Bridge: open a folder (workspace) first.'
+        );
+        return;
+      }
+      const answer = await vscode.window.showWarningMessage(
+        'AI Bridge: delete the semantic index for "' +
+          path.basename(root) +
+          '"? The vector store is removed from globalStorage; you can rebuild it anytime with "Index Workspace".',
+        { modal: true },
+        'Delete Index'
+      );
+      if (answer !== 'Delete Index') return;
+      const removed = await clearIndex(root);
+      if (removed) {
+        vscode.window.showInformationMessage('AI Bridge: semantic index deleted.');
+        chatView.postNotice('🔎 Semantic index deleted.');
+      } else {
+        vscode.window.showInformationMessage(
+          'AI Bridge: there was no semantic index to delete.'
+        );
+      }
+    })
+  );
+
+  // v1.10.0: indexare incrementală la salvare (opțional, aiBridge.semanticIndex.onSave)
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  const pendingSaves = new Set<string>();
+  ctx.subscriptions.push(
+    vscode.workspace.onDidSaveTextDocument((doc) => {
+      if (doc.uri.scheme !== 'file') return;
+      if (!isSemanticEnabled() || !semanticConfig().onSave) return;
+      const root = workspaceRoot();
+      if (!root) return;
+      const abs = doc.uri.fsPath;
+      if (!abs.startsWith(root)) return;
+      pendingSaves.add(abs);
+      if (saveTimer) clearTimeout(saveTimer);
+      // debounce: mai multe salvări rapide => o singură trecere
+      saveTimer = setTimeout(() => {
+        const files = Array.from(pendingSaves);
+        pendingSaves.clear();
+        void (async () => {
+          for (const f of files) {
+            try {
+              await indexSingleFile(root, f);
+            } catch (e: any) {
+              logLine('indexer', 'on-save indexing failed: ' + (e?.message ?? String(e)));
+            }
+          }
+        })();
+      }, 1500);
     })
   );
 

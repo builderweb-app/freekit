@@ -1,8 +1,8 @@
 {
   "name": "ai-bridge",
   "displayName": "AI Bridge",
-  "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen, Kimi) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools",
-  "version": "1.9.1",
+  "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen, Kimi) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
+  "version": "1.10.0",
   "publisher": "local",
   "icon": "media/icon.png",
   "categories": [
@@ -116,6 +116,21 @@
         "command": "aiBridge.stopDevServers",
         "title": "AI Bridge: Stop Dev Servers",
         "icon": "$(debug-stop)"
+      },
+      {
+        "command": "aiBridge.indexWorkspace",
+        "title": "AI Bridge: Index Workspace",
+        "icon": "$(database)"
+      },
+      {
+        "command": "aiBridge.indexStatus",
+        "title": "AI Bridge: Index Status",
+        "icon": "$(info)"
+      },
+      {
+        "command": "aiBridge.clearIndex",
+        "title": "AI Bridge: Clear Index",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -167,6 +182,16 @@
         },
         {
           "command": "aiBridge.stopDevServers",
+          "when": "view == aiBridge.chatView",
+          "group": "navigation"
+        },
+        {
+          "command": "aiBridge.indexWorkspace",
+          "when": "view == aiBridge.chatView",
+          "group": "navigation"
+        },
+        {
+          "command": "aiBridge.indexStatus",
           "when": "view == aiBridge.chatView",
           "group": "navigation"
         }
@@ -317,6 +342,43 @@
           "minimum": 5,
           "maximum": 600,
           "markdownDescription": "Timeout (seconds) for one MCP tool call (`tools/call`). On expiry, the call is reported as an error to the AI."
+        },
+        "aiBridge.semanticIndex.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Enables **semantic code search** (the `search_semantic` tool + the index commands). The workspace is embedded locally with Ollama (`nomic-embed-text` by default) and stored as a JSON vector store in globalStorage — no new npm dependencies. Disabled = the AI falls back to `search_files`."
+        },
+        "aiBridge.semanticIndex.model": {
+          "type": "string",
+          "default": "nomic-embed-text",
+          "markdownDescription": "Ollama embedding model used for the semantic index (install with `ollama pull nomic-embed-text`). Changing it invalidates the existing index — re-run **AI Bridge: Index Workspace**."
+        },
+        "aiBridge.semanticIndex.onSave": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Automatically re-indexes a file when it is **saved** (incremental — only that file's chunks are recomputed, debounced 1.5 s). Requires an existing index; does nothing if the workspace was never indexed."
+        },
+        "aiBridge.semanticIndex.maxFileKb": {
+          "type": "number",
+          "default": 256,
+          "minimum": 1,
+          "maximum": 4096,
+          "markdownDescription": "Files larger than this (in KB) are skipped when indexing (they are recorded as skipped, not embedded)."
+        },
+        "aiBridge.semanticIndex.topK": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 25,
+          "markdownDescription": "Number of chunks returned by `search_semantic` (top-K by cosine similarity)."
+        },
+        "aiBridge.semanticIndex.exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Extra directory/file **names** to exclude from indexing, on top of the built-in list (`node_modules`, `.git`, `out`, `dist`, `build`, `.next`, `coverage`, `venv`, `target`, lockfiles, minified files…). Example: `[\"fixtures\", \"snapshots\"]`."
         }
       }
     }

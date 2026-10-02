@@ -332,9 +332,12 @@ body {
   background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1));
 }
 
-#stop svg, #clear svg, #show-chrome svg {
-  width: 14px;
-  height: 14px;
+#verbose-toggle svg,
+#stop svg,
+#clear svg,
+#show-chrome svg {
+  width: 16px;
+  height: 16px;
   fill: currentColor;
 }
 
@@ -559,8 +562,8 @@ body {
 }
 
 .copy-btn svg {
-  width: 13px;
-  height: 13px;
+  width: 14px;
+  height: 14px;
   fill: currentColor;
 }
 
@@ -593,6 +596,12 @@ body {
   opacity: 1;
 }
 
+.restore-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
 /* ===== v1.5.0: buton Speak (text-to-speech) ===== */
 .speak-btn {
   width: 22px;
@@ -614,6 +623,12 @@ body {
 .speak-btn:hover {
   background: var(--vscode-toolbar-hoverBackground, rgba(255, 255, 255, 0.1));
   color: var(--vscode-foreground);
+}
+
+.speak-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
 }
 
 .speak-btn.speaking {
@@ -773,7 +788,7 @@ body {
   font-size: 11px;
 }
 
-/* butoanele de atașare / dictare din zona de input (📎 fișiere / 📁 foldere / 🎤 voce) */
+/* butoanele de atașare / dictare din zona de input (fișiere / foldere / voce) */
 #attach-file,
 #attach-folder,
 #mic-btn {
@@ -794,6 +809,14 @@ body {
   transition: background 0.15s ease, opacity 0.15s ease;
 }
 
+#attach-file svg,
+#attach-folder svg,
+#mic-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
 #attach-file:hover:not(:disabled),
 #attach-folder:hover:not(:disabled),
 #mic-btn:hover:not(:disabled) {
@@ -808,7 +831,7 @@ body {
   cursor: not-allowed;
 }
 
-/* v1.6.0: butonul 🎤 (voice input) — roșu pulsant cât timp ascultă */
+/* v1.6.0: butonul de voice input — roșu pulsant cât timp ascultă */
 #mic-btn.recording {
   opacity: 1;
   color: #e5534b;
@@ -1014,7 +1037,14 @@ body {
   background: var(--vscode-toolbar-hoverBackground, rgba(255, 255, 255, 0.1));
 }
 
-/* ===== v1.9.0: acțiuni pe mesajele user (✐ edit / ᛉ fork / ⟲ restore) ===== */
+#conv-new svg,
+#conv-delete svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+/* ===== v1.9.0: acțiuni pe mesajele user (edit / fork / restore) ===== */
 .msg-actions {
   margin-left: auto;
   display: inline-flex;
@@ -1058,7 +1088,14 @@ body {
   background: var(--vscode-toolbar-hoverBackground, rgba(255, 255, 255, 0.1));
 }
 
-/* ===== v1.9.0: editorul inline de prompt (✐) ===== */
+.edit-btn svg,
+.fork-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+/* ===== v1.9.0: editorul inline de prompt ===== */
 .edit-area {
   margin-top: 6px;
   display: flex;

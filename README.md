@@ -10,6 +10,7 @@ Connect web AI chats (**DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen, Kimi**
 - 🤖 **Agentic loop** — the AI calls tools step by step: read, write, edit, search, run commands, git
 - 🖥️ **Dev servers in a visible terminal** — `dev` / `start` / `serve` / `watch` / `preview` commands (`npm run dev`, `npm start`, `vite`, `nodemon`, …) are detected automatically and start in a dedicated **VS Code terminal** (`AI Bridge: dev`): you watch the live output in the bottom panel and stop the server with **Ctrl+C** in that terminal; the AI gets the live URL and the first seconds of output immediately (captured via the stable Shell Integration API) instead of waiting for a command that never exits — fast startup errors (port already in use, syntax errors) still come back for self-correction. Stop everything with `AI Bridge: Stop Dev Servers` (Ctrl+C to every server terminal)
 - 🔌 **MCP client** — connect any external [Model Context Protocol](https://modelcontextprotocol.io/) server (`.vscode/mcp.json` or `aiBridge.mcpServers`); its tools are discovered automatically and exposed to the AI as `mcp_<server>_<tool>`, with the same approval flow as built-in tools
+- 🧭 **Semantic code search (local index)** — index the workspace once and the AI can find code by **meaning**, not just exact text: `AI Bridge: Index Workspace` embeds every chunk with a local Ollama embedding model (`nomic-embed-text`, 768-dim) and stores it as a plain JSON vector store in globalStorage (**zero new npm dependencies**, nothing leaves your machine). The AI gets a `search_semantic(query)` tool (e.g. *"where do we validate the login token?"*) that returns the best-matching snippets with file paths, line ranges and scores; `AI Bridge: Index Status` shows what's indexed and `AI Bridge: Clear Index` wipes it. Indexing is **incremental** (only changed files are re-embedded, matched by content hash) and can also run **on save** (`aiBridge.semanticIndex.onSave`). Smart exclusions keep it fast: `node_modules`, `.git`, `out`, `dist`, `build`, caches, lockfiles, minified files and binaries are skipped, files over `aiBridge.semanticIndex.maxFileKb` are ignored, and large files are split into overlapping chunks
 - 🔍 **Native diff review** — file writes open a real VS Code diff (old vs. new content) with **Accept / Reject** buttons **inline in the chat** (reliable fallback) and in the VS Code notification — whichever you click first decides — plus a per-file "don't ask again" option; the file is only touched after you accept
 - 🧪 **Auto-verify & auto-repair** — after every file write the project is checked automatically (`astro check` / `tsc --noEmit` / `build`); the full error goes back to the AI for repair (max 3 attempts) and, if it still fails, the changes are **rolled back automatically** to the last verified state
 - ⟲ **Git checkpoints & one-click restore** — before every prompt the project is snapshotted with a temporary git commit (`aibridge-prompt:<id>`); each user message gets a ⟲ button in the chat that brings the project back to that exact state (`git reset --hard`, with an automatic backup commit of the current state first). Folders that aren't git repos yet are initialized automatically (`git init` + a minimal `.gitignore`; `aiBridge.autoInitGit`), and a one-time chat notice explains it when git itself is unavailable; toggle with `aiBridge.promptCheckpoints`
@@ -56,6 +57,9 @@ Connect web AI chats (**DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen, Kimi**
 | `AI Bridge: MCP Servers` | Manage MCP servers: status, restart/stop, list tools, open/create `.vscode/mcp.json` |
 | `AI Bridge: Setup Local Whisper` | Download the prebuilt whisper.cpp binaries + `ggml-base` model into global storage (one time, ~160 MB) for offline voice input |
 | `AI Bridge: Stop Dev Servers` | Stop every dev server started by the AI (sends Ctrl+C to its terminal; if the process ignores it, the terminal is closed) |
+| `AI Bridge: Index Workspace` | Build / update the local semantic index (embeddings via Ollama, incremental, cancellable, with progress) |
+| `AI Bridge: Index Status` | Show the index: model, dimensions, indexed files, chunks, storage file, size and last update |
+| `AI Bridge: Clear Index` | Delete the workspace's semantic index from globalStorage (confirmation required) |
 
 ## Settings
 
@@ -85,6 +89,27 @@ Connect web AI chats (**DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen, Kimi**
 | `aiBridge.mcpEnabled` | `true` | Start the configured MCP servers and expose their tools to the AI (`mcp_<server>_<tool>`) |
 | `aiBridge.mcpServers` | `{}` | MCP servers to launch (stdio), e.g. `{"filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]}}` |
 | `aiBridge.mcpToolTimeoutSeconds` | `60` | Timeout for a single MCP tool call (`tools/call`) |
+| `aiBridge.semanticIndex.enabled` | `true` | Enable semantic code search (`search_semantic` tool + index commands) |
+| `aiBridge.semanticIndex.model` | `nomic-embed-text` | Ollama embedding model for the index (changing it invalidates the index) |
+| `aiBridge.semanticIndex.onSave` | `false` | Re-index a file automatically (incremental, debounced) when it is saved |
+| `aiBridge.semanticIndex.maxFileKb` | `256` | Skip files larger than this (KB) when indexing |
+| `aiBridge.semanticIndex.topK` | `8` | Number of chunks returned by `search_semantic` (1–25) |
+| `aiBridge.semanticIndex.exclude` | `[]` | Extra directory/file names to exclude from indexing |
+
+## Semantic code search
+
+AI Bridge can find code **by meaning** instead of exact text — useful for questions like *"where do we retry a failed upload?"* when you don't know the identifier to grep for.
+
+1. Run **`AI Bridge: Index Workspace`** once (needs Ollama running; the embedding model is pulled with `ollama pull nomic-embed-text`).
+2. Ask the AI something conceptual. It calls `search_semantic(query)` and gets back the best-matching chunks with `path:startLine-endLine`, a similarity score and a snippet — then it can `read_file` the ones that matter.
+
+How it works:
+
+- **Local & private** — embeddings are computed by your own Ollama server (`aiBridge.ollamaUrl`); the vector store is a single JSON file under `<globalStorage>/semantic-index/` (keyed per workspace). No new npm dependencies, no cloud.
+- **Incremental** — each file is fingerprinted with a SHA-1 of its content; unchanged files keep their existing vectors, so re-indexing after an edit only re-embeds what changed. Set `aiBridge.semanticIndex.onSave` to keep the index fresh automatically (debounced 1.5 s).
+- **Smart exclusions** — `node_modules`, `.git`, `out`, `dist`, `build`, `.next`, `coverage`, virtualenvs, `target`, caches, lockfiles, source maps, minified and binary files are never indexed; extend the list with `aiBridge.semanticIndex.exclude`.
+- **Chunking with overlap** — files are split into 60-line windows with a 12-line overlap so a function that straddles a boundary is still found; oversized/minified files are skipped and recorded in the status.
+- **Graceful in the agent loop** — if there is no index yet, `search_semantic` returns a clear message telling the AI to fall back to `search_files` (or you to run the index command), so nothing breaks.
 
 ## Remote selector updates
 
@@ -130,7 +155,7 @@ Every MCP call shows an **approval card** (server, tool and arguments) before it
 npm install
 npm run compile        # tsc → out/
 npx @vscode/vsce package --allow-missing-repository
-code --install-extension ai-bridge-1.7.2.vsix --force
+code --install-extension ai-bridge-1.10.0.vsix --force
 ```
 
 Press <kbd>F5</kbd> for an Extension Development Host.

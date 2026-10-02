@@ -377,6 +377,43 @@ function addHeal(text) {
   scrollAfterAppend();
 }
 
+// v2.0.4: cardul „login required" — Chrome e adus automat în față, iar
+// butoanele permit reluarea promptului (Retry) sau re-afișarea ferestrei Chrome.
+function addLoginRequiredCard(text) {
+  const card = document.createElement('div');
+  card.className = 'notice login-required';
+
+  const msgEl = document.createElement('div');
+  msgEl.className = 'login-required-text';
+  msgEl.textContent = text || 'Login required.';
+
+  const row = document.createElement('div');
+  row.className = 'login-required-actions';
+
+  const retry = document.createElement('button');
+  retry.className = 'retry-btn';
+  retry.textContent = '⟳ Retry';
+  retry.onclick = () => {
+    card.remove();
+    pendingEl = add('assistant', '', Date.now());
+    showTyping(pendingEl);
+    setBusy(true);
+    vscode.postMessage({ type: 'retry_last' });
+  };
+
+  const show = document.createElement('button');
+  show.className = 'show-chrome-btn';
+  show.textContent = '👁 Show Chrome';
+  show.onclick = () => vscode.postMessage({ type: 'show_chrome' });
+
+  row.appendChild(retry);
+  row.appendChild(show);
+  card.appendChild(msgEl);
+  card.appendChild(row);
+  messages.appendChild(card);
+  scrollAfterAppend();
+}
+
 // ===== v1.7.1: pași verbose (Thinking / Executing / Result / Decision) =====
 const VSTEP_KINDS = {
   thinking: { icon: '🧠', label: 'Thinking' },
@@ -1729,6 +1766,15 @@ window.addEventListener('message', (event) => {
       setBusy(false);
       if (!stick) jumpBtn.hidden = false;
     }
+  } else if (msg.type === 'login_required') {
+    // v2.0.4: Chrome a fost adus în față pentru login → card cu buton Retry
+    if (pendingEl) {
+      pendingEl.remove();
+      pendingEl = null;
+    }
+    addLoginRequiredCard(msg.text || '');
+    setBusy(false);
+    if (!stick) jumpBtn.hidden = false;
   } else if (msg.type === 'cleared') {
     // v2.0.2: confirmarea din host a trecut — abia acum golim UI-ul
     resetChatUi();

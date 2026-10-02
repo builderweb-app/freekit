@@ -269,6 +269,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private active?: { provider: AIProvider; page?: Page };
   /** FAZA II (A): atașamentele curente (chip-urile din UI). */
   private attachments: Attachment[] = [];
+  /** v2.0.4: ultimul prompt trimis — folosit de butonul Retry din cardul de login. */
+  private lastUserText = '';
   /** v0.2.1: aprobă automat toate operațiile care necesită confirmare. */
   private autoApprove = false;
   /** v0.4.0: guard anti-suprapunere pentru verificarea de status. */
@@ -1105,14 +1107,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    // v2.0.4: butonul Retry din cardul „login required" — reia ultimul prompt
+    // fără să dubleze mesajul în istoric și fără să re-consume atașamentele.
+    if (msg.type === 'retry_last') {
+      if (this.abortController) return; // se generează deja
+      const text = this.lastUserText;
+      if (!text) return;
+      log('retry last prompt requested');
+      await this.handleMessage({
+        type: 'send',
+        text,
+        msgId: 'auto' + Date.now().toString(36),
+        retry: true
+      });
+      return;
+    }
+
     if (msg.type !== 'send') return;
     const userText: string = msg.text;
+    // v2.0.4: retry = reluarea ultimului prompt (vezi mai sus)
+    const isRetry = msg.retry === true;
     // v1.4.0: id-ul mesajului (generat de webview) → leagă mesajul de checkpoint
     const msgId =
       typeof msg.msgId === 'string' && MSG_ID_RE.test(msg.msgId)
         ? msg.msgId
         : 'auto' + Date.now().toString(36);
-    log('user message: ' + userText.slice(0, 60));
+    log((isRetry ? 'retry message: ' : 'user message: ') + userText.slice(0, 60));
 
     // v0.3.0 (P0.4): refuză execuția în workspace-uri neîncrezute
     // (extensia scrie fișiere și rulează comenzi — nu e sigur în modul restrict)
@@ -1130,15 +1150,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       await this.conversations.create(userText.slice(0, 40));
       this.postConversations();
     }
-    // FAZA E: salvăm mesajul utilizatorului în istoric (NU se trimite la AI)
-    await this.appendHistory('user', userText, msgId);
-    // v1.9.0: primul prompt al unei conversații „Conversație nouă” o redenumește
-    if (await this.conversations.retitleDefault(userText)) this.postConversations();
+    // v2.0.4: reținem ultimul prompt, pentru butonul Retry din cardul de login
+    if (!isRetry) this.lastUserText = userText;
+    if (!isRetry) {
+      // FAZA E: salvăm mesajul utilizatorului în istoric (NU se trimite la AI)
+      await this.appendHistory('user', userText, msgId);
+      // v1.9.0: primul prompt al unei conversații „Conversație nouă” o redenumește
+      if (await this.conversations.retitleDefault(userText)) this.postConversations();
+    }
 
-    // FAZA II (A): consumă atașamentele curente (se trimit o singură dată)
-    const atts = this.attachments;
-    this.attachments = [];
-    this.postAttachments();
+    // FAZA II (A): consumă atașamentele curente (se trimit o singură dată);
+    // v2.0.4: la Retry atașamentele au plecat deja — nu le mai re-consumăm.
+    const atts = isRetry ? [] : this.attachments;
+    if (!isRetry) {
+      this.attachments = [];
+      this.postAttachments();
+    }
 
     this.abortRequested = false;
     this.abortController = new AbortController();
@@ -1269,6 +1296,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (isAuto) {
         const chain = this.autoChainIds();
         const chainLabels = chain.map((id) => PROVIDER_LABELS[id] ?? id);
+        // v2.0.4: păstrăm eroarea de login, ca să nu se piardă în mesajul
+        // generic „Auto: all failed" — UI-ul trebuie să afișeze cardul Retry.
+        let loginErr: any;
         for (let i = 0; i < chain.length; i++) {
           const id = chain[i];
           const label = chainLabels[i];
@@ -1293,9 +1323,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             break;
           } catch (e: any) {
             if (this.abortRequested || e?.message === '__ABORTED__') throw e;
+            if (isLoginRequiredError(e)) loginErr = e;
             const reason = e?.message ? String(e.message) : String(e);
             log('auto: ' + id + ' failed — ' + reason);
             if (i === chain.length - 1) {
+              if (loginErr) throw loginErr;
               throw new Error(
                 'Auto: tried ' + chainLabels.join(' → ') +
                   ', but all failed. Last error (' + label + '): ' + reason
@@ -1627,6 +1659,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (this.abortRequested || e?.message === '__ABORTED__') {
         log('aborted during send');
         this.post('stopped', '');
+      } else if (isLoginRequiredError(e)) {
+        // v2.0.4: login UX — în loc de o eroare seacă, aducem Chrome în față
+        // (ca utilizatorul să se poată autentifica) și oferim în chat cardul
+        // „login required" cu butonul Retry, care reia ultimul prompt.
+        log('login required: ' + (e?.message ?? String(e)));
+        await this.showChrome().catch(() => {});
+        this.post('login_required', e?.message ?? String(e));
       } else {
         log('error: ' + (e?.message ?? String(e)));
         this.post('error', e?.message ?? String(e));

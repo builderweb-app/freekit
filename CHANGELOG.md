@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.4 — 2026-10-02
+
+**Better login UX** — when a provider needs you to sign in, the chat no longer shows a bare “could not find the input box” error. The Chrome window comes to the front and a **Retry** button appears right in the chat.
+
+- **Login detection when the input box is missing** — `findInput` (in `src/providers/base.ts`) now checks whether the page is actually a login page before failing: either the URL matches a login/auth pattern (`sign_in`, `sign-in`, `signin`, `login`, `auth` — without tripping over `oauth` / `author`) **or** the DOM has a visible `input[type="password"]` / a submit button labelled “Sign in” / “Log in”. When that is the case it throws `LoginRequiredError` instead of the generic “I could not find the input box…” message.
+- **`LoginRequiredError` carries the provider** — the error is now `new LoginRequiredError(providerId, currentUrl)`, so the message names the provider that needs authentication.
+- **Auto-show Chrome + Retry card** — when a login error reaches the send loop, Freekit brings the Chrome window to the front (so you can sign in) and posts an in-chat **login required** card with **⟳ Retry** and **👁 Show Chrome** buttons. Retry resumes the last prompt without duplicating it in the conversation history or re-sending the attachments.
+- **Auto mode keeps the login error** — the `auto` fallback chain (browser → Ollama) no longer swallows a login error into its generic “Auto: all failed” message, so the Retry card still shows when the whole chain fails.
+
 ## 2.0.3 — 2026-10-02
 
 **The ⋯ dropdown becomes the single control surface** — real codicons, no top toolbar, no red actions, and per-conversation delete on right-click.

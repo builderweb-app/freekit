@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen, Kimi) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.0.3",
+  "version": "2.0.4",
   "publisher": "builderweb",
   "homepage": "https://builderweb.app/agent",
   "icon": "media/icon.png",

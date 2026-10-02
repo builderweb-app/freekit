@@ -95,6 +95,14 @@ export async function findInput(
     log(label + ': input via ' + found.selector);
     return found.locator;
   }
+  // v2.0.4: inputul lipsește — dacă pagina e de fapt una de login, semnalăm
+  // „login required" (chatView aduce Chrome în față + oferă butonul Retry) în
+  // loc de eroarea seacă „could not find the input box".
+  if (await detectLoginPage(page)) {
+    const url = page.url();
+    log(label + ': input missing, login page detected (' + url + ')');
+    throw loginError(providerId, url);
+  }
   throw new Error(
     'I could not find the input box for ' +
       label +
@@ -111,19 +119,27 @@ export async function findInput(
  * ascunde fereastra la loc și reia automat operația.
  * ========================================================================= */
 
-/** URL de login/auth (Claude, ChatGPT, Mistral etc. redirecționează aici când nu ești logat). */
-export const isLoginUrl = (url: string) => /sign[-_]?in|login|\/auth/i.test(url);
+/**
+ * URL de login/auth (Claude, ChatGPT, Mistral etc. redirecționează aici când
+ * nu ești logat). v2.0.4: acoperă `sign_in` / `sign-in` / `signin` / `login` și
+ * tokenul `auth` — fără false pozitive pe „oauth" / „author".
+ */
+export const isLoginUrl = (url: string) =>
+  /sign[-_]?in|signin|login|(^|[^a-z])auth([^a-z]|$)/i.test(url || '');
 
 /** Marcaj pe eroare — chatView îl recunoaște și pornește asistentul de login. */
 export const LOGIN_REQUIRED_CODE = 'AI_BRIDGE_LOGIN_REQUIRED';
 
 export class LoginRequiredError extends Error {
   readonly code = LOGIN_REQUIRED_CODE;
-  constructor(readonly loginUrl: string) {
+  constructor(readonly providerId: string, readonly loginUrl: string) {
     super(
-      'You are on a login page (' +
+      'You are not logged in to ' +
+        (providerId || 'this provider') +
+        ' (' +
         loginUrl +
-        '). Log in through the Chrome window — the flow resumes automatically after login.'
+        '). Log in through the Chrome window, then press Retry — ' +
+        'the flow resumes automatically after login.'
     );
     this.name = 'LoginRequiredError';
   }
@@ -134,7 +150,58 @@ export function isLoginRequiredError(e: any): boolean {
   return !!e && (e.code === LOGIN_REQUIRED_CODE || e instanceof LoginRequiredError);
 }
 
-const loginError = (url: string) => new LoginRequiredError(url);
+const loginError = (providerId: string, url: string) =>
+  new LoginRequiredError(providerId, url);
+
+/**
+ * v2.0.4: rulează ÎN PAGINĂ — true dacă DOM-ul arată ca o pagină de login: un
+ * input de parolă vizibil SAU un buton de submit cu text „Sign in"/„Log in".
+ * Detecția e conservatoare (doar elemente vizibile), ca să nu confundăm
+ * chatul deschis cu o pagină de autentificare.
+ */
+const scanLoginPage = (): boolean => {
+  try {
+    const visible = (el: Element): boolean => {
+      const r = el.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) return false;
+      const s = window.getComputedStyle(el as HTMLElement);
+      return (
+        s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity) > 0.05
+      );
+    };
+    const pw = document.querySelector('input[type="password"]');
+    if (pw && visible(pw)) return true;
+    const btns = Array.prototype.slice.call(
+      document.querySelectorAll(
+        'button[type="submit"], input[type="submit"], button, [role="button"]'
+      )
+    ) as Element[];
+    for (const b of btns) {
+      if (!visible(b)) continue;
+      const text = String(
+        (b as HTMLElement).innerText ||
+          (b as HTMLInputElement).value ||
+          b.textContent ||
+          ''
+      ).trim();
+      if (/^(sign|log)[\s-]?(in|on)$/i.test(text)) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+};
+
+/** true dacă pagina curentă pare o pagină de login (URL sau DOM). Best-effort. */
+export async function detectLoginPage(page: Page): Promise<boolean> {
+  try {
+    if (isLoginUrl(page.url())) return true;
+    return await page.evaluate(scanLoginPage);
+  } catch (e: any) {
+    log('detectLoginPage failed: ' + (e?.message ?? String(e)));
+    return false;
+  }
+}
 
 /* =========================================================================
  * v1.8.0 — DETECȚIE CAPTCHA
@@ -204,7 +271,7 @@ export async function openProvider(page: Page, providerId: string, label: string
   const current = page.url();
 
   if (isLoginUrl(current)) {
-    throw loginError(current);
+    throw loginError(providerId, current);
   }
 
   if (current.startsWith(host)) {
@@ -220,7 +287,7 @@ export async function openProvider(page: Page, providerId: string, label: string
   // FIX v2: dacă aterizăm tot pe login (ex: Claude fără sesiune), nu mai
   // lăsăm healer-ul să rătăcească prin pagina de login (#email).
   if (isLoginUrl(page.url())) {
-    throw loginError(page.url());
+    throw loginError(providerId, page.url());
   }
   await findInput(page, providerId, label, 60000);
 }
@@ -279,7 +346,7 @@ export async function newChatVia(page: Page, providerId: string, label: string) 
   await autoAcceptPopups(page, { log }).catch(() => []);
   // v0.9.1: sesiunea poate expira între open() și newChat() — același răspuns
   // ca la openProvider (chatView aduce Chrome în față și așteaptă login-ul).
-  if (isLoginUrl(page.url())) throw loginError(page.url());
+  if (isLoginUrl(page.url())) throw loginError(providerId, page.url());
   await findInput(page, providerId, label, 30000);
 }
 

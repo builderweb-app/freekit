@@ -431,6 +431,54 @@ pre.code code {
   color: var(--vscode-foreground);
 }
 
+/* ===== v2.0.4: card „login required" (Chrome în față + Retry) ===== */
+.notice.login-required {
+  border-style: solid;
+  border-left: 3px solid var(--vscode-editorWarning-foreground, #d29922);
+  color: var(--vscode-foreground);
+  align-self: stretch;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.login-required-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.retry-btn,
+.show-chrome-btn {
+  padding: 5px 14px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  transition: all 0.1s ease;
+}
+
+.retry-btn {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.retry-btn:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+.show-chrome-btn {
+  background: var(--vscode-button-secondaryBackground, #3a3d41);
+  color: var(--vscode-button-secondaryForeground, #ccc);
+}
+
+.show-chrome-btn:hover {
+  background: var(--vscode-button-secondaryHoverBackground, #45494e);
+}
+
 /* ===== Carduri de aprobare (fallback clasic) ===== */
 .msg.approval {
   background: var(--vscode-editorWidget-background);

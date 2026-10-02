@@ -351,12 +351,15 @@ function ensureVerboseStepEl(step) {
     label: String(step.kind || 'Step')
   };
   const kindClass = VSTEP_KINDS[step.kind] ? step.kind : 'other';
+  // v1.10.3: cardul „Thinking" e colapsabil (<details>): deschis cât timp
+  // modelul raționează, pliat automat la final, cu săgeată ▼/▶ și durată.
+  const isThinking = step.kind === 'thinking';
 
-  el = document.createElement('div');
-  el.className = 'vstep vstep-' + kindClass;
+  el = document.createElement(isThinking ? 'details' : 'div');
+  el.className = 'vstep vstep-' + kindClass + (isThinking ? ' thinking-card' : '');
   el.dataset.stepId = step.id;
 
-  const head = document.createElement('div');
+  const head = document.createElement(isThinking ? 'summary' : 'div');
   head.className = 'vstep-head';
   head.title = 'Click: collapse / expand details';
 
@@ -366,16 +369,28 @@ function ensureVerboseStepEl(step) {
   const label = document.createElement('span');
   label.className = 'vstep-label';
   label.textContent = meta.label;
-  const title = document.createElement('span');
-  title.className = 'vstep-title';
-  const status = document.createElement('span');
-  status.className = 'vstep-status';
 
-  head.appendChild(icon);
-  head.appendChild(label);
-  head.appendChild(title);
-  head.appendChild(status);
-  head.onclick = () => el.classList.toggle('collapsed');
+  if (isThinking) {
+    const arrow = document.createElement('span');
+    arrow.className = 'vstep-arrow';
+    const duration = document.createElement('span');
+    duration.className = 'thinking-duration';
+    head.appendChild(arrow);
+    head.appendChild(icon);
+    head.appendChild(label);
+    head.appendChild(duration);
+    el.open = true; // deschis cât timp stream-ează
+  } else {
+    const title = document.createElement('span');
+    title.className = 'vstep-title';
+    const status = document.createElement('span');
+    status.className = 'vstep-status';
+    head.appendChild(icon);
+    head.appendChild(label);
+    head.appendChild(title);
+    head.appendChild(status);
+    head.onclick = () => el.classList.toggle('collapsed');
+  }
   el.appendChild(head);
 
   const body = document.createElement('div');
@@ -399,8 +414,9 @@ function addVerboseStep(step) {
   const titleEl = el.querySelector('.vstep-title');
   const statusEl = el.querySelector('.vstep-status');
   const body = el.querySelector('.vstep-body');
+  const isThinking = el.classList.contains('thinking-card');
 
-  if (typeof step.title === 'string' && step.title) {
+  if (titleEl && typeof step.title === 'string' && step.title) {
     titleEl.textContent = '— ' + step.title;
     titleEl.title = step.title;
   }
@@ -414,12 +430,33 @@ function addVerboseStep(step) {
   if (step.status) {
     el.classList.remove('status-running', 'status-done', 'status-error');
     el.classList.add('status-' + step.status);
-    statusEl.textContent = VSTEP_STATUS[step.status] || '';
-    if (step.status === 'running') {
-      el.classList.remove('collapsed');
-    } else if (step.kind === 'thinking' || step.kind === 'result') {
-      // pașii lungi se pliază automat la terminare (rămân în istoricul vizual)
-      el.classList.add('collapsed');
+
+    if (isThinking) {
+      // v1.10.3: expandat cât timp raționează, pliat la final + durata totală
+      if (step.status === 'running') {
+        el.open = true;
+        if (!el.dataset.thinkStart) el.dataset.thinkStart = String(Date.now());
+      } else {
+        el.open = false;
+        const start = Number(el.dataset.thinkStart || 0);
+        if (start) {
+          el.dataset.thinkElapsed = String(
+            Number(el.dataset.thinkElapsed || 0) + (Date.now() - start)
+          );
+          el.dataset.thinkStart = '';
+        }
+        const secs = (Number(el.dataset.thinkElapsed || 0) / 1000).toFixed(1);
+        const durationEl = el.querySelector('.thinking-duration');
+        if (durationEl) durationEl.textContent = ' (' + secs + 's)';
+      }
+    } else if (statusEl) {
+      statusEl.textContent = VSTEP_STATUS[step.status] || '';
+      if (step.status === 'running') {
+        el.classList.remove('collapsed');
+      } else if (step.kind === 'result') {
+        // pașii lungi se pliază automat la terminare (rămân în istoricul vizual)
+        el.classList.add('collapsed');
+      }
     }
   }
   keepBottom();

@@ -280,6 +280,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /** v1.7.1: verbose mode — contor de id-uri + cardul „Thinking" al mesajului curent */
   private verboseSeq = 0;
   private verboseThinkId?: string;
+  /** v1.10.2: tot thinking-ul afișat la promptul curent (anti-duplicare). */
+  private verboseThinkText = '';
+  /** v1.10.3: cardul „Thinking" e deschis (modelul încă raționează). */
+  private verboseThinkOpen = false;
   /** v1.7.3: captarea audio rulează în Extension Host (webview-ul n-are microfon). */
   private voiceCapture: VoiceCapture | null = null;
   private voiceStarting = false;
@@ -372,6 +376,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     status?: 'running' | 'done' | 'error';
     append?: boolean;
   }): string {
+    // v1.10.3: orice pas care nu e „thinking" închide cardul „Thinking" activ
+    if (step.kind !== 'thinking') this.finishThinking();
     const id = step.id ?? 'vs' + ++this.verboseSeq;
     if (!this.verboseEnabled()) return id;
     this.view?.webview.postMessage({
@@ -388,19 +394,51 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return id;
   }
 
-  /** Thinking-ul raportat de provider (AIProvider.onThinking). */
+  /**
+   * Thinking-ul raportat de provider (AIProvider.onThinking).
+   * v1.10.2: providerii web citesc „ultimul bloc de raționament din pagină" la
+   * FIECARE pas al buclei agentice, iar blocul pasului anterior rămâne montat —
+   * același text era deci raportat (și adăugat în card) încă o dată. Afișăm
+   * fiecare bloc o singură dată; dacă blocul s-a extins între timp, trimitem
+   * doar diferența (webview-ul adaugă textul la cardul existent).
+   */
   private handleModelThinking(text: string): void {
     const clean = String(text || '').trim();
     if (!clean || !this.verboseEnabled()) return;
+    const shown = this.verboseThinkText;
+    let chunk = clean;
+    if (shown) {
+      if (shown.includes(clean)) return; // deja afișat (identic sau ca prefix)
+      if (clean.startsWith(shown)) chunk = clean.slice(shown.length).trim();
+    }
+    if (!chunk) return;
+    this.verboseThinkText = shown
+      ? clean.startsWith(shown)
+        ? clean
+        : shown + '\n\n' + clean
+      : clean;
     if (!this.verboseThinkId) this.verboseThinkId = 'think' + ++this.verboseSeq;
+    // v1.10.3: cât timp raționează, cardul rămâne deschis (text live)
+    this.verboseThinkOpen = true;
     this.postVerboseStep({
       kind: 'thinking',
       id: this.verboseThinkId,
       title: 'Model thinking',
-      text: clean.length > 6000 ? clean.slice(0, 6000) + '\n… (truncated)' : clean,
-      status: 'done',
+      text: chunk.length > 6000 ? chunk.slice(0, 6000) + '\n… (truncated)' : chunk,
+      status: 'running',
       append: true
     });
+  }
+
+  /**
+   * v1.10.3: închide cardul „Thinking" curent (modelul a trecut la răspuns sau
+   * la o acțiune) — webview-ul îl pliază automat și afișează durata totală.
+   */
+  private finishThinking(): void {
+    if (!this.verboseThinkOpen) return;
+    this.verboseThinkOpen = false;
+    if (!this.verboseThinkId) return;
+    this.postVerboseStep({ kind: 'thinking', id: this.verboseThinkId, status: 'done' });
   }
 
   /** Rezumat scurt al unui tool call (pentru pașii Executing / Decision). */
@@ -925,6 +963,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     resetCommandLimits();
     // v1.7.1: cardul „Thinking" se resetează la fiecare mesaj
     this.verboseThinkId = undefined;
+    // v1.10.2: și textul de thinking deja afișat (anti-duplicare)
+    this.verboseThinkText = '';
+    // v1.10.3: niciun card „Thinking" deschis la începutul mesajului
+    this.verboseThinkOpen = false;
     // v1.3.0: starea de auto-verify/rollback se resetează la fiecare mesaj
     this.resetVerifyState();
 
@@ -1010,7 +1052,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       };
 
       // FAZA III (E): progres vizibil — textul parțial al răspunsului
-      const onProgress = (partial: string) => this.post('stream', partial);
+      const onProgress = (partial: string) => {
+        // v1.10.3: răspunsul vizibil a început → pliază cardul „Thinking"
+        this.finishThinking();
+        this.post('stream', partial);
+      };
       const onNotice = (text: string) => this.post('notice', text);
 
       // v0.3.0 (P0.6): buget TOTAL de timp per mesaj (implicit 20 min)
@@ -1397,6 +1443,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.post('error', e?.message ?? String(e));
       }
     } finally {
+      // v1.10.3: plasă de siguranță — cardul „Thinking" nu rămâne deschis
+      this.finishThinking();
       this.abortController = undefined;
       this.active = undefined;
       // v0.4.0: badge-ul de status reflectă realitatea după fiecare mesaj
@@ -1945,6 +1993,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           '.'
       );
       vscode.window.showInformationMessage('AI Bridge: checkpoint restored.');
+      // v1.10.1: mesajele de după checkpoint nu mai au sens în istoric — le tăiem,
+      // apoi reîmprospătăm dropdown-ul și chatul. checkpoint_restored rămâne ULTIMUL
+      // (webview-ul îl folosește pentru badge-ul ✓).
+      await this.conversations.truncateAfter(messageId);
+      this.postConversations();
+      this.rerenderActive();
       this.view?.webview.postMessage({
         type: 'checkpoint_restored',
         messageId,

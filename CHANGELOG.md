@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.10.3 — 2026-10-02
+
+- **Collapsible 🧠 *Thinking* card (Cline-style)** — the reasoning card now stays **expanded with the live text while the model is thinking**, then **collapses on its own** as soon as the visible answer (or an action) starts streaming. A ▼/▶ arrow in the header shows the state and clicking the header toggles the card **manually** at any time, so you can re-read the full reasoning whenever you want.
+- **Thinking duration** — the header now reads **🧠 Thinking (2.3s)** once the reasoning is done, accumulating the total time the model spent thinking across the whole prompt (each reasoning segment adds up, measured down to a tenth of a second).
+
+## 1.10.2 — 2026-10-02
+
+- **Thinking text no longer repeated in the 🧠 card** — web providers read “the last reasoning block on the page” at every step of the agentic loop, and the block from the previous step stays mounted, so the very same reasoning was reported (and appended) once more and the collapsed 🧠 *Thinking* card showed it twice (and once more for every extra step). Each block is now displayed only once, and if a block has grown between reads only the new part is appended.
+
+## 1.10.1 — 2026-10-02
+
+- **Restore checkpoint also rewinds the conversation** — ⟲ *restore* used to reset the files with `git reset --hard` but left the transcript untouched, so the chat still showed the prompts and replies that belonged to the discarded state. It now truncates the active conversation right after the restored prompt (the same `truncateAfter` used by *edit prompt*), then refreshes the conversation dropdown and re-renders the chat. The `checkpoint_restored` message is still sent last, so the ✓ badge on the message behaves exactly as before.
+
 ## 1.10.0 — 2026-10-02
 
 - **Semantic code search (`search_semantic`)** — the AI can now find code by **meaning** instead of exact text: ask *"where do we validate the login token?"* and it gets the closest snippets back, each with `path:startLine-endLine`, a cosine-similarity score and the code itself. The tool is exposed to every provider through the same one-line-JSON tool-call format (and added to the local-model prompt, `SYSTEM_PROMPT_LOCAL`), is read-only (no approval card), and degrades gracefully: when there is no index yet it tells the model to fall back to `search_files`. The `SYSTEM_PROMPT` tool list already advertised `search_semantic` — it is now actually implemented.

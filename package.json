@@ -2,7 +2,7 @@
   "name": "ai-bridge",
   "displayName": "AI Bridge",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen, Kimi) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "1.10.0",
+  "version": "1.10.3",
   "publisher": "local",
   "icon": "media/icon.png",
   "categories": [

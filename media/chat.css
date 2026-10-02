@@ -913,6 +913,41 @@ body {
 }
 
 .vstep-thinking { border-left-color: #a371f7; }
+
+/* v1.10.3: cardul „Thinking" colapsabil (săgeată ▼/▶ + durată) */
+.vstep.thinking-card > .vstep-head {
+  list-style: none;
+}
+
+.vstep.thinking-card > .vstep-head::-webkit-details-marker {
+  display: none;
+}
+
+.vstep.thinking-card > .vstep-head::marker {
+  content: '';
+}
+
+.vstep-arrow {
+  flex-shrink: 0;
+  width: 9px;
+  font-size: 8px;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+.vstep-arrow::before {
+  content: '▶';
+}
+
+.vstep.thinking-card[open] > .vstep-head .vstep-arrow::before {
+  content: '▼';
+}
+
+.thinking-duration {
+  flex-shrink: 0;
+  color: var(--vscode-descriptionForeground, #aaa);
+  font-variant-numeric: tabular-nums;
+}
 .vstep-executing { border-left-color: #d29922; }
 .vstep-result { border-left-color: #3b82f6; }
 .vstep-decision { border-left-color: #2ea043; }

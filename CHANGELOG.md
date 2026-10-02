@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.0.1 — 2026-10-02
+
+**UX redesign of the chat panel** (implementation of the Claude mockup): same features, new layout, plus inline file-change rows.
+
+- **New layout** — minimal header (**Freekit** + *New chat* + **⋯** menu), a scrollable `#chat` transcript and a **full-width composer**: a dimmed context row (**model chip**, **thinking chip**, **Auto** switch) above the input box, with attach / folder / stop / mic / send actions inside it. The old top toolbar and the conversation `<select>` bar are gone.
+- **Inline file change rows** — every `write_file` / `edit_file` review renders a row in the chat (file icon, filename, **+added / -removed** stats, **Reject** / **Approve**). Clicking the filename re-opens the **native VS Code diff**, and the row switches to **Applied** / **Rejected** as soon as any path decides (inline row, native diff buttons, the VS Code notification, auto-approve or Stop) — first decision wins, and a row can be decided only once. The earlier preview card is kept only as the fallback for reviews without rows.
+- **Diff stats from the real contents** — new `computeDiffStats()` in `src/tools.ts` counts added/removed lines with a line-level LCS (memory `O(min(n,m))`), falling back to a linear heuristic above 3000 lines so very large files never stall the agent loop.
+- **Model chip with a status dot** — the provider dropdown became a chip fed by a new `providers_list` message, grouped into **Browser accounts** and **Local · Ollama** (live model list from `/api/tags`). Green = browser account signed in, blue = local Ollama, orange = sign-in or browser needed. Selecting an entry sends `provider_change` and persists `freekit.provider` (plus `freekit.ollamaModel` for local models).
+- **Thinking level chip (Off / Low / Medium / High)** — new `freekit.thinkingLevel` setting (default `medium`). Choosing a level updates the chip, is mirrored into the webview state and stored in the setting. UI + storage only for now — it does not change model behaviour yet.
+- **⋯ menu** — Show Chrome, **Verbose logs** (now a check item with On/Off sub-text and a dot on the button), Provider status, Diagnostics, MCP servers, Settings and Clear chat, plus the **conversation list** (switch to any conversation, delete the current one) that used to live in its own bar.
+- **Auto-approve switch** — the lightning checkbox is now the mockup's switch (`aria-pressed`; orange track and moved knob when on) and still persists to `freekit.autoApprove`.
+- **Thinking card preview** — the collapsible card now shows the first ~60 characters in italics while collapsed and hides the preview when expanded.
+- **Everything else preserved** — native diff flow, Accept / Reject / *don't ask again* notifications, per-prompt git checkpoints, edit prompt / fork / multiple conversations, TTS and voice input, auto-verify + rollback and MCP servers. Menus close on outside click and on `Esc`.
+
 ## 2.0.0 — 2026-10-02
 
 **Rebranding: AI Bridge → Freekit.** The extension is now published as **`builderweb.freekit`** (landing page: <https://builderweb.app/agent>).

@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen, Kimi) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "publisher": "builderweb",
   "homepage": "https://builderweb.app/agent",
   "icon": "media/icon.png",
@@ -326,6 +326,23 @@
           "minimum": 10,
           "maximum": 1200,
           "markdownDescription": "Timeout (seconds) for one Whisper transcription. On expiry, the process is stopped and the error is reported in the chat."
+        },
+        "freekit.thinkingLevel": {
+          "type": "string",
+          "enum": [
+            "off",
+            "low",
+            "medium",
+            "high"
+          ],
+          "enumDescriptions": [
+            "Off — no reasoning pass (fastest)",
+            "Low — quick reasoning",
+            "Medium — balanced (default)",
+            "High — deepest reasoning"
+          ],
+          "default": "medium",
+          "markdownDescription": "Thinking level selected by the **chip in the composer** (Off / Low / Medium / High). Stored now and applied by the agent loop in a future release — the setting alone does not change the model behavior yet."
         },
         "freekit.mcpEnabled": {
           "type": "boolean",

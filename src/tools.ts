@@ -490,6 +490,63 @@ export function looksLikeIntentOnly(reply: string): boolean {
   return RETRY_INTENT_RE.test(head);
 }
 
+/** v2.0.1: peste câte linii renunțăm la LCS (fișiere foarte mari → euristică). */
+const DIFF_LCS_MAX_LINES = 3000;
+
+/** v2.0.1: liniile unui text, fără „\n"-ul final (care nu e o linie reală). */
+function diffLines(text: string): string[] {
+  const lines = String(text ?? '').split('\n');
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  return lines;
+}
+
+/**
+ * v2.0.1: statistici de diff (linii adăugate / șterse) pentru rândul inline de
+ * „file change" din chat. LCS pe linii cu memorie O(min(n,m)); pentru fișiere
+ * foarte mari (> DIFF_LCS_MAX_LINES) cade pe o euristică liniară, ca să nu
+ * încetinească bucla agentică.
+ */
+export function computeDiffStats(
+  before: string,
+  after: string
+): { added: number; removed: number } {
+  const a = diffLines(before);
+  const b = diffLines(after);
+  if (!a.length) return { added: b.length, removed: 0 };
+  if (!b.length) return { added: 0, removed: a.length };
+
+  if (a.length > DIFF_LCS_MAX_LINES || b.length > DIFF_LCS_MAX_LINES) {
+    const counts = new Map<string, number>();
+    for (const line of a) counts.set(line, (counts.get(line) ?? 0) + 1);
+    let kept = 0;
+    for (const line of b) {
+      const left = counts.get(line) ?? 0;
+      if (left > 0) {
+        counts.set(line, left - 1);
+        kept++;
+      }
+    }
+    return { added: b.length - kept, removed: a.length - kept };
+  }
+
+  let prev = new Uint32Array(b.length + 1);
+  let cur = new Uint32Array(b.length + 1);
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      cur[j] =
+        a[i] === b[j]
+          ? prev[j + 1] + 1
+          : Math.max(prev[j], cur[j + 1]);
+    }
+    const swap = prev;
+    prev = cur;
+    cur = swap;
+    cur.fill(0);
+  }
+  const lcs = prev[0];
+  return { added: b.length - lcs, removed: a.length - lcs };
+}
+
 export async function executeTool(
   call: ToolCall,
   workspaceRoot: string,

@@ -21,6 +21,7 @@ import {
   ToolCall,
   ToolResult,
   FileChangePreview,
+  computeDiffStats,
   pendingApprovals,
   newApprovalId,
   resetWriteLimits,
@@ -219,6 +220,19 @@ export function generateDiffPreview(oldText: string, newText: string): string {
   return out.join('\n') || '(no changes)';
 }
 
+/**
+ * v2.0.1: rând inline de „file change" (filename + diff stats + Approve/Reject)
+ * trimis webview-ului, în paralel cu diff-ul nativ VS Code.
+ */
+export interface FileChangeRow {
+  rowId: string;
+  reviewId: string;
+  filename: string;
+  added: number;
+  removed: number;
+  isNew: boolean;
+}
+
 /** Preview combinat pentru toate fișierele unui review (cap 8000 de caractere). */
 export function buildReviewPreview(changes: FileChangePreview[]): string {
   const parts = changes.map(
@@ -260,6 +274,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     tool: string;
     target: string;
     preview: string;
+    /** v2.0.1: rândurile inline de „file change" (re-postate după reload). */
+    rows?: FileChangeRow[];
+  };
+  /**
+   * v2.0.1: rândurile inline de „file change" din chat — paralele cu diff-ul
+   * nativ VS Code. Stochează perechile temporare ca click-ul pe numele
+   * fișierului să poată redeschide diff-ul nativ.
+   */
+  private pendingFileRows?: {
+    reviewId: string;
+    single: boolean;
+    title: string;
+    rows: FileChangeRow[];
+    pairs: Array<{ label: string; left: vscode.Uri; right: vscode.Uri }>;
   };
   /** v1.3.0: snapshot-uri pre-editare pentru rollback-ul automat. */
   private edits = new EditRollback();
@@ -362,6 +390,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /** Starea toggle-ului Verbose mode (persistată în globalState). */
   private verboseEnabled(): boolean {
     return this.state.get<boolean>(VERBOSE_KEY, false) === true;
+  }
+
+  /** v2.0.1: nivelul de „thinking" (UI + storage; fără efect pe motor încă). */
+  private thinkingLevel(): string {
+    const value = vscode.workspace
+      .getConfiguration('freekit')
+      .get<string>('thinkingLevel', 'medium');
+    return ['off', 'low', 'medium', 'high'].includes(
+      String(value).toLowerCase()
+    )
+      ? String(value).toLowerCase()
+      : 'medium';
   }
 
   /**
@@ -733,6 +773,36 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     // Schimbă providerul AI
+    // v2.0.1: chip-ul de model din composer (provider + model Ollama opțional)
+    if (msg.type === 'provider_change') {
+      const id = PROVIDER_IDS.includes(msg.providerId)
+        ? String(msg.providerId)
+        : 'deepseek';
+      await vscode.workspace
+        .getConfiguration('freekit')
+        .update('provider', id, vscode.ConfigurationTarget.Global);
+      if (typeof msg.modelId === 'string' && msg.modelId) {
+        await vscode.workspace
+          .getConfiguration('freekit')
+          .update(
+            'ollamaModel',
+            String(msg.modelId),
+            vscode.ConfigurationTarget.Global
+          );
+      }
+      if (BROWSER_PROVIDER_IDS.includes(id)) {
+        await this.state.update(LAST_BROWSER_KEY, id);
+      }
+      log(
+        'provider chip set to ' +
+          id +
+          (msg.modelId ? ' / ' + String(msg.modelId) : '')
+      );
+      this.post('provider', id);
+      void this.refreshProviderStatus();
+      return;
+    }
+
     if (msg.type === 'set_provider') {
       const id = PROVIDER_IDS.includes(msg.value)
         ? String(msg.value)
@@ -861,7 +931,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           type: 'diff_review',
           ...pendingPayload
         });
+        // v2.0.1: re-afișează și rândurile inline de „file change"
+        for (const row of pendingPayload.rows ?? []) {
+          this.view?.webview.postMessage({ type: 'file_change_row', ...row });
+        }
       }
+      // v2.0.1: nivelul de „thinking" salvat (chip-ul din composer)
+      this.view?.webview.postMessage({
+        type: 'thinking_level',
+        value: this.thinkingLevel()
+      });
       // v1.9.0: lista de conversații (dropdown-ul de comutare)
       this.postConversations();
       // v0.4.0: status providers pentru badge-ul din toolbar
@@ -915,6 +994,44 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     if (msg.type === 'delete_conversation') {
       await this.handleDeleteConversation();
+      return;
+    }
+
+    // v2.0.1: rândurile inline de „file change" (Approve / Reject / vezi diff)
+    if (msg.type === 'file_change_action') {
+      await this.handleFileChangeAction(
+        String(msg.rowId ?? ''),
+        String(msg.action ?? '')
+      );
+      return;
+    }
+
+    // v2.0.1: nivelul de „thinking" (UI + storage; fără efect pe motor încă)
+    if (msg.type === 'set_thinking_level') {
+      await vscode.workspace
+        .getConfiguration('freekit')
+        .update(
+          'thinkingLevel',
+          String(msg.value ?? 'medium'),
+          vscode.ConfigurationTarget.Global
+        );
+      return;
+    }
+
+    // v2.0.1: acțiunile din meniul „⋯" (Settings / Diagnostics / MCP servers)
+    if (msg.type === 'open_settings') {
+      await vscode.commands.executeCommand(
+        'workbench.action.openSettings',
+        'freekit'
+      );
+      return;
+    }
+    if (msg.type === 'run_diagnostics') {
+      await vscode.commands.executeCommand('freekit.diagnostics');
+      return;
+    }
+    if (msg.type === 'manage_mcp') {
+      await vscode.commands.executeCommand('freekit.mcpManage');
       return;
     }
 
@@ -2306,11 +2423,78 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       ].join('\n');
 
       this.view?.webview.postMessage({ type: 'provider_status', color, title });
+      // v2.0.1: lista pentru meniul chip-ului de model (browser + Ollama local)
+      this.postProvidersList(info);
     } catch (e: any) {
       log('status refresh failed: ' + (e?.message ?? String(e)));
     } finally {
       this.statusInFlight = false;
     }
+  }
+
+  /**
+   * v2.0.1: lista de provideri + modele Ollama pentru meniul chip-ului de model.
+   * Grupare: browser (conturi web) vs local (Ollama). Punctele colorate urmează
+   * starea reală: verde = browser logat, albastru = Ollama local, portocaliu =
+   * necesită login / browser indisponibil.
+   */
+  private postProvidersList(info: ProviderStatusInfo): void {
+    const cfg = vscode.workspace.getConfiguration('freekit');
+    const activeModel = cfg.get<string>('ollamaModel', 'qwen2.5-coder:7b');
+    const selected = this.currentProviderId();
+
+    interface Row {
+      id: string;
+      label: string;
+      sub: string;
+      group: 'browser' | 'local';
+      dot: 'green' | 'orange' | 'blue';
+      modelId?: string;
+      active?: boolean;
+    }
+
+    const browserDot = (id: string): 'green' | 'orange' => {
+      if (!info.browser) return 'orange';
+      if (id === 'deepseek' && !info.deepseekLoggedIn) return 'orange';
+      return 'green';
+    };
+
+    const providers: Row[] = [
+      {
+        id: 'auto',
+        label: 'Auto',
+        sub: 'Browser → Ollama',
+        group: 'browser',
+        dot: info.browser ? 'green' : 'orange'
+      }
+    ];
+    for (const id of BROWSER_PROVIDER_IDS) {
+      providers.push({
+        id,
+        label: PROVIDER_LABELS[id] ?? id,
+        sub: '',
+        group: 'browser',
+        dot: browserDot(id)
+      });
+    }
+    const models = info.ollamaModels.length ? info.ollamaModels : [activeModel];
+    for (const model of models) {
+      providers.push({
+        id: 'ollama',
+        label: model,
+        sub: '',
+        group: 'local',
+        dot: info.ollama ? 'blue' : 'orange',
+        modelId: model
+      });
+    }
+    for (const p of providers) {
+      p.active =
+        p.group === 'local'
+          ? selected === 'ollama' && p.modelId === activeModel
+          : p.id === selected;
+    }
+    this.view?.webview.postMessage({ type: 'providers_list', providers });
   }
 
   /** v0.4.0: raport detaliat (comanda "Show Provider Status" + click pe badge). */
@@ -2601,17 +2785,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const target = single ? changes[0].label : changes.length + ' files';
     let inlineShown = false;
     if (this.view && resolveInline) {
+      // v2.0.1: rândurile inline de „file change" — paralele cu diff-ul nativ
+      const rows: FileChangeRow[] = changes.map((c, i) => {
+        const stats = computeDiffStats(c.oldContent ?? '', c.newContent ?? '');
+        return {
+          rowId: reviewId + ':' + i,
+          reviewId,
+          filename: c.label,
+          added: stats.added,
+          removed: stats.removed,
+          isNew: !!c.isNew
+        };
+      });
       const payload = {
         id: reviewId,
         tool: toolName,
         target,
-        preview: buildReviewPreview(changes)
+        preview: buildReviewPreview(changes),
+        rows
       };
       this.pendingInlineReview = { id: reviewId, resolve: resolveInline };
       this.pendingInlineReviewPayload = payload;
+      this.pendingFileRows = { reviewId, single, title, rows, pairs };
       this.view.webview.postMessage({ type: 'diff_review', ...payload });
+      for (const row of rows) {
+        this.view.webview.postMessage({ type: 'file_change_row', ...row });
+      }
       inlineShown = true;
-      log('diff review: inline card sent to chat (id ' + reviewId + ')');
+      log(
+        'diff review: inline card + ' +
+          rows.length +
+          ' file change row(s) sent to chat (id ' +
+          reviewId +
+          ')'
+      );
     }
 
     // 3) întreabă utilizatorul (butoane nativ VS Code, în bara de jos)
@@ -2693,19 +2900,67 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     this.pendingInlineReview = undefined;
     this.pendingInlineReviewPayload = undefined;
+    this.pendingFileRows = undefined;
 
     // v1.2.1: anunță cardul din chat despre decizia finală (oricare cale a
     // câștigat-o) — butoanele sunt înlocuite de statusul rezolvat
+    // v2.0.1: același mesaj închide și rândurile inline de „file change"
     if (inlineShown) {
       this.view?.webview.postMessage({
         type: 'diff_review_done',
         id: reviewId,
+        reviewId,
         decision,
         via
       });
     }
 
     return decision;
+  }
+
+  /**
+   * v2.0.1: acțiunile rândurilor inline de „file change" din chat.
+   * `view_diff` redeschide diff-ul nativ VS Code; `approve` / `reject` ajung la
+   * ACEEAȘI promisiune ca cardul de diff review și notificarea VS Code — prima
+   * decizie câștigă.
+   */
+  private async handleFileChangeAction(
+    rowId: string,
+    action: string
+  ): Promise<void> {
+    const meta = this.pendingFileRows;
+    if (!meta) return;
+
+    if (action === 'view_diff') {
+      const idx = Number(String(rowId).split(':').pop());
+      const pair = meta.pairs[Number.isFinite(idx) ? idx : 0];
+      if (!pair) return;
+      const title = meta.single
+        ? meta.title
+        : meta.title + ' — ' + pair.label;
+      try {
+        await vscode.commands.executeCommand(
+          'vscode.diff',
+          pair.left,
+          pair.right,
+          title
+        );
+      } catch (e: any) {
+        log(
+          'file change row: could not open the diff — ' +
+            (e?.message ?? String(e))
+        );
+      }
+      return;
+    }
+
+    const pending = this.pendingInlineReview;
+    if (!pending || pending.id !== meta.reviewId) return;
+    if (action === 'approve') {
+      pending.resolve('__inline_accept__');
+    } else if (action === 'reject') {
+      pending.resolve('__inline_reject__');
+    }
   }
 
   // FAZA E: istoricul persistat în globalState (v1.9.0: doar ca sursă de migrare —
@@ -2848,48 +3103,114 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const markedUri = toUri('marked.min.js');
     const purifyUri = toUri('purify.min.js');
 
-    const providerOptions = Object.entries(PROVIDER_LABELS)
-      .map(([id, label]) => `<option value="${id}">${label}</option>`)
-      .join('');
-
     return `<!DOCTYPE html>
 <html><head>
 <meta charset="UTF-8"/>
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${webview.cspSource}; style-src ${webview.cspSource}; img-src ${webview.cspSource} https: data:; font-src ${webview.cspSource};"/>
 <link rel="stylesheet" href="${cssUri}"/>
 </head><body>
-<div id="toolbar">
-  <select id="provider" title="AI Provider">${providerOptions}</select>
-  <span id="status-badge" class="status-badge" title="Checking provider status...">⚪</span>
-  <label class="auto-approve-toggle" id="auto-approve-toggle" title="Auto-approve: when checked, write_file / edit_file / run_command / git are approved automatically, without confirmation cards">
-    <input type="checkbox" id="auto-approve"/>
-    <span>⚡ Auto</span>
-  </label>
-  <button id="verbose-toggle" title="Verbose mode: shows every AI step in the chat (Thinking / Executing / Result / Decision)"></button>
-  <button id="stop" title="Stop the response" hidden>
-    <svg viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></svg>
-  </button>
-  <button id="show-chrome" title="Show the Chrome window (web providers)"></button>
-  <button id="clear" title="Clear the chat"></button>
-</div>
-<div id="conv-bar">
-  <select id="conversation" title="Conversations — switch between them (old ones stay in the list)"></select>
-  <button id="conv-new" title="New conversation (the current one stays in the list)"></button>
-  <button id="conv-delete" title="Delete the current conversation from the list"></button>
-</div>
-<div id="messages"></div>
-<button id="jump" title="Jump to the latest" hidden>
-  <svg viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M8.53 13.03a.75.75 0 0 1-1.06 0l-5-5a.75.75 0 1 1 1.06-1.06L7.25 10.69V3.75a.75.75 0 0 1 1.5 0v6.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-5 5Z"/></svg>
-</button>
-<div id="input-area">
-  <div id="attachments" hidden></div>
-  <div id="input-wrapper">
-    <textarea id="input" rows="1" placeholder="Type a message..."></textarea>
-    <button id="attach-file" title="Attach files"></button>
-    <button id="attach-folder" title="Attach folders"></button>
-    <button id="mic-btn" title="Speak (capture runs in the extension + local Whisper)"></button>
-    <button id="send" title="Send (Enter)"></button>
-  </div>
+<!-- v2.0.1: icon sprite (structura din mockup) -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></symbol>
+  <symbol id="i-more" viewBox="0 0 16 16"><circle cx="3" cy="8" r="1.2" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r="1.2" fill="currentColor" stroke="none"/><circle cx="13" cy="8" r="1.2" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 16 16"><path d="M4 6l4 4 4-4"/></symbol>
+  <symbol id="i-check" viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-6.5"/></symbol>
+  <symbol id="i-attach" viewBox="0 0 16 16"><path d="M13 7.2L8 12.2a3 3 0 0 1-4.2-4.2l5-5a2 2 0 0 1 2.8 2.8l-5 5a1 1 0 0 1-1.4-1.4l4.5-4.5"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 16 16"><path d="M1.5 3.5h4L7 5h7.5v7.5h-13z"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 16 16"><rect x="6" y="2" width="4" height="7" rx="2"/><path d="M3.5 7.5a4.5 4.5 0 0 0 9 0M8 12v2"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 16 16"><rect x="4.5" y="4.5" width="7" height="7" rx="1.2" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-send" viewBox="0 0 16 16"><path d="M8 13V3M4 7l4-4 4 4"/></symbol>
+  <symbol id="i-bulb" viewBox="0 0 16 16"><path d="M6 12h4M6.5 14h3M8 2a4 4 0 0 0-2.2 7.3c.3.3.4.6.4 1V11h3.6v-.7c0-.4.1-.7.4-1A4 4 0 0 0 8 2z"/></symbol>
+  <symbol id="i-file" viewBox="0 0 16 16"><path d="M4 2h5l3 3v9H4zM9 2v3h3"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 16 16"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="1.8"/></symbol>
+  <symbol id="i-list" viewBox="0 0 16 16"><path d="M3 4h10M3 8h10M3 12h6"/></symbol>
+  <symbol id="i-pulse" viewBox="0 0 16 16"><path d="M1.5 8h3L6 4l3 8 1.5-4h4"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 16 16"><path d="M6 2v3M10 2v3M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0zM8 11v3"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 16 16"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.5 8.5h6l.5-8.5"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></symbol>
+</svg>
+
+<div class="side">
+
+  <!-- HEADER: titlu + New chat + meniul ⋯ -->
+  <header class="head">
+    <span class="title">Freekit</span>
+    <span class="grow"></span>
+    <button class="ibtn" id="conv-new" title="New chat" aria-label="New chat"><svg class="ic"><use href="#i-plus"/></svg></button>
+    <div class="pop">
+      <button class="ibtn" id="moreBtn" title="More actions" aria-label="More actions" aria-haspopup="true" aria-expanded="false" data-menu="menuMore"><svg class="ic"><use href="#i-more"/></svg></button>
+      <div class="menu down" id="menuMore" role="menu">
+        <div class="mh">Conversations</div>
+        <div id="conv-list"></div>
+        <button class="mi plain danger" id="conv-delete" role="menuitem"><svg class="ic"><use href="#i-trash"/></svg>Delete chat</button>
+        <div class="sep"></div>
+        <button class="mi plain" id="mShowChrome" role="menuitem"><svg class="ic"><use href="#i-eye"/></svg>Show Chrome</button>
+        <button class="mi plain" id="mStatus" role="menuitem"><svg class="ic"><use href="#i-pulse"/></svg>Provider status</button>
+        <button class="mi plain" id="mVerbose" role="menuitemcheckbox" aria-checked="false" data-toggle><svg class="ic"><use href="#i-list"/></svg>Verbose logs<span class="sub">Off</span></button>
+        <button class="mi plain" id="mDiagnostics" role="menuitem"><svg class="ic"><use href="#i-pulse"/></svg>Diagnostics</button>
+        <button class="mi plain" id="mMcp" role="menuitem"><svg class="ic"><use href="#i-plug"/></svg>MCP servers</button>
+        <div class="sep"></div>
+        <button class="mi plain" id="mSettings" role="menuitem"><svg class="ic"><use href="#i-gear"/></svg>Settings</button>
+        <button class="mi plain danger" id="mClear" role="menuitem"><svg class="ic"><use href="#i-trash"/></svg>Clear chat</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="chat" id="chat"></main>
+
+  <button id="jump" class="ibtn" title="Jump to the latest" hidden><svg class="ic"><use href="#i-chev"/></svg></button>
+
+  <footer class="composer" id="input-area">
+    <div id="attachments" hidden></div>
+
+    <!-- Rând 1: selectorii de context (model / thinking / auto) -->
+    <div class="ctx">
+      <div class="pop">
+        <button class="chip" id="modelChip" data-menu="menuModel" aria-haspopup="true" aria-expanded="false" title="Provider and model">
+          <span class="dot" id="modelDot"></span><span class="lbl" id="modelLabel">Auto</span><svg class="ic sm"><use href="#i-chev"/></svg>
+        </button>
+        <div class="menu up" id="menuModel" role="menu">
+          <div class="mh">Browser accounts</div>
+          <div id="model-browser"></div>
+          <div class="sep"></div>
+          <div class="mh">Local &middot; Ollama</div>
+          <div id="model-local"></div>
+        </div>
+      </div>
+
+      <div class="pop">
+        <button class="chip" id="thinkChip" data-menu="menuThink" aria-haspopup="true" aria-expanded="false" title="Thinking level">
+          <svg class="ic sm"><use href="#i-bulb"/></svg><span class="lbl" id="thinkLabel">Medium</span><svg class="ic sm"><use href="#i-chev"/></svg>
+        </button>
+        <div class="menu up" id="menuThink" role="menu" data-radio data-label="#thinkLabel" style="min-width:200px">
+          <div class="mh">Thinking level</div>
+          <button class="mi" role="menuitemradio" aria-checked="false" data-value="off" data-label="Off"><svg class="ic sm ck"><use href="#i-check"/></svg>Off<span class="sub">fastest</span></button>
+          <button class="mi" role="menuitemradio" aria-checked="false" data-value="low" data-label="Low"><svg class="ic sm ck"><use href="#i-check"/></svg>Low<span class="sub">quick</span></button>
+          <button class="mi" role="menuitemradio" aria-checked="true" data-value="medium" data-label="Medium"><svg class="ic sm ck"><use href="#i-check"/></svg>Medium<span class="sub">balanced</span></button>
+          <button class="mi" role="menuitemradio" aria-checked="false" data-value="high" data-label="High"><svg class="ic sm ck"><use href="#i-check"/></svg>High<span class="sub">deepest</span></button>
+        </div>
+      </div>
+
+      <span class="grow"></span>
+
+      <button class="chip auto" id="auto" aria-pressed="false" title="Auto-approve file edits and commands">
+        <span class="track"><span class="knob"></span></span><span>Auto</span>
+      </button>
+    </div>
+
+    <!-- Rând 2: input full-width cu acțiuni inline -->
+    <div class="box">
+      <textarea id="in" rows="2" placeholder="Ask Freekit to code... (Enter to send)" aria-label="Message"></textarea>
+      <div class="bar">
+        <button class="ibtn" id="attach-file" title="Attach files" aria-label="Attach files"><svg class="ic"><use href="#i-attach"/></svg></button>
+        <button class="ibtn" id="attach-folder" title="Attach folders" aria-label="Attach folders"><svg class="ic"><use href="#i-folder"/></svg></button>
+        <span class="grow"></span>
+        <button class="ibtn" id="stop" title="Stop the response" hidden><svg class="ic"><use href="#i-stop"/></svg></button>
+        <button class="ibtn" id="mic-btn" title="Voice input" aria-label="Voice input"><svg class="ic"><use href="#i-mic"/></svg></button>
+        <button class="send" id="send" title="Send" aria-label="Send" disabled><svg class="ic"><use href="#i-send"/></svg></button>
+      </div>
+    </div>
+  </footer>
 </div>
 <script src="${markedUri}"></script>
 <script src="${purifyUri}"></script>

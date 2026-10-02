@@ -24,59 +24,54 @@ const ICONS = {
 const ICON_STOP =
   '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></svg>';
 
-const messages = document.getElementById('messages');
-const input = document.getElementById('input');
+// v2.0.1: layout nou (mockup) — #chat + composer
+const messages = document.getElementById('chat');
+const input = document.getElementById('in');
 const sendBtn = document.getElementById('send');
 const stopBtn = document.getElementById('stop');
-const clearBtn = document.getElementById('clear');
-const providerSel = document.getElementById('provider');
 const jumpBtn = document.getElementById('jump');
-// v0.4.0: badge de status + butonul Show Chrome
-const statusBadge = document.getElementById('status-badge');
-const showChromeBtn = document.getElementById('show-chrome');
+// v2.0.1: acțiunile din meniul „⋯" (header)
+const moreBtn = document.getElementById('moreBtn');
+const clearBtn = document.getElementById('mClear');
+const showChromeBtn = document.getElementById('mShowChrome');
+const statusReportBtn = document.getElementById('mStatus');
+const verboseBtn = document.getElementById('mVerbose');
+const diagBtn = document.getElementById('mDiagnostics');
+const mcpBtn = document.getElementById('mMcp');
+const settingsBtn = document.getElementById('mSettings');
+// v2.0.1: chip-ul de model (înlocuiește vechiul <select id="provider">)
+const modelLabel = document.getElementById('modelLabel');
+const modelDot = document.getElementById('modelDot');
+const modelBrowserEl = document.getElementById('model-browser');
+const modelLocalEl = document.getElementById('model-local');
+// v2.0.1: chip-ul de „thinking level"
+const thinkLabel = document.getElementById('thinkLabel');
 // FIX v0.1.1: două butoane separate (fișiere / foldere)
 const attachFileBtn = document.getElementById('attach-file');
 const attachFolderBtn = document.getElementById('attach-folder');
 // v1.6.0: butonul de voice input
 const micBtn = document.getElementById('mic-btn');
-// v1.7.1: butonul Verbose mode
-const verboseBtn = document.getElementById('verbose-toggle');
-// v1.9.0: bara conversațiilor (dropdown + conversație nouă + șterge)
-const convSel = document.getElementById('conversation');
+// v1.9.0: conversațiile (lista din meniul „⋯")
+const convListEl = document.getElementById('conv-list');
 const convNewBtn = document.getElementById('conv-new');
 const convDelBtn = document.getElementById('conv-delete');
 const attsEl = document.getElementById('attachments');
 const inputArea = document.getElementById('input-area');
 
-// v1.9.2: toate butoanele din HTML își primesc pictograma SVG din ICONS
-// (sursă unică — HTML-ul nu mai conține nici emoji, nici SVG inline)
-function applyStaticIcons() {
-  if (verboseBtn) verboseBtn.innerHTML = ICONS.verboseMode;
-  if (showChromeBtn) showChromeBtn.innerHTML = ICONS.showChrome;
-  if (clearBtn) clearBtn.innerHTML = ICONS.clear;
-  if (convNewBtn) convNewBtn.innerHTML = ICONS.newConversation;
-  if (convDelBtn) convDelBtn.innerHTML = ICONS.clear;
-  if (attachFileBtn) attachFileBtn.innerHTML = ICONS.attachFile;
-  if (attachFolderBtn) attachFolderBtn.innerHTML = ICONS.attachFolder;
-  if (micBtn) micBtn.innerHTML = ICONS.microphone;
-  if (sendBtn) sendBtn.innerHTML = ICONS.send;
-}
+// v2.0.1: iconițele butoanelor statice vin direct din sprite-ul SVG din HTML
+// (mockup) — nu se mai injectează SVG-uri din JS.
 
-applyStaticIcons();
+// ===== v0.2.1: Auto-approve toggle (v2.0.1: switch cu aria-pressed) =====
+const autoBtn = document.getElementById('auto');
 
-// ===== v0.2.1: Auto-approve toggle =====
-const autoApproveCb = document.getElementById('auto-approve');
-const autoApproveLabel = autoApproveCb?.closest('.auto-approve-toggle');
-
-autoApproveCb?.addEventListener('change', () => {
-  const enabled = autoApproveCb.checked;
-  autoApproveLabel?.classList.toggle('active', enabled);
+autoBtn?.addEventListener('click', () => {
+  const enabled = autoBtn.getAttribute('aria-pressed') !== 'true';
+  autoBtn.setAttribute('aria-pressed', String(enabled));
   vscode.postMessage({ type: 'set_auto_approve', enabled });
 });
 
 function setAutoApproveUi(enabled) {
-  if (autoApproveCb) autoApproveCb.checked = !!enabled;
-  if (autoApproveLabel) autoApproveLabel.classList.toggle('active', !!enabled);
+  if (autoBtn) autoBtn.setAttribute('aria-pressed', String(!!enabled));
 }
 
 // Cardurile de aprobare rămase deschise devin inutile când auto-approve e activ
@@ -93,14 +88,15 @@ function resolveStaleApprovals() {
 let verboseOn = false;
 const verboseSteps = new Map(); // stepId -> element
 
-verboseBtn?.addEventListener('click', () => {
-  vscode.postMessage({ type: 'set_verbose', enabled: !verboseOn });
-});
-
+// v2.0.1: toggle-ul e acum un item din meniul „⋯" (vezi handler-ul meniului);
+// starea lui se reflectă în aria-checked + sub-textul „On/Off" + punctul de pe ⋯.
 function setVerboseUi(enabled) {
   verboseOn = enabled === true;
   if (!verboseBtn) return;
-  verboseBtn.classList.toggle('active', verboseOn);
+  verboseBtn.setAttribute('aria-checked', String(verboseOn));
+  const sub = verboseBtn.querySelector('.sub');
+  if (sub) sub.textContent = verboseOn ? 'On' : 'Off';
+  moreBtn?.classList.toggle('has-dot', verboseOn);
   verboseBtn.title = verboseOn
     ? 'Verbose mode ON — shows every AI step. Click to turn off.'
     : 'Verbose mode: shows every AI step in the chat (Thinking / Executing / Result / Decision)';
@@ -132,36 +128,38 @@ function convLabel(c) {
   return (c.title || 'Conversation') + ' · ' + stamp;
 }
 
+// v2.0.1: conversațiile sunt o listă radio în meniul „⋯" (nu mai există <select>).
 function setConversations(items, activeId) {
-  if (!convSel) return;
-  convSel.innerHTML = '';
+  if (!convListEl) return;
+  convListEl.innerHTML = '';
   const list = Array.isArray(items) ? items : [];
   if (!list.length) {
-    const opt = document.createElement('option');
-    opt.value = '';
-    opt.textContent = '— no conversations —';
-    convSel.appendChild(opt);
-    convSel.disabled = true;
+    const empty = document.createElement('div');
+    empty.className = 'mh';
+    empty.textContent = 'No conversations';
+    convListEl.appendChild(empty);
     return;
   }
-  convSel.disabled = false;
   for (const c of list) {
-    const opt = document.createElement('option');
-    opt.value = c.id;
-    opt.textContent = convLabel(c);
-    opt.title =
+    const mi = document.createElement('button');
+    mi.type = 'button';
+    mi.className = 'mi';
+    mi.setAttribute('role', 'menuitemradio');
+    mi.setAttribute('aria-checked', String(c.id === activeId));
+    mi.innerHTML =
+      '<svg class="ic sm ck"><use href="#i-check"/></svg><span class="lbl"></span>';
+    const lbl = mi.querySelector('.lbl');
+    lbl.textContent = convLabel(c);
+    lbl.title =
       (c.title || 'Conversation') +
       (typeof c.count === 'number' ? ' (' + c.count + ' messages)' : '');
-    if (c.id === activeId) opt.selected = true;
-    convSel.appendChild(opt);
+    mi.onclick = () => {
+      closeAllMenus();
+      vscode.postMessage({ type: 'switch_conversation', id: c.id });
+    };
+    convListEl.appendChild(mi);
   }
 }
-
-convSel?.addEventListener('change', () => {
-  if (convSel.value) {
-    vscode.postMessage({ type: 'switch_conversation', id: convSel.value });
-  }
-});
 
 convNewBtn?.addEventListener('click', () => {
   vscode.postMessage({ type: 'new_conversation' });
@@ -195,6 +193,7 @@ function renderAttachments() {
   attsEl.innerHTML = '';
   if (!attachments.length) {
     attsEl.hidden = true;
+    syncSendState();
     return;
   }
   attsEl.hidden = false;
@@ -227,6 +226,7 @@ function renderAttachments() {
 
     attsEl.appendChild(chip);
   }
+  syncSendState();
 }
 
 // chip-uri statice pe mesajul utilizatorului (snapshot la trimitere)
@@ -281,7 +281,8 @@ function msgBody(el) {
 
 function add(role, text, ts, atts, msgId) {
   const wrap = document.createElement('div');
-  wrap.className = 'msg ' + role;
+  // v2.0.1: clasa din mockup pentru răspunsurile AI e `.msg.ai`
+  wrap.className = 'msg ' + (role === 'user' ? 'user' : 'ai');
   // v1.5.0: id-ul mesajului se leagă din prima clipă (checkpoint → butonul de restore)
   if (msgId) wrap.dataset.msgId = msgId;
   wrap.appendChild(makeHead(role, ts));
@@ -303,10 +304,18 @@ function add(role, text, ts, atts, msgId) {
 
 function setBusy(value) {
   busy = value;
-  sendBtn.disabled = value;
   stopBtn.hidden = !value;
-  attachFileBtn.disabled = value;
-  attachFolderBtn.disabled = value;
+  if (attachFileBtn) attachFileBtn.disabled = value;
+  if (attachFolderBtn) attachFolderBtn.disabled = value;
+  syncSendState();
+}
+
+/** v2.0.1: Send e activ doar când există text sau atașamente (și nu se generează). */
+function syncSendState() {
+  if (!sendBtn) return;
+  const hasText = !!input.value.trim();
+  const hasAtts = typeof attachments !== 'undefined' && attachments.length > 0;
+  sendBtn.disabled = busy || (!hasText && !hasAtts);
 }
 
 function setPendingText(text) {
@@ -375,10 +384,14 @@ function ensureVerboseStepEl(step) {
     arrow.className = 'vstep-arrow';
     const duration = document.createElement('span');
     duration.className = 'thinking-duration';
+    // v2.0.1: preview cu primele caractere — vizibil doar cât timp e pliat
+    const prev = document.createElement('span');
+    prev.className = 'prev';
     head.appendChild(arrow);
     head.appendChild(icon);
     head.appendChild(label);
     head.appendChild(duration);
+    head.appendChild(prev);
     el.open = true; // deschis cât timp stream-ează
   } else {
     const title = document.createElement('span');
@@ -425,6 +438,15 @@ function addVerboseStep(step) {
       body.textContent += '\n\n' + step.text;
     } else {
       body.textContent = step.text;
+    }
+    // v2.0.1: preview-ul cardului „Thinking" (primele ~60 de caractere)
+    if (isThinking) {
+      const prevEl = el.querySelector('.prev');
+      if (prevEl) {
+        const flat = body.textContent.replace(/\s+/g, ' ').trim();
+        prevEl.textContent =
+          flat.length > 60 ? flat.slice(0, 60) + '…' : flat;
+      }
     }
   }
   if (step.status) {
@@ -726,7 +748,11 @@ function updateMicButton() {
     'transcribing',
     sttState === 'starting' || sttState === 'transcribing'
   );
-  micBtn.innerHTML = sttState === 'recording' ? ICON_STOP : ICONS.microphone;
+  // v2.0.1: iconița vine din sprite — comutăm doar referința <use>
+  const micUse = micBtn.querySelector('use');
+  if (micUse) {
+    micUse.setAttribute('href', sttState === 'recording' ? '#i-stop' : '#i-mic');
+  }
   micBtn.title =
     sttState === 'recording'
       ? 'Stop recording'
@@ -937,6 +963,7 @@ function renderHistory(items) {
   messages.innerHTML = '';
   pendingEl = null;
   verboseSteps.clear(); // v1.7.1
+  fileRows.clear(); // v2.0.1
   stick = true;
   (items || []).forEach((item) => {
     if (item && item.role === 'user') {
@@ -956,7 +983,8 @@ function renderHistory(items) {
 
 function autoResize() {
   input.style.height = 'auto';
-  input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+  input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+  syncSendState();
 }
 
 function addApprovalCard(toolName, path, diff, onApprove, onReject) {
@@ -1102,6 +1130,7 @@ function send() {
   input.value = '';
   input.style.height = 'auto';
   input.focus();
+  syncSendState();
 
   setBusy(true);
   pendingEl = add('assistant', '', Date.now());
@@ -1136,31 +1165,47 @@ clearBtn.addEventListener('click', () => {
   messages.innerHTML = '';
   pendingEl = null;
   verboseSteps.clear(); // v1.7.1
+  fileRows.clear(); // v2.0.1
   setBusy(false);
   stick = true;
   jumpBtn.hidden = true;
 });
 
-// ===== Provider =====
-providerSel.addEventListener('change', () => {
-  vscode.postMessage({ type: 'set_provider', value: providerSel.value });
-});
-
-// ===== v0.4.0: badge de status provideri (🟢🟡🔴) + Show Chrome =====
-const BADGE_EMOJI = { green: '🟢', yellow: '🟡', red: '🔴' };
+// ===== v2.0.1: punctul colorat de pe chip-ul de model =====
+// (înlocuiește vechiul badge emoji 🟢🟡🔴 din toolbar)
+const STATUS_DOT = {
+  green: 'green',
+  yellow: 'orange',
+  orange: 'orange',
+  red: 'red',
+  blue: 'blue'
+};
 
 function setStatusBadge(color, title) {
-  if (!statusBadge) return;
-  statusBadge.textContent = BADGE_EMOJI[color] || '⚪';
-  if (title) statusBadge.title = title;
+  if (!modelDot) return;
+  modelDot.className = 'dot ' + (STATUS_DOT[color] || '');
+  if (title) modelDot.title = title;
 }
 
-statusBadge?.addEventListener('click', () => {
+// ===== v2.0.1: acțiunile din meniul „⋯" =====
+statusReportBtn?.addEventListener('click', () => {
   vscode.postMessage({ type: 'show_status_report' });
 });
 
 showChromeBtn?.addEventListener('click', () => {
   vscode.postMessage({ type: 'show_chrome' });
+});
+
+diagBtn?.addEventListener('click', () => {
+  vscode.postMessage({ type: 'run_diagnostics' });
+});
+
+mcpBtn?.addEventListener('click', () => {
+  vscode.postMessage({ type: 'manage_mcp' });
+});
+
+settingsBtn?.addEventListener('click', () => {
+  vscode.postMessage({ type: 'open_settings' });
 });
 
 // reîmprospătează periodic starea (port CDP / Ollama se pot schimba oricând)
@@ -1310,8 +1355,224 @@ jumpBtn.addEventListener('click', () => {
   jumpBtn.hidden = true;
 });
 
+// ===== v2.0.1: meniuri (⋯ / chip model / chip thinking) =====
+function closeAllMenus(except) {
+  for (const menu of Array.from(document.querySelectorAll('.menu.open'))) {
+    if (menu === except) continue;
+    menu.classList.remove('open');
+    const trigger = document.querySelector('[data-menu="' + menu.id + '"]');
+    if (trigger) trigger.setAttribute('aria-expanded', 'false');
+  }
+}
+
+document.addEventListener('click', (e) => {
+  const trigger = e.target.closest('[data-menu]');
+  if (trigger) {
+    const menu = document.getElementById(trigger.dataset.menu);
+    if (!menu) return;
+    const open = !menu.classList.contains('open');
+    closeAllMenus(open ? menu : null);
+    menu.classList.toggle('open', open);
+    trigger.setAttribute('aria-expanded', String(open));
+    return; // click pe trigger nu închide meniul abia deschis
+  }
+  if (!e.target.closest('.menu')) closeAllMenus();
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeAllMenus();
+});
+
+// meniurile radio simple (thinking level)
+for (const menu of Array.from(document.querySelectorAll('.menu[data-radio]'))) {
+  menu.addEventListener('click', (e) => {
+    const item = e.target.closest('.mi');
+    if (!item) return;
+    for (const mi of Array.from(menu.querySelectorAll('.mi'))) {
+      mi.setAttribute('aria-checked', String(mi === item));
+    }
+    if (menu.dataset.label) {
+      const target = document.querySelector(menu.dataset.label);
+      if (target) target.textContent = item.dataset.label || '';
+    }
+    closeAllMenus();
+    // v2.0.1: thinking level — UI + storage (fără efect pe motor încă)
+    if (menu.id === 'menuThink' && item.dataset.value) {
+      setThinkingUi(item.dataset.value);
+      persistThinking(item.dataset.value);
+      vscode.postMessage({
+        type: 'set_thinking_level',
+        value: item.dataset.value
+      });
+    }
+  });
+}
+
+// meniul „⋯": toggle-ul de verbose are logică proprie, restul închid meniul
+document.getElementById('menuMore')?.addEventListener('click', (e) => {
+  const item = e.target.closest('.mi');
+  if (!item) return;
+  if (item.hasAttribute('data-toggle')) {
+    const on = item.getAttribute('aria-checked') !== 'true';
+    verboseOn = on;
+    setVerboseUi(on);
+    vscode.postMessage({ type: 'set_verbose', enabled: on });
+    return;
+  }
+  closeAllMenus();
+});
+
+// ===== v2.0.1: chip-ul de model (populat dinamic din `providers_list`) =====
+function setModelDot(dot) {
+  if (!modelDot) return;
+  modelDot.className = 'dot' + (dot ? ' ' + dot : '');
+}
+
+function renderProviderMenu(providers) {
+  if (!modelBrowserEl || !modelLocalEl) return;
+  modelBrowserEl.innerHTML = '';
+  modelLocalEl.innerHTML = '';
+  let activeLabel = '';
+  let activeDot = '';
+  for (const p of providers || []) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'mi';
+    item.setAttribute('role', 'menuitemradio');
+    item.setAttribute('aria-checked', String(!!p.active));
+    item.innerHTML =
+      '<svg class="ic sm ck"><use href="#i-check"/></svg><span class="lbl"></span>' +
+      (p.sub ? '<span class="sub"></span>' : '');
+    item.querySelector('.lbl').textContent = p.label || p.id;
+    if (p.sub) item.querySelector('.sub').textContent = p.sub;
+    item.addEventListener('click', () => {
+      for (const mi of Array.from(document.querySelectorAll('#menuModel .mi'))) {
+        mi.setAttribute('aria-checked', String(mi === item));
+      }
+      if (modelLabel) modelLabel.textContent = p.label || p.id;
+      setModelDot(p.dot);
+      closeAllMenus();
+      vscode.postMessage({
+        type: 'provider_change',
+        providerId: p.id,
+        modelId: p.modelId || undefined
+      });
+    });
+    if (p.active) {
+      activeLabel = p.label || p.id;
+      activeDot = p.dot || '';
+    }
+    (p.group === 'local' ? modelLocalEl : modelBrowserEl).appendChild(item);
+  }
+  if (activeLabel && modelLabel) modelLabel.textContent = activeLabel;
+  if (activeDot) setModelDot(activeDot);
+}
+
+// ===== v2.0.1: chip-ul de „thinking level" =====
+let thinkingLevel = 'medium';
+
+function persistThinking(value) {
+  try {
+    const st = vscode.getState() || {};
+    st.thinking = value;
+    vscode.setState(st);
+  } catch {
+    /* ignoră */
+  }
+}
+
+function setThinkingUi(value) {
+  const v =
+    ['off', 'low', 'medium', 'high'].indexOf(value) >= 0 ? value : 'medium';
+  thinkingLevel = v;
+  const item = document.querySelector('#menuThink .mi[data-value="' + v + '"]');
+  if (!item) return;
+  for (const mi of Array.from(document.querySelectorAll('#menuThink .mi'))) {
+    mi.setAttribute('aria-checked', String(mi === item));
+  }
+  if (thinkLabel) thinkLabel.textContent = item.dataset.label || v;
+}
+
+// ===== v2.0.1: rânduri inline de „file change" (Approve / Reject / View diff) =====
+const fileRows = new Map(); // rowId -> element
+
+function addFileChangeRow(row) {
+  if (!row || !row.rowId || fileRows.has(row.rowId)) return;
+  const el = document.createElement('div');
+  el.className = 'change';
+  el.dataset.rowId = row.rowId;
+  el.innerHTML =
+    '<svg class="ic"><use href="#i-file"/></svg>' +
+    '<button type="button" class="fname"></button>' +
+    '<span class="stats"><span class="add"></span> <span class="del"></span></span>' +
+    '<span class="acts">' +
+    '<button type="button" class="btn sec" data-act="reject">Reject</button>' +
+    '<button type="button" class="btn" data-act="approve">Approve</button>' +
+    '</span>';
+
+  const name = el.querySelector('.fname');
+  name.textContent = row.filename;
+  name.title = 'Open the native VS Code diff for ' + row.filename;
+  name.onclick = () => {
+    vscode.postMessage({
+      type: 'file_change_action',
+      rowId: row.rowId,
+      action: 'view_diff'
+    });
+  };
+
+  el.querySelector('.add').textContent = '+' + (row.added || 0);
+  el.querySelector('.del').textContent = '\u2212' + (row.removed || 0);
+
+  const acts = el.querySelector('.acts');
+  el.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn || btn.disabled || el.classList.contains('resolved')) return;
+    el.classList.add('pending');
+    for (const b of Array.from(acts.querySelectorAll('button'))) {
+      b.disabled = true;
+    }
+    vscode.postMessage({
+      type: 'file_change_action',
+      rowId: row.rowId,
+      action: btn.dataset.act
+    });
+  });
+
+  messages.appendChild(el);
+  fileRows.set(row.rowId, el);
+  stick = true;
+  scrollAfterAppend();
+}
+
+/** v2.0.1: o singură decizie închide toate rândurile unui review. */
+function resolveFileRows(reviewId, ok) {
+  for (const [rowId, el] of fileRows) {
+    if (rowId.indexOf(reviewId + ':') !== 0) continue;
+    if (el.classList.contains('resolved')) continue;
+    el.classList.remove('pending');
+    el.classList.add('resolved');
+    const acts = el.querySelector('.acts');
+    if (!acts) continue;
+    acts.innerHTML = '';
+    const state = document.createElement('span');
+    state.className = 'state' + (ok ? ' ok' : ' bad');
+    state.textContent = ok ? 'Applied' : 'Rejected';
+    acts.appendChild(state);
+  }
+}
+
+// v2.0.1: nivelul de thinking salvat în workspaceState (webview)
+try {
+  const st0 = vscode.getState() || {};
+  if (st0.thinking) setThinkingUi(st0.thinking);
+} catch {
+  /* ignoră */
+}
+
 vscode.postMessage({ type: 'ready' });
 renderAttachments();
+syncSendState();
 
 window.addEventListener('message', (event) => {
   const msg = event.data;
@@ -1367,9 +1628,10 @@ window.addEventListener('message', (event) => {
         const sep = current && !current.endsWith(' ') ? ' ' : '';
         input.value = current ? current + sep + text : text;
         input.style.height = 'auto';
-        input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+        input.style.height = Math.min(input.scrollHeight, 140) + 'px';
         input.scrollTop = input.scrollHeight;
         input.focus();
+        syncSendState();
       } else {
         addNotice('🎤 No speech detected in the recording.');
       }
@@ -1393,7 +1655,16 @@ window.addEventListener('message', (event) => {
   } else if (msg.type === 'history') {
     renderHistory(msg.items);
   } else if (msg.type === 'provider') {
-    providerSel.value = msg.text;
+    // v2.0.1: chip-ul de model e actualizat de `providers_list` (nu mai există <select>)
+  } else if (msg.type === 'providers_list') {
+    // v2.0.1: meniul chip-ului de model (browser + Ollama local)
+    renderProviderMenu(msg.providers);
+  } else if (msg.type === 'thinking_level') {
+    // v2.0.1: nivelul de thinking salvat de extensie
+    setThinkingUi(msg.value);
+  } else if (msg.type === 'file_change_row') {
+    // v2.0.1: rând inline de „file change" (paralel cu diff-ul nativ)
+    addFileChangeRow(msg);
   } else if (msg.type === 'approval_request') {
     if (pendingEl) {
       pendingEl.remove();
@@ -1417,8 +1688,11 @@ window.addEventListener('message', (event) => {
     setBusy(true);
   } else if (msg.type === 'diff_review') {
     // v1.2.1: cardul de review cu butoane Accept/Reject, în paralel cu
-    // notificarea VS Code (care poate să nu apară deloc)
-    addDiffReviewCard(msg);
+    // notificarea VS Code (care poate să nu apară deloc).
+    // v2.0.1: când review-ul are rânduri inline de „file change", acelea sunt
+    // UI-ul principal (diff-ul nativ rămâne deschis) — cardul mare cu preview
+    // rămâne doar ca fallback pentru review-urile fără rânduri.
+    if (!msg.rows || !msg.rows.length) addDiffReviewCard(msg);
   } else if (msg.type === 'diff_review_done') {
     // decizia finală (din chat, din notificare, auto-approve sau Stop)
     const card = findDiffReviewCard(msg.id);
@@ -1431,6 +1705,11 @@ window.addEventListener('message', (event) => {
       };
       setDiffReviewStatus(card, labels[msg.decision] || '⏹ Closed');
     }
+    // v2.0.1: aceeași decizie închide și rândurile inline de „file change"
+    resolveFileRows(
+      String(msg.id || ''),
+      msg.decision === 'accept' || msg.decision === 'accept_no_ask'
+    );
   } else if (msg.type === 'checkpoint') {
     // v1.4.0: checkpoint creat pentru un mesaj → afișează butonul de restore
     if (msg.messageId) {

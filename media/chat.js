@@ -1466,6 +1466,53 @@ function closeAllMenus(except) {
   }
 }
 
+/**
+ * v2.3.1: meniurile nu mai au lățime fixă, deci textul lung se trunchiază cu
+ * ellipsis. Punem `title` (tooltip nativ) DOAR pe elementul chiar trunchiat și
+ * NU suprascriem titlurile puse intenționat (ex. rândurile de conversație, care
+ * au deja „titlu (N mesaje) — right-click to delete").
+ *
+ * Selectorul e intenționat îngust: `.chip` e folosit și de atașamente
+ * (`#attachments .chip`) și de mesaje (`.chip-static`), care nu ne privesc.
+ */
+const OVF_TITLE_SELECTOR = '.menu .mi, .composer .ctx .chip';
+
+function syncOverflowTitles(root) {
+  if (!root || !root.querySelectorAll) return;
+
+  const hosts = [];
+  if (root.matches && root.matches(OVF_TITLE_SELECTOR)) hosts.push(root);
+  for (const host of Array.from(root.querySelectorAll(OVF_TITLE_SELECTOR))) hosts.push(host);
+
+  for (const host of hosts) {
+    const el = host.querySelector('.lbl') || host;
+    const full = (el.textContent || '').replace(/\s+/g, ' ').trim();
+    const clipped = !!full && el.scrollWidth > el.clientWidth + 1;
+
+    if (clipped) {
+      if (!el.title) {
+        el.setAttribute('title', full);
+        el.dataset.ovfTitle = '1'; // titlu pus de noi → îl putem scoate la nevoie
+      }
+    } else if (el.dataset.ovfTitle) {
+      el.removeAttribute('title');
+      delete el.dataset.ovfTitle;
+    }
+  }
+}
+
+// lățimea se schimbă cu sidebar-ul, iar etichetele se rescriu din mesaje →
+// recalculăm titlul exact când elementul devine hoverit / focusat (vizibil)
+document.addEventListener('mouseover', (e) => {
+  const host = e.target.closest && e.target.closest(OVF_TITLE_SELECTOR);
+  if (host) syncOverflowTitles(host);
+});
+
+document.addEventListener('focusin', (e) => {
+  const host = e.target.closest && e.target.closest(OVF_TITLE_SELECTOR);
+  if (host) syncOverflowTitles(host);
+});
+
 document.addEventListener('click', (e) => {
   const trigger = e.target.closest('[data-menu]');
   if (trigger) {
@@ -1475,6 +1522,8 @@ document.addEventListener('click', (e) => {
     closeAllMenus(open ? menu : null);
     menu.classList.toggle('open', open);
     trigger.setAttribute('aria-expanded', String(open));
+    // v2.3.1: abia acum meniul e vizibil, deci putem măsura ce text e trunchiat
+    if (open) syncOverflowTitles(menu);
     return; // click pe trigger nu închide meniul abia deschis
   }
   if (!e.target.closest('.menu')) closeAllMenus();
@@ -1667,6 +1716,8 @@ function renderProviderMenu(providers, payload) {
 
   if (activeLabel && modelLabel) modelLabel.textContent = activeLabel;
   if (activeDot) setModelDot(activeDot);
+  // v2.3.1: meniul a fost re-randat → recalculăm titlurile de trunchiere
+  syncOverflowTitles(document);
 }
 
 /** v2.0.2: rândul „Install Ollama" din meniul de model. */

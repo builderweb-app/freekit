@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.3.1 — 2026-10-02
+
+**The dropdown menus are as wide as the chat** — the model and thinking menus no longer lock to a fixed 210/240 px width. They stretch across the whole composer row, so long model names ellipsize on a single line instead of wrapping onto two.
+
+### Menus (`media/chat.css`, `media/chat.js`, `src/chatView.ts`)
+
+- **Full-width "up" menus** — `.menu.up` is now positioned against the composer's chip row instead of the chip itself: `.composer .ctx` is the containing block and its `.pop` wrappers are made `position: static`, so `left: 0; right: 0; width: auto` spans the entire row and the menu still opens exactly under the chip that triggered it. The `.composer` prefix matters because `.ctx` is also used by the context menu (`.menu.ctx { position: fixed }`).
+- **The header `⋯` menu keeps its own rules** — it stays right-aligned to its button, with `min-width: min(240px, calc(100vw - 24px))` and `max-width: min(320px, calc(100vw - 24px))`, so a window narrower than the menu degrades instead of pushing a horizontal scrollbar.
+- **No more two-line model names** — `.mi` is `white-space: nowrap; overflow: hidden` and `.mi .lbl` gets `flex: 1; min-width: 0` with `text-overflow: ellipsis`, while `.mi .sub` is `flex-shrink: 0` so the badge stays pinned to the right. This also subsumes the old `#conv-list .mi .lbl` rule, which only did this for the conversation rows.
+- **Tooltip with the full name** — `syncOverflowTitles()` sets `title` only on elements that are genuinely clipped (`scrollWidth > clientWidth`). It runs when a menu opens (so keyboard users get it too), after the model menu re-renders, and lazily on hover/focus, which keeps it correct across sidebar resizes and label rewrites. It never overwrites an intentional title: conversation rows keep their `title (N messages) — right-click to delete`, the chips keep `Provider and model`, and attachment/message chips are out of scope (`.chip` is used there too, so the selector is `.menu .mi, .composer .ctx .chip`).
+- **`min-width: 0` + viewport-aware `max-width`** — the menu shrinks with the sidebar instead of forcing a horizontal scrollbar. `max-height: 60vh` and `overflow-y: auto` are unchanged, so long provider lists still scroll.
+- **Removed the inline `style="min-width:200px"`** from `#menuThink`, which would otherwise have overridden the responsive width.
+
 ## 2.2.0 — 2026-10-02
 
 **The model chip actually switches models** — picking a model for a web provider now drives the site's own model dropdown through Chrome, so the next message is answered by the model you chose (v2.1.0 only changed the label).

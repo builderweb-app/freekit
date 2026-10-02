@@ -3603,7 +3603,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         <button class="chip" id="thinkChip" data-menu="menuThink" aria-haspopup="true" aria-expanded="false" title="Thinking level">
           <svg class="ic sm"><use href="#i-bulb"/></svg><span class="lbl" id="thinkLabel">Medium</span><svg class="ic sm"><use href="#i-chev"/></svg>
         </button>
-        <div class="menu up" id="menuThink" role="menu" data-radio data-label="#thinkLabel" style="min-width:200px">
+        <div class="menu up" id="menuThink" role="menu" data-radio data-label="#thinkLabel">
           <div class="mh">Thinking level</div>
           <button class="mi" role="menuitemradio" aria-checked="false" data-value="off" data-label="Off"><i class="codicon codicon-check ck"></i>Off<span class="sub">fastest</span></button>
           <button class="mi" role="menuitemradio" aria-checked="false" data-value="low" data-label="Low"><i class="codicon codicon-check ck"></i>Low<span class="sub">quick</span></button>

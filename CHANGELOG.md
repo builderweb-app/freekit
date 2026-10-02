@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.2.0 — 2026-10-02
+
+**The model chip actually switches models** — picking a model for a web provider now drives the site's own model dropdown through Chrome, so the next message is answered by the model you chose (v2.1.0 only changed the label).
+
+### Model selection (`src/modelSelector.ts`, new)
+
+- **`applyModel(page, providerId, modelId)`** — checks whether the model is already active (no useless click), opens the provider's model menu, finds the option, clicks it and verifies the new label; returns `false` (leaving the page clean) when a site redesign breaks the menu.
+- **`getAvailableModels(page, providerId)`** — reads the real options from the open dropdown and merges them with the bundled catalog, so a model that just appeared on the site shows up without an extension update; falls back to the catalog whenever the menu cannot be read.
+- **`readCurrentModel` + normalized matching** — case/diacritics/punctuation-insensitive scoring: exact (1000) > name + qualifier (700) > whole token (500) > substring (below the acceptance threshold). A prefix that adds a **variant token** (`mini`, `pro`, `thinking`, `o3`…) is rejected, so `GPT-4o` never steals the click meant for `GPT-4o mini` and `o3` never lands on `o3-mini`, while a family name still matches a newer release (`Sonnet` → `Sonnet 4.5`). Options marked `disabled` / `aria-disabled` are skipped.
+- **Curated catalog per provider** — ChatGPT (GPT-4o / 4.1 / 4.1 mini / o3 / o4-mini), Claude (Sonnet / Opus / Haiku), Gemini (2.5 Pro / 2.5 Flash), DeepSeek (Chat V3 / DeepThink R1), Mistral (Large / Medium / Small / Codestral), Qwen (Qwen3-Max / Qwen3 Coder / Turbo), Kimi (K2 / K2 Thinking / Latest), each with a `fast` / `smart` / `reasoning` badge.
+- **Human clicks** — the menu button and the option are clicked through `humanClickButton()` (mouse path + press delay), with an occasional scroll before opening, consistent with the rest of the automation.
+
+### Chip wiring (`src/chatView.ts`, `media/chat.js`, `media/chat.css`)
+
+- **Per-provider model, persisted** — the chip stores the choice in globalState (`freekit.browserModel.<providerId>`); Ollama keeps using `freekit.ollamaModel`, and clicking a provider row no longer touches the Ollama model.
+- **The active provider expands its models** — under the selected web provider the menu lists its models (indented, with badges) plus **Site default** to clear the preference; only the active provider unfolds, so the menu stays compact.
+- **The chip shows `Provider · Model`** (e.g. *ChatGPT · GPT-4o*), and the choice is applied right before each message, after New Chat, in both the direct branch and the Auto chain (each provider in the chain applies its own model).
+- **Failures are non-fatal** — if the model cannot be switched, a notice explains it and the message continues with the site's current model.
+
 ## 2.1.0 — 2026-10-02
 
 **Hardware tiers + a model catalog that covers any machine** — from a 4 GB laptop to an 8×H100 workstation, the local-model suggestion is now actually right for the hardware.

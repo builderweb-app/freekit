@@ -1529,6 +1529,37 @@ function setModelDot(dot) {
   modelDot.className = 'dot' + (dot ? ' ' + dot : '');
 }
 
+// v2.2.0: sub-rând de model web (indentat, sub providerul activ)
+function modelSubItem(parent, m, parentName) {
+  const item = document.createElement('button');
+  item.type = 'button';
+  item.className = 'mi bm';
+  item.setAttribute('role', 'menuitemradio');
+  item.setAttribute('aria-checked', String(!!m.active));
+  item.innerHTML =
+    '<i class="codicon codicon-check ck"></i><span class="lbl"></span>' +
+    (m.badge ? '<span class="sub badge"></span>' : '');
+  item.querySelector('.lbl').textContent = m.label;
+  if (m.badge) item.querySelector('.sub').textContent = m.badge;
+  item.addEventListener('click', () => {
+    for (const mi of Array.from(document.querySelectorAll('#menuModel .mi'))) {
+      mi.setAttribute('aria-checked', String(mi === item));
+    }
+    if (modelLabel) {
+      modelLabel.textContent = m.id ? parentName + ' · ' + m.label : parentName;
+    }
+    setModelDot(parent.dot);
+    closeAllMenus();
+    vscode.postMessage({
+      type: 'provider_change',
+      providerId: parent.id,
+      // '' = revino la modelul implicit al site-ului (șterge preferința)
+      modelId: m.id !== undefined ? m.id : undefined
+    });
+  });
+  return item;
+}
+
 function renderProviderMenu(providers, payload) {
   if (!modelBrowserEl || !modelLocalEl) return;
   const ollama = (payload && payload.ollama) || {};
@@ -1547,6 +1578,7 @@ function renderProviderMenu(providers, payload) {
   }
 
   for (const p of providers || []) {
+    const name = p.label || p.id;
     const item = document.createElement('button');
     item.type = 'button';
     item.className = 'mi';
@@ -1554,9 +1586,11 @@ function renderProviderMenu(providers, payload) {
     item.setAttribute('aria-checked', String(!!p.active));
     item.innerHTML =
       '<i class="codicon codicon-check ck"></i><span class="lbl"></span>' +
-      (p.sub ? '<span class="sub"></span>' : '');
-    item.querySelector('.lbl').textContent = p.label || p.id;
-    if (p.sub) item.querySelector('.sub').textContent = p.sub;
+      (p.sub || p.modelLabel ? '<span class="sub"></span>' : '');
+    item.querySelector('.lbl').textContent = name;
+    if (p.sub || p.modelLabel) {
+      item.querySelector('.sub').textContent = p.modelLabel || p.sub;
+    }
     item.addEventListener('click', () => {
       // v2.0.2: rândurile „download" nu selectează modelul, îl descarcă
       if (p.missing) {
@@ -1567,20 +1601,26 @@ function renderProviderMenu(providers, payload) {
       for (const mi of Array.from(document.querySelectorAll('#menuModel .mi'))) {
         mi.setAttribute('aria-checked', String(mi === item));
       }
-      if (modelLabel) modelLabel.textContent = p.label || p.id;
+      if (modelLabel) modelLabel.textContent = name;
       setModelDot(p.dot);
       closeAllMenus();
-      vscode.postMessage({
-        type: 'provider_change',
-        providerId: p.id,
-        modelId: p.modelId || undefined
-      });
+      // v2.2.0: rând de provider → doar providerul (modelul web rămâne al lui);
+      // Ollama își trimite modelul local ca înainte.
+      const payload = { type: 'provider_change', providerId: p.id };
+      if (p.group === 'local' && p.modelId) payload.modelId = p.modelId;
+      vscode.postMessage(payload);
     });
+    (p.group === 'local' ? modelLocalEl : modelBrowserEl).appendChild(item);
+
+    // v2.2.0: sub-rândurile de model pentru providerul web activ
+    for (const m of p.models || []) {
+      modelBrowserEl.appendChild(modelSubItem(p, m, name));
+    }
+
     if (p.active) {
-      activeLabel = p.label || p.id;
+      activeLabel = p.modelLabel ? name + ' · ' + p.modelLabel : name;
       activeDot = p.dot || '';
     }
-    (p.group === 'local' ? modelLocalEl : modelBrowserEl).appendChild(item);
   }
 
   // v2.0.2: hardware-ul detectat, sub lista de modele locale

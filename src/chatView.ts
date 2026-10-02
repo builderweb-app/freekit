@@ -23,6 +23,7 @@ import {
   tierTarget
 } from './hardware';
 import { AIProvider } from './providers/types';
+import { applyModel, browserModelKey, listModels, modelLabel } from './modelSelector';
 import { configInfo, selectors } from './selectors';
 import { BrowserManager } from './browser';
 import {
@@ -802,10 +803,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const id = PROVIDER_IDS.includes(msg.providerId)
         ? String(msg.providerId)
         : 'deepseek';
+      const isBrowser = BROWSER_PROVIDER_IDS.includes(id);
       await vscode.workspace
         .getConfiguration('freekit')
         .update('provider', id, vscode.ConfigurationTarget.Global);
-      if (typeof msg.modelId === 'string' && msg.modelId) {
+      // v2.2.0: providerii web își țin modelul în globalState (browserModel.<id>)
+      // și e aplicat în pagină înainte de fiecare trimitere; Ollama folosește
+      // în continuare setarea `ollamaModel`.
+      if (isBrowser) {
+        if (typeof msg.modelId === 'string') {
+          const modelId = msg.modelId.trim();
+          await this.state.update(browserModelKey(id), modelId || undefined);
+        }
+      } else if (typeof msg.modelId === 'string' && msg.modelId) {
         await vscode.workspace
           .getConfiguration('freekit')
           .update(
@@ -814,7 +824,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             vscode.ConfigurationTarget.Global
           );
       }
-      if (BROWSER_PROVIDER_IDS.includes(id)) {
+      if (isBrowser) {
         await this.state.update(LAST_BROWSER_KEY, id);
       }
       log(
@@ -1327,6 +1337,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             await this.runWithLoginAssist(label, prep.page, signal, () => prov.newChat(prep.page));
             // v1.8.0: dacă pagina cere CAPTCHA, Chrome e adus în față până e rezolvat
             await this.runWithCaptchaAssist(label, prep.page, signal);
+            // v2.2.0: aplică modelul web ales în chip (best-effort)
+            await this.applySelectedModel(id, prep.page, label);
             this.active = { provider, page };
             if (this.abortRequested) throw new Error('__ABORTED__');
             aiReply = await provider.send(page, messageFor(provider), signal, sendOpts);
@@ -1362,6 +1374,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.runWithLoginAssist(label, prep.page, signal, () => prov.newChat(prep.page));
         // v1.8.0: CAPTCHA assist (reCAPTCHA / hCaptcha / Cloudflare „Just a moment”)
         await this.runWithCaptchaAssist(label, prep.page, signal);
+        // v2.2.0: aplică modelul web ales în chip (best-effort)
+        await this.applySelectedModel(selectedId, prep.page, label);
         this.active = { provider, page };
 
         if (this.abortRequested) {
@@ -1704,6 +1718,41 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       .getConfiguration('freekit')
       .get<string>('provider');
     return id && PROVIDER_IDS.includes(id) ? id : 'deepseek';
+  }
+
+  /**
+   * v2.2.0: aplică în pagină modelul web ales pentru providerul dat (din
+   * globalState). Best-effort: dacă site-ul și-a schimbat meniul, mesajul
+   * continuă cu modelul curent al site-ului, iar utilizatorul vede un notice.
+   */
+  private async applySelectedModel(
+    providerId: string,
+    page: Page | undefined,
+    label: string
+  ): Promise<void> {
+    if (!page || !BROWSER_PROVIDER_IDS.includes(providerId)) return;
+    const modelId = this.state.get<string>(browserModelKey(providerId), '');
+    if (!modelId) return;
+    const nice = modelLabel(providerId, modelId);
+    try {
+      const ok = await applyModel(page, providerId, modelId);
+      if (ok) {
+        // succesul e doar în Output — altfel fiecare mesaj ar adăuga o notă
+        log(label + ': model set to ' + modelId);
+      } else {
+        log(label + ': could not switch to ' + modelId);
+        this.post(
+          'notice',
+          '⚠️ ' +
+            label +
+            ': could not switch to "' +
+            nice +
+            '" — continuing with the site\'s current model.'
+        );
+      }
+    } catch (e: any) {
+      log(label + ': model switch failed — ' + (e?.message ?? String(e)));
+    }
   }
 
   /* ======================================================================
@@ -2616,6 +2665,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       speed?: string;
       /** v2.0.2: recomandare care nu e instalată încă (rândul descarcă modelul). */
       missing?: boolean;
+      /** v2.2.0: modelul web ales pentru provider (ex: „GPT-4o"), afișat pe chip. */
+      modelLabel?: string;
+      /** v2.2.0: modelele web ale providerului activ (sub-rânduri în meniu). */
+      models?: Array<{ id: string; label: string; badge?: string; active?: boolean }>;
     }
 
     const browserDot = (id: string): 'green' | 'orange' => {
@@ -2634,13 +2687,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     ];
     for (const id of BROWSER_PROVIDER_IDS) {
-      providers.push({
+      const row: Row = {
         id,
         label: PROVIDER_LABELS[id] ?? id,
         sub: '',
         group: 'browser',
         dot: browserDot(id)
-      });
+      };
+      // v2.2.0: modelul web ales (dacă există) apare pe rând + pe chip
+      const chosen = this.state.get<string>(browserModelKey(id), '');
+      if (chosen) row.modelLabel = modelLabel(id, chosen);
+      // Doar providerul activ își desfășoară modelele — meniul rămâne compact.
+      // Primul rând readuce modelul implicit al site-ului (șterge preferința).
+      if (id === selected) {
+        row.models = [
+          { id: '', label: 'Site default', active: !chosen },
+          ...listModels(id).map((m) => ({
+            id: m.id,
+            label: m.label,
+            badge: m.badge,
+            active: !!chosen && m.id === chosen
+          }))
+        ];
+      }
+      providers.push(row);
     }
 
     const sizeByModel = new Map(

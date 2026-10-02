@@ -5,6 +5,7 @@ Connect web AI chats (**DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen, Kimi**
 ## Features
 
 - 💬 **Chat sidebar** with provider switcher (Auto / DeepSeek / ChatGPT / Gemini / Claude / Mistral (Vibe) / Qwen / Kimi / Ollama local)
+- 🎛️ **Real model selection** — the composer's model chip switches the **actual model in the web UI**, not just the label: pick ChatGPT's GPT-4o / GPT-4.1 / o3, Claude's Sonnet / Opus / Haiku, Gemini 2.5 Pro / 2.5 Flash, DeepSeek's DeepThink (R1) / Chat (V3), or the Mistral / Qwen / Kimi options — Freekit drives the site's own dropdown before sending, per provider (choice kept across sessions; **Site default** reverts). Clicks are human-like, the switch is verified against the button label, and a redesign only costs you a friendly notice + the site's current model
 - 🔀 **Auto fallback** — try the last web provider through Chrome; if it fails, continue on local Ollama automatically
 - 🟢 **Status badge** — live 🟢🟡🔴 indicator for Chrome/Ollama next to the provider picker (click for a report)
 - 🤖 **Agentic loop** — the AI calls tools step by step: read, write, edit, search, run commands, git

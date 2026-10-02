@@ -181,7 +181,7 @@ const visibilitySessions = new WeakMap<Page, CDPSession>();
 const visibilityScripts = new WeakSet<Page>();
 
 /**
- * v2.0.5: forțează pagina să se comporte ca „vizibilă și activă" chiar și cu
+ * v2.0.5: forțează pagina să se comporte ca „vizibilă și activă” chiar și cu
  * fereastra minimizată. CDP nu expune un override direct al lui
  * `visibilityState` (nu există `Emulation.setPageVisibilityOverride`), așa că
  * folosim `Emulation.setFocusEmulationEnabled` (pagina se crede focusată și
@@ -347,7 +347,7 @@ export class BrowserManager {
         existing ?? pages[pages.length - 1] ?? (await this.context.newPage());
       this.page = page;
       if (launched) {
-        // v1.8.0: aplică starea „în fundal" abia acum — fereastra există, deci
+        // v1.8.0: aplică starea „în fundal” abia acum — fereastra există, deci
         // poate fi minimizată (CDP) și scoasă din taskbar (Windows).
         await this.applyHiddenState(page).catch((e) =>
           log('applyHiddenState a eșuat: ' + (e?.message ?? String(e)))

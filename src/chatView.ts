@@ -16,8 +16,11 @@ import { pullOllamaModel } from './providers/ollama';
 import {
   detectHardware,
   fitsThisMachine,
+  hardwareReport,
   hardwareSummary,
-  recommendModels
+  modelSpeed,
+  recommendModels,
+  tierTarget
 } from './hardware';
 import { AIProvider } from './providers/types';
 import { configInfo, selectors } from './selectors';
@@ -2609,6 +2612,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       active?: boolean;
       /** v2.0.2: modelul instalat e recomandat pentru hardware-ul detectat. */
       recommended?: boolean;
+      /** v2.1.0: cât de repede rulează modelul instalat pe mașina asta. */
+      speed?: string;
       /** v2.0.2: recomandare care nu e instalată încă (rândul descarcă modelul). */
       missing?: boolean;
     }
@@ -2644,15 +2649,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const models = info.ollamaModels.length ? info.ollamaModels : [activeModel];
     for (const model of models) {
       const recommended = fitsThisMachine(model, hw);
+      const speed = modelSpeed(model, hw);
       const size = formatModelSize(sizeByModel.get(model.toLowerCase()) ?? 0);
+      // v2.1.0: spune și CÂT de repede rulează: VRAM = rapid, MoE pe CPU =
+      // acceptabil, dens în RAM = lent (dar utilizabil).
+      const verdict = !recommended
+        ? ''
+        : speed === 'fast'
+          ? 'recommended · GPU'
+          : speed === 'medium'
+            ? 'recommended · CPU-friendly'
+            : 'recommended · CPU (slow)';
       providers.push({
         id: 'ollama',
         label: model,
-        sub: [recommended ? 'recommended' : '', size].filter(Boolean).join(' · '),
+        sub: [verdict, size].filter(Boolean).join(' · '),
         group: 'local',
         dot: info.ollama ? 'blue' : 'orange',
         modelId: model,
-        recommended
+        recommended,
+        speed: speed ?? undefined
       });
     }
 
@@ -2665,11 +2681,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         providers.push({
           id: 'ollama',
           label: rec.id,
-          sub: rec.size + ' · download',
+          sub: [rec.size, rec.speed, 'download'].join(' · '),
           group: 'local',
           dot: 'orange',
           modelId: rec.id,
-          missing: true
+          missing: true,
+          speed: rec.speed
         });
       }
     }
@@ -2691,7 +2708,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ramGb: hw.ramGb,
         cpu: hw.cpuModel,
         cpuCores: hw.cpuCores,
-        note: hw.note ?? ''
+        note: hw.note ?? '',
+        // v2.1.0: tier + detecție completă (toate GPU-urile, disc, VM)
+        tier: hw.tier,
+        tierTarget: tierTarget(hw.tier),
+        totalVramGb: hw.totalVramGb,
+        unifiedMemoryGb: hw.unifiedMemoryGb,
+        freeDiskGb: hw.freeDiskGb,
+        isVM: hw.isVM,
+        gpus: hw.gpus.map((g) => ({
+          name: g.name,
+          vramGb: g.vramGb,
+          vendor: g.vendor,
+          type: g.type,
+          bandwidthGbps: g.bandwidthGbps ?? 0
+        }))
       },
       recommendations,
       ollama: { state: installState, running: info.ollama, installed: info.ollamaCli }
@@ -2832,16 +2863,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     // v2.0.2: hardware detectat + recomandări de modele locale
+    // v2.1.0: raport complet (tier, toate GPU-urile, disc, VM) + viteză estimată
     const hw = await detectHardware();
-    const recs = recommendModels(hw);
+    const recs = recommendModels(hw, 4);
     lines.push('Hardware: ' + hardwareSummary(hw));
-    lines.push('  CPU: ' + hw.cpuModel + ' (' + hw.cpuCores + ' threads)');
-    if (hw.note) lines.push('  Note: ' + hw.note);
+    lines.push(...hardwareReport(hw));
     if (recs.length) {
-      lines.push('  Recommended local models (best first):');
+      lines.push('  Recommended local models (fastest first, best per size class):');
       for (const r of recs) {
         lines.push(
-          '    • ' + r.id + ' (' + r.size + ', ~' + r.needGb + ' GB) — ' + r.why
+          '    • ' + r.id + ' (' + r.size + ', ~' + r.needGb + ' GB, ' + r.speed +
+            ', from ' + r.minTier + ') — ' + r.why
         );
       }
     }

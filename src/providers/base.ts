@@ -11,7 +11,7 @@ import {
 import { SendOptions } from './types';
 import {
   humanBehaviorEnabled,
-  humanMoveToElement,
+  humanClickButton,
   humanScroll,
   humanSettings,
   humanType
@@ -23,9 +23,6 @@ const log = (msg: string) => console.log('[Freekit]', msg);
 
 /** Momentele (ms de la trimitere) la care verificăm dacă e nevoie de reparare. */
 const HEAL_CHECKPOINTS = [4000, 9000, 20000, 40000];
-
-/** v0.8.0: peste atâtea caractere renunțăm la tastarea "umană" (lipire directă). */
-const HUMAN_TYPING_MAX_CHARS = 1500;
 
 /** v0.8.0: bugetul total de așteptare + pragul de stabilitate a textului. */
 const HARD_TIMEOUT_MS = 150_000;
@@ -62,10 +59,13 @@ export { getLastResponseText };
  * v0.8.0 — HUMAN BEHAVIOR (anti-detect)
  * ========================================================================= */
 
-/** Mișcare de mouse "umană" înainte de un click (doar dacă e activată). */
-async function humanClickPrep(page: Page, target: string | Locator): Promise<void> {
-  if (!humanBehaviorEnabled()) return;
-  await humanMoveToElement(page, target);
+/**
+ * v2.0.6: pregătește căsuța de input pentru tastare — scroll ocazional (ca un om
+ * care verifică pagina) și click "uman" (mișcare + down/up cu pauză).
+ */
+async function clickInput(page: Page, input: Locator): Promise<void> {
+  if (humanBehaviorEnabled() && Math.random() < 0.25) await humanScroll(page);
+  await humanClickButton(page, input, 15000);
 }
 
 /** Curăță căsuța de input (best-effort) după o anulare în timpul tastării. */
@@ -300,8 +300,7 @@ export async function newChatVia(page: Page, providerId: string, label: string) 
     const btn = page.locator(sel).first();
     try {
       if ((await btn.count()) === 0 || !(await btn.isVisible())) continue;
-      await humanClickPrep(page, btn);
-      await btn.click({ timeout: 2000 });
+      await humanClickButton(page, btn);
       await sleep(1200);
       // FIX v2: 5s erau prea puțini (ex: DeepSeek — tranziția spre chatul nou e lentă)
       if (await inputAvailable(page, providerId, 8000)) {
@@ -326,8 +325,7 @@ export async function newChatVia(page: Page, providerId: string, label: string) 
     if (healed) {
       const btn = page.locator(healed).first();
       try {
-        await humanClickPrep(page, btn);
-        await btn.click({ timeout: 2000 });
+        await humanClickButton(page, btn);
         await sleep(1200);
         if (await inputAvailable(page, providerId, 8000)) {
           log(label + ': new chat via repaired selector (' + healed + ')');
@@ -356,8 +354,7 @@ export async function clickStop(page: Page, providerId: string): Promise<boolean
     const btn = page.locator(sel).first();
     try {
       if ((await btn.count()) === 0 || !(await btn.isVisible())) continue;
-      await humanClickPrep(page, btn);
-      await btn.click({ timeout: 1500 });
+      await humanClickButton(page, btn, 1500);
       selectors.note(providerId, 'stopButton', sel);
       log('stop pressed via ' + sel);
       return true;
@@ -519,25 +516,14 @@ export async function sendAndWait(
   const human = humanSettings();
 
   const input = await findInput(page, providerId, label, 15000);
-  if (human.behavior) {
-    // mișcare mică de mouse spre căsuța de input + scroll ocazional
-    await humanMoveToElement(page, input);
-    if (Math.random() < 0.25) await humanScroll(page);
-  }
-  await input.click();
+  await clickInput(page, input);
 
-  // v0.8.0: tastare "umană" (char-cu-char); mesajele foarte lungi se lipesc
-  // direct — un om nu tastează 100k caractere (ex: atașamente embed-uite).
+  // v0.8.0: tastare "umană" (evenimente reale de tastatură); v2.0.6: mesajele
+  // lungi tastează natural doar începutul, restul se lipește — vezi humanType.
   try {
-    if (human.typing && message.length <= HUMAN_TYPING_MAX_CHARS) {
+    if (human.typing) {
       await humanType(page, message, {}, signal);
     } else {
-      if (human.typing) {
-        log(
-          label + ': message of ' + message.length +
-            ' chars — direct paste (over the typing limit)'
-        );
-      }
       await page.keyboard.insertText(message);
     }
   } catch (e: any) {
@@ -611,7 +597,7 @@ export async function sendAndWait(
     if (!enterRetried && elapsed > 25000) {
       enterRetried = true;
       try {
-        await input.click({ timeout: 2000 });
+        await humanClickButton(page, input, 2000);
         await sleep(150);
         await page.keyboard.press('Enter');
         log(label + ': Enter re-sent (the message did not go out?)');

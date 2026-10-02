@@ -1584,16 +1584,41 @@ function renderProviderMenu(providers, payload) {
   }
 
   // v2.0.2: hardware-ul detectat, sub lista de modele locale
+  // v2.1.0: + tier, toate GPU-urile, disc liber + viteza fiecărei recomandări
   if (modelHwEl) {
     const hw = payload && payload.hardware;
     if (hw && hw.summary) {
       modelHwEl.textContent = hw.summary;
-      const recs = (payload.recommendations || [])
-        .map((r) => '• ' + r.id + ' (' + r.size + ', ~' + r.needGb + ' GB) — ' + r.why)
-        .join('\n');
-      modelHwEl.title = recs
-        ? 'Recommended for this machine:\n' + recs
-        : 'No local model recommendation available.';
+      const lines = [];
+      if (hw.tier) {
+        lines.push('Tier ' + hw.tier + ' — ' + (hw.tierTarget || 'local models'));
+      }
+      const gpus = hw.gpus || [];
+      for (const g of gpus) {
+        const vram = g.vramGb ? ' · ' + g.vramGb + ' GB' : '';
+        const bw = g.bandwidthGbps ? ' · ~' + g.bandwidthGbps + ' GB/s' : '';
+        lines.push('GPU: ' + g.name + vram + (g.type ? ' · ' + g.type : '') + bw);
+      }
+      if (gpus.length > 1 && hw.totalVramGb) {
+        lines.push('Total VRAM (discrete): ' + hw.totalVramGb + ' GB');
+      }
+      if (hw.unifiedMemoryGb) {
+        lines.push('Unified memory for a model: ' + hw.unifiedMemoryGb + ' GB');
+      }
+      if (hw.freeDiskGb) {
+        lines.push('Disk free: ' + hw.freeDiskGb + ' GB');
+      }
+      if (hw.isVM) lines.push('Running in a virtual machine');
+      const recs = (payload.recommendations || []).map(
+        (r) =>
+          '• ' + r.id + ' (' + r.size + ', ~' + r.needGb + ' GB, ' + (r.speed || '?') +
+          ', from ' + (r.minTier || '?') + ') — ' + r.why
+      );
+      if (recs.length) {
+        lines.push('', 'Recommended for this machine (fastest first):');
+        lines.push.apply(lines, recs);
+      }
+      modelHwEl.title = lines.join('\n') || 'No local model recommendation available.';
       modelHwEl.hidden = false;
     } else {
       modelHwEl.hidden = true;

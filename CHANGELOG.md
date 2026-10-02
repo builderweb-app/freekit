@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.1.0 — 2026-10-02
+
+**Hardware tiers + a model catalog that covers any machine** — from a 4 GB laptop to an 8×H100 workstation, the local-model suggestion is now actually right for the hardware.
+
+### Detection (`src/hardware.ts`)
+
+- **Every GPU, not just the first** — `HardwareInfo.gpus` now carries the full list with `vendor` (`nvidia` / `amd` / `apple` / `intel` / `unknown`), `type` (`consumer` / `workstation` / `server` / `igpu`) and `bandwidthGbps`. Classification is name-driven (Quadro / RTX A / Radeon Pro → workstation, Tesla / Instinct / A100 / H100 → server, Intel UHD / Iris / Radeon Graphics / Apple M → iGPU), and the workstation pattern uses `\b` after the exact model so an RTX 4060 is not mistaken for an RTX 4000.
+- **Real memory bandwidth** — `nvidia-smi --query-gpu=...,memory.bus_width,clocks.max.memory` gives `bus width × clock × 2 / 8` (an RTX 4090 reports ~1008 GB/s). Apple Silicon gets its published bandwidth per chip family (M1 → M4 Max), because unified memory bandwidth is what decides speed there. Drivers that do not expose `clocks.max.memory` fall back to the old two-field query.
+- **`totalVramGb`** — the sum over *discrete* GPUs only; iGPUs share system RAM, so counting their reported adapter memory would double-count. **`unifiedMemoryGb`** (~70% of RAM) is set for Apple Silicon, where the model has to fit in that one pool instead of VRAM + RAM.
+- **Machine tier `T0`-`T6`** — `tier` is derived from the model memory budget (`max(unified, totalVram + 0.7 × RAM)`) with thresholds 4 / 12 / 24 / 48 / 96 / 192 GB. `minTierFor()` maps a model's memory back to the tier where it runs comfortably, and `tierTarget()` gives the human-readable "what can this machine run" line. Both directions use the same table, so they cannot drift.
+- **Free disk** — `freeDiskGb` via `fs.statfs` on the Ollama models directory (honours `OLLAMA_MODELS`), walking up to the nearest existing path and falling back to `df -Pk`. `0` means unknown.
+- **VM detection** — `isVM` from `systemd-detect-virt` / DMI on Linux, `kern.hv_vmm_present` + `hw.model` on macOS, `Win32_ComputerSystem`/`Win32_BIOS` on Windows, plus a free CPU-model check on every platform. Best-effort: a failed probe never blocks detection.
+
+### Recommendations
+
+- **Catalog grew from 10 to 51 models** — `qwen2.5-coder:0.5b` up to `deepseek-r1:671b` / `qwen3-coder:480b` / `llama4:maverick`. Every `needGb` was checked against the real Ollama registry manifests (blob size + KV/context headroom) instead of being estimated, and every id was verified to exist in the Ollama library.
+- **Speed-aware scoring** — a model is `fast` when it fits entirely in VRAM (or unified memory), `medium` when it is an MoE with ≤10B active parameters that runs partly on the CPU (gpt-oss:20b on 32 GB RAM), and `slow` when a dense model is pushed into RAM. Ordering is speed first, quality second, so a machine is no longer told to download a 30B that only fits across CPU and GPU while a fully GPU-resident option exists.
+- **One pick per size class** — the list mixes the best overall, a different size class and a smaller option, so you get three genuinely different choices instead of three near-identical models. Models that do not fit on the free disk space are skipped (unless that would leave nothing).
+- **Recommendations carry `speed`, `tags` (`code` / `reasoning` / `vision` / `general` / `moe`) and `minTier`**, and the model menu labels installed models `recommended · GPU` / `recommended · CPU-friendly` / `recommended · CPU (slow)` via the new `modelSpeed()`. The hardware footer line now ends with the tier, and its tooltip lists every GPU with type and bandwidth, unified memory, free disk, VM status and the recommendations.
+- **Status report** — `hardwareReport()` replaces the two ad-hoc lines: tier + target, CPU, usable memory, one line per GPU, total VRAM, unified memory, disk and environment.
+
+> **Note:** the existing `ramGb` field kept its name (it is what `hardwareSummary` and the webview payload already used) — there is no `totalRamGb`.
+
+## 2.0.6 — 2026-10-02
+
+**Real keystrokes instead of pasting** — messages now arrive as genuine `keydown`/`keyup` events, which is what anti-bot checks look for, and long prompts no longer take minutes.
+
+- **`humanType` types for real** (`src/human-behavior.ts`) — instead of pasting every character with `page.keyboard.insertText()`, text now goes through `page.keyboard.type()`, so Chrome fires real `keydown` / `keypress` / `keyup` events. Delays between characters dropped from 15-50 ms to **5-15 ms**; bursts and punctuation/thinking pauses are unchanged. Newlines are the one exception and are still written as text (`insertText`) — `type()` would send them as a real **Enter**, which in a chat composer means "send the message".
+- **Long prompts stay fast** — new size strategy: up to **200 characters** the whole message is typed naturally; above that only the first **30-50 characters** are typed (enough to show the site a human typing pattern) and the rest is inserted in a single paste. Measured on the same 1000-character prompt: **29.2 s → 2.0 s**, and a 5000-character prompt now takes **~1 s** instead of tens of seconds. The old `HUMAN_TYPING_MAX_CHARS = 1500` cut-off in `src/providers/base.ts` is gone — `humanType` handles any length. Text integrity is unchanged (verified character-by-character against the previous implementation on both `<textarea>` and `contenteditable` composers).
+- **Human clicks with a real press delay** — new `humanClick()` (`src/human-behavior.ts`): the mouse is moved in 2-4 steps from its current position, then `mouse.down()`, a **50-150 ms** pause, and `mouse.up()`. Called through `humanClickButton()`, which falls back to a normal Playwright click when the element has no bounding box. Used for the composer focus, the new-chat button (including the repaired selector), Stop, and the 25 s Enter-retry re-focus. The mouse path now interpolates from the last known cursor position instead of jumping in from the top-left corner.
+- **Stealth patches at startup** — new `applyStealthPatches()` (`src/browser.ts`), applied from `ensureOpen()` on every page (and re-applied on navigation via `addInitScript`): `navigator.webdriver` is overridden to `false` at prototype level so it is not detectable as an own property, `window.chrome` gets a minimal stub when the browser build does not provide it, and `navigator.permissions.query` answers the `notifications` query from the real `Notification.permission` instead of leaking an automation-flavoured state. **User-Agent, viewport and timezone are deliberately left untouched** — Chrome is real and those overrides would be the suspicious part.
+
 ## 2.0.5 — 2026-10-02
 
 **Chrome stays in the background** — the window no longer jumps in front of VS Code on every message sent or received.

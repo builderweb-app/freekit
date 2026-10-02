@@ -207,6 +207,107 @@ export async function enableVisibilityOverride(pg: Page): Promise<void> {
   }
 }
 
+/* =========================================================================
+ * v2.0.6 — STEALTH PATCHES (anti-detect)
+ * Patch-uri minime aplicate în pagină imediat după conectare. NU atingem
+ * User-Agent, viewport sau timezone — Chrome e real, cu profil real, deci
+ * acele suprascrieri ar face mai mult rău decât bine.
+ * ========================================================================= */
+
+/**
+ * Rulează ÎN PAGINĂ: ascunde urmele de automatizare pe care unele site-uri le
+ * verifică. Idempotent — se poate rula de mai multe ori pe aceeași pagină.
+ */
+const applyStealthInPage = (): void => {
+  try {
+    // 1) navigator.webdriver — definit pe prototip, ca la Chrome normal (nu ca
+    // proprietate proprie pe instanță, care ar fi vizibilă la o simplă enumerare).
+    Object.defineProperty(Navigator.prototype, 'webdriver', {
+      configurable: true,
+      enumerable: true,
+      get: () => false
+    });
+  } catch {
+    /* deja definit non-configurabil — ignorăm */
+  }
+
+  try {
+    // 2) window.chrome — lipsește pe build-urile fără branding; un stub minimal
+    // e mai puțin suspect decât absența completă a obiectului.
+    const w = window as any;
+    if (!w.chrome) {
+      w.chrome = {
+        runtime: {},
+        app: { isInstalled: false },
+        loadTimes: () => ({}),
+        csi: () => ({})
+      };
+    }
+  } catch {
+    /* ignorăm */
+  }
+
+  try {
+    // 3) navigator.permissions.query — unele site-uri întreabă starea
+    // permisiunii de notificări ca semnal de automatizare.
+    const perms = (navigator as any).permissions;
+    if (perms && typeof perms.query === 'function' && !perms.__freekitPerms) {
+      const original = perms.query.bind(perms);
+      perms.query = (params: any) => {
+        if (params && params.name === 'notifications') {
+          const state =
+            typeof Notification !== 'undefined' ? Notification.permission : 'default';
+          return Promise.resolve({
+            state,
+            onchange: null,
+            addEventListener() {},
+            removeEventListener() {},
+            dispatchEvent: () => false
+          });
+        }
+        return original(params);
+      };
+      // marcaj non-enumerabil, ca să nu se vadă în Object.keys
+      Object.defineProperty(perms, '__freekitPerms', {
+        value: true,
+        configurable: true
+      });
+    }
+  } catch {
+    /* ignorăm */
+  }
+};
+
+/** Paginile cu patch-urile deja instalate (anti-duplicare). */
+const stealthScripts = new WeakSet<Page>();
+
+/**
+ * v2.0.6: aplică patch-urile anti-detect pe o pagină. `addInitScript` le
+ * reinstalează la fiecare navigare, `evaluate` le aplică imediat pe documentul
+ * curent (pagina poate fi deja încărcată). Best-effort: un eșec e doar logat.
+ */
+export async function applyStealthPatches(pg: Page): Promise<void> {
+  if (stealthScripts.has(pg)) return;
+  stealthScripts.add(pg);
+  try {
+    await pg.addInitScript(applyStealthInPage);
+    await pg.evaluate<void, undefined>(applyStealthInPage, undefined);
+    log('stealth patches aplicate (webdriver/chrome/permissions)');
+  } catch (e: any) {
+    log('stealth patches a eșuat (non-fatal): ' + (e?.message ?? String(e)));
+  }
+}
+
+/**
+ * v2.0.6: pregătește o pagină pentru automatizare — anti-throttling (pagina se
+ * crede vizibilă/focusată) + patch-urile anti-detect. Ambele sunt no-op dacă au
+ * fost deja aplicate, deci poate fi apelată la fiecare `ensureOpen`.
+ */
+async function preparePage(pg: Page): Promise<void> {
+  await enableVisibilityOverride(pg);
+  await applyStealthPatches(pg);
+}
+
 export class BrowserManager {
   private context?: BrowserContext;
   private page?: Page;
@@ -311,7 +412,8 @@ export class BrowserManager {
       (!preferHost || this.page.url().includes(preferHost))
     ) {
       // v2.0.5: reafirmă anti-throttling-ul (ieftin — no-op dacă e deja activ)
-      await enableVisibilityOverride(this.page);
+      // v2.0.6: + patch-urile anti-detect (idem no-op după prima aplicare)
+      await preparePage(this.page);
       return this.page;
     }
 
@@ -354,7 +456,8 @@ export class BrowserManager {
         );
       }
       // v2.0.5: fereastra poate sta în fundal — randarea rămâne activă
-      await enableVisibilityOverride(page);
+      // v2.0.6: + patch-urile anti-detect pe pagina nou conectată
+      await preparePage(page);
       return page;
     } catch (e: any) {
       const msg = 'Chrome connection error: ' + (e?.message ?? String(e));

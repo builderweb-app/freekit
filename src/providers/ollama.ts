@@ -35,11 +35,11 @@ export class OllamaProvider implements AIProvider {
     const ok = await this.isAvailable();
     if (!ok) {
       throw new Error(
-        'Ollama nu rulează pe ' + this.url + '. Pornește-l cu "ollama serve".'
+        'Ollama is not running at ' + this.url + '. Start it with "ollama serve".'
       );
     }
     const models = await this.listModels();
-    log('Ollama available, modele: ' + (models.join(', ') || '(niciunul)'));
+    log('Ollama available, models: ' + (models.join(', ') || '(none)'));
   }
 
   async newChat(_page?: Page): Promise<void> {
@@ -60,8 +60,8 @@ export class OllamaProvider implements AIProvider {
     // Conținutul text al atașamentelor e deja inclus în `message`.
     if (opts?.files && opts.files.length) {
       opts.onNotice?.(
-        '⚠️ Ollama rulează local: fișierele binare/imagini nu pot fi trimise — ' +
-          'doar conținutul text al atașamentelor ajunge la model.'
+        '⚠️ Ollama runs locally: binary files/images cannot be sent — ' +
+          'only the text content of attachments reaches the model.'
       );
     }
 

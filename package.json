@@ -2,7 +2,7 @@
   "name": "ai-bridge",
   "displayName": "AI Bridge",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen, Kimi) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools",
-  "version": "1.7.3",
+  "version": "1.9.1",
   "publisher": "local",
   "icon": "media/icon.png",
   "categories": [
@@ -31,11 +31,11 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": false,
-      "description": "AI Bridge scrie fișiere, rulează comenzi shell și controlează un browser — necesită un workspace de încredere."
+      "description": "AI Bridge writes files, runs shell commands and controls a browser — it requires a trusted workspace."
     },
     "virtualWorkspaces": {
       "supported": false,
-      "description": "Necesită sistem de fișiere local și un browser instalat."
+      "description": "Requires a local file system and an installed browser."
     }
   },
   "main": "./out/extension.js",
@@ -111,6 +111,11 @@
         "command": "aiBridge.setupWhisper",
         "title": "AI Bridge: Setup Local Whisper (offline STT)",
         "icon": "$(mic)"
+      },
+      {
+        "command": "aiBridge.stopDevServers",
+        "title": "AI Bridge: Stop Dev Servers",
+        "icon": "$(debug-stop)"
       }
     ],
     "menus": {
@@ -159,6 +164,11 @@
           "command": "aiBridge.mcpManage",
           "when": "view == aiBridge.chatView",
           "group": "navigation"
+        },
+        {
+          "command": "aiBridge.stopDevServers",
+          "when": "view == aiBridge.chatView",
+          "group": "navigation"
         }
       ]
     },
@@ -179,82 +189,87 @@
             "ollama"
           ],
           "default": "deepseek",
-          "description": "Furnizorul AI folosit de chat. „auto” = încearcă ultimul provider web prin Chrome, apoi cade automat pe Ollama local; providerii web merg prin Chrome; `ollama` rulează local, fără browser."
+          "description": "The AI provider used by the chat. \"auto\" = try the last web provider through Chrome, then fall back automatically to local Ollama; web providers run through Chrome; `ollama` runs locally, without a browser."
         },
         "aiBridge.ollamaModel": {
           "type": "string",
           "default": "qwen2.5-coder:7b",
-          "description": "Modelul Ollama folosit de providerul local (ex: qwen2.5-coder:7b)."
+          "description": "The Ollama model used by the local provider (e.g. qwen2.5-coder:7b)."
         },
         "aiBridge.ollamaUrl": {
           "type": "string",
           "default": "http://localhost:11434",
-          "description": "URL-ul serverului Ollama (implicit http://localhost:11434)."
+          "description": "The Ollama server URL (default http://localhost:11434)."
         },
         "aiBridge.aiSelectorFinder": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Când healer-ul clasic de selectori eșuează complet (niciun candidat valid), trimite un snapshot DOM curățat la **Ollama local** (`aiBridge.ollamaModel`) pentru descoperirea de selectori noi. Selectorii propuși sunt validați în pagina reală, folosiți imediat și salvați în `selectors-user.json` (globalStorage). Necesită Ollama pornit; orice eșec nu blochează fluxul normal."
+          "markdownDescription": "When the classic selector healer fails completely (no valid candidate), sends a cleaned DOM snapshot to **local Ollama** (`aiBridge.ollamaModel`) to discover new selectors. Proposed selectors are validated in the real page, used immediately and saved to `selectors-user.json` (globalStorage). Requires Ollama running; any failure does not block the normal flow."
         },
         "aiBridge.aiFinderTimeoutSeconds": {
           "type": "number",
           "default": 45,
-          "markdownDescription": "Timeout (secunde, 5–300) pentru analiza AI de selectori. După expirare, fallback-ul AI este abandonat și healer-ul întoarce null."
+          "markdownDescription": "Timeout (seconds, 5–300) for the AI selector analysis. After it expires, the AI fallback is abandoned and the healer returns null."
         },
         "aiBridge.cdpPort": {
           "type": "number",
           "default": 9222,
-          "description": "Portul CDP pe care pornește/conectează Chrome (implicit 9222)."
+          "description": "The CDP port Chrome is started on / connected to (default 9222)."
         },
         "aiBridge.chromePath": {
           "type": "string",
           "default": "",
-          "description": "Calea către Chrome/Edge (gol = detectare automată pe Windows/macOS/Linux)."
+          "description": "Path to Chrome/Edge (empty = automatic detection on Windows/macOS/Linux)."
         },
         "aiBridge.messageTimeoutMinutes": {
           "type": "number",
           "default": 20,
-          "description": "Bugetul total de timp (minute) pentru un mesaj în bucla agentică."
+          "description": "Total time budget (minutes) for one message in the agentic loop."
         },
         "aiBridge.autoVerify": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "După fiecare scriere de fișiere (`write_file` / `edit_file` / `write_files`), verifică automat proiectul (`astro check`, `tsc --noEmit` sau scriptul de build/typecheck/lint detectat). La eșec, eroarea completă e trimisă AI-ului pentru auto-repair (max **3 încercări**); dacă repararea nu reușește, modificările sunt anulate automat (**rollback** la ultima stare verificată OK)."
+          "markdownDescription": "After every file write (`write_file` / `edit_file` / `write_files`), automatically verifies the project (`astro check`, `tsc --noEmit` or the detected build/typecheck/lint script). On failure, the full error is sent to the AI for auto-repair (max **3 attempts**); if the repair fails, the changes are rolled back automatically (**rollback** to the last verified-good state)."
         },
         "aiBridge.promptCheckpoints": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Înainte de fiecare mesaj, creează un **checkpoint git** (commit `aibridge-prompt:<id>` cu tot working tree-ul) și afișează butonul 🔄 deasupra mesajului, pentru a reveni la acea stare (`git reset --hard`, cu backup automat al stării curente înainte de reset). În foldere fără git, repo-ul e inițializat automat (vezi `aiBridge.autoInitGit`)."
+          "markdownDescription": "Before every message, creates a **git checkpoint** (commit `aibridge-prompt:<id>` with the entire working tree) and shows the ⟲ button above the message, to return to that state (`git reset --hard`, with an automatic backup of the current state before the reset). In folders without git, the repo is initialized automatically (see `aiBridge.autoInitGit`)."
         },
         "aiBridge.autoInitGit": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Dacă folderul proiectului nu e încă un repo git, îl inițializează automat (`git init` + un `.gitignore` minimal, doar dacă lipsește) la primul mesaj, ca checkpoint-urile și butonul 🔄 de restore să funcționeze întotdeauna. Dezactivează dacă nu vrei ca AI Bridge să creeze un repo git în proiect."
+          "markdownDescription": "If the project folder is not a git repo yet, initializes it automatically (`git init` + a minimal `.gitignore`, only if missing) on the first message, so checkpoints and the ⟲ restore button always work. Disable if you don't want AI Bridge to create a git repo in the project."
         },
         "aiBridge.selectorsUrl": {
           "type": "string",
           "default": "",
-          "markdownDescription": "URL-ul **raw** al unui Gist GitHub public cu `selectors.json` (aceeași structură ca cea bundled + `version`/`updated`/`changelog`). Gol = selectori remote dezactivați — se folosesc doar cei incluși în extensie. Exemplu: `https://gist.githubusercontent.com/<user>/<id>/raw/selectors.json`"
+          "markdownDescription": "**Raw** URL of a public GitHub Gist with `selectors.json` (same structure as the bundled one + `version`/`updated`/`changelog`). Empty = remote selectors disabled — only the selectors bundled with the extension are used. Example: `https://gist.githubusercontent.com/<user>/<id>/raw/selectors.json`"
         },
         "aiBridge.checkSelectorsOnStartup": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "La pornire, verifică dacă Gist-ul din `aiBridge.selectorsUrl` are o versiune mai nouă de selectori. Rate limiting: cel mult o dată la 24 de ore — comanda „AI Bridge: Update Selectors” funcționează oricând, la cerere. Are efect doar dacă URL-ul este setat."
+          "markdownDescription": "On startup, checks whether the Gist in `aiBridge.selectorsUrl` has a newer selector version. Rate limiting: at most once every 24 hours — the \"AI Bridge: Update Selectors\" command works anytime, on demand. Only takes effect if the URL is set."
         },
         "aiBridge.humanTyping": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Tastare „umană” în căsuța de chat: întârzieri aleatorii între caractere, pauze la punctuație și burst-uri rapide ocazionale (anti-detect). Dezactivat = lipire instantă (`insertText`). Mesajele foarte lungi (peste 1500 de caractere, ex. atașamente) se lipesc direct."
+          "markdownDescription": "\"Human\" typing in the chat box: random delays between characters, pauses at punctuation and occasional fast bursts (anti-detect). Disabled = instant paste (`insertText`). Very long messages (over 1500 characters, e.g. attachments) are pasted directly."
         },
         "aiBridge.humanBehavior": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Comportament „uman” înainte de acțiuni: mici mișcări de mouse spre butonul apăsat (căsuța de input, chat nou, stop) și scroll ușor ocazional (anti-detect)."
+          "markdownDescription": "\"Human\" behavior before actions: small mouse movements toward the pressed button (input box, new chat, stop) and occasional light scrolling (anti-detect)."
         },
         "aiBridge.mutationObserver": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Folosește `MutationObserver` pentru detectare rapidă (experimental — poate fi flaky cu Chrome offscreen: JS-ul e suspendat pentru ferestre invizibile). Dezactivat = polling clasic la 500ms (fiabil). Recomandat: `false`."
+          "markdownDescription": "Uses `MutationObserver` for fast detection (experimental — can be flaky with offscreen Chrome: JS is suspended for invisible windows). Disabled = classic 500ms polling (reliable). Recommended: `false`."
+        },
+        "aiBridge.autoAcceptPopups": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Automatically closes consent popups (cookie / terms / \"OK\" / \"Got it\" / \"Accept all\"…) after a page loads and before typing in the chat. Safe matches only: visible buttons, exact acceptance texts at 3 confidence tiers (\"OK\" only inside dialogs); **Reject / Only necessary / Customize / Not now** texts are ignored completely."
         },
         "aiBridge.sttLanguage": {
           "type": "string",
@@ -263,45 +278,45 @@
             "en-US"
           ],
           "enumDescriptions": [
-            "Română",
+            "Romanian",
             "English (US)"
           ],
           "default": "ro-RO",
-          "markdownDescription": "Limba pentru **voice input** (butonul 🎤 din chat): înregistrarea este transcrisă **local, offline, cu Whisper** și adăugată în căsuța de mesaj. `ro-RO` = română, `en-US` = engleză."
+          "markdownDescription": "Language for **voice input** (the 🎤 button in the chat): the recording is transcribed **locally, offline, with Whisper** and added to the message box. `ro-RO` = Romanian, `en-US` = English."
         },
         "aiBridge.whisperCliPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Calea către `whisper-cli` (whisper.cpp) pentru voice input offline. Gol = detectare automată: globalStorage (`whisper/bin`) → locațiile clasice whisper.cpp → PATH."
+          "markdownDescription": "Path to `whisper-cli` (whisper.cpp) for offline voice input. Empty = automatic detection: globalStorage (`whisper/bin`) → classic whisper.cpp locations → PATH."
         },
         "aiBridge.whisperModelPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Calea către modelul ggml al Whisper (ex. `ggml-base.bin`). Gol = detectare automată: globalStorage (`whisper/models`) → lângă CLI → `whisper.cpp/models`."
+          "markdownDescription": "Path to the Whisper ggml model (e.g. `ggml-base.bin`). Empty = automatic detection: globalStorage (`whisper/models`) → next to the CLI → `whisper.cpp/models`."
         },
         "aiBridge.whisperTimeoutSeconds": {
           "type": "number",
           "default": 180,
           "minimum": 10,
           "maximum": 1200,
-          "markdownDescription": "Timeout (secunde) pentru o transcriere Whisper. La expirare, procesul e oprit și eroarea e raportată în chat."
+          "markdownDescription": "Timeout (seconds) for one Whisper transcription. On expiry, the process is stopped and the error is reported in the chat."
         },
         "aiBridge.mcpEnabled": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Pornește serverele **MCP (Model Context Protocol)** configurate și expune uneltele lor agentului AI, ca unelte suplimentare (`mcp_<server>_<tool>`). Configurarea serverelor se face în `.vscode/mcp.json` (format `{\"servers\": {...}}`) sau în setarea `aiBridge.mcpServers`. Fiecare apel MCP cere aprobare (automat doar cu ⚡ auto-approve activat)."
+          "markdownDescription": "Starts the configured **MCP (Model Context Protocol)** servers and exposes their tools to the AI agent as extra tools (`mcp_<server>_<tool>`). Servers are configured in `.vscode/mcp.json` (format `{\"servers\": {...}}`) or in the `aiBridge.mcpServers` setting. Every MCP call requires approval (automatic only with ⚡ auto-approve enabled)."
         },
         "aiBridge.mcpServers": {
           "type": "object",
           "default": {},
-          "markdownDescription": "Servere MCP pornite de extensie (transport stdio). Exemplu:\n```json\n{\n  \"filesystem\": {\n    \"command\": \"npx\",\n    \"args\": [\"-y\", \"@modelcontextprotocol/server-filesystem\", \".\"]\n  }\n}\n```\nFișierul `.vscode/mcp.json` (format `{\"servers\": {...}}`) are prioritate față de această setare. Schimbările sunt aplicate automat (reîncărcare cu debounce)."
+          "markdownDescription": "MCP servers started by the extension (stdio transport). Example:\n```json\n{\n  \"filesystem\": {\n    \"command\": \"npx\",\n    \"args\": [\"-y\", \"@modelcontextprotocol/server-filesystem\", \".\"]\n  }\n}\n```\nThe `.vscode/mcp.json` file (format `{\"servers\": {...}}`) takes priority over this setting. Changes are applied automatically (reload with debounce)."
         },
         "aiBridge.mcpToolTimeoutSeconds": {
           "type": "number",
           "default": 60,
           "minimum": 5,
           "maximum": 600,
-          "markdownDescription": "Timeout (secunde) pentru un apel de unealtă MCP (`tools/call`). La expirare, apelul e raportat ca eroare AI-ului."
+          "markdownDescription": "Timeout (seconds) for one MCP tool call (`tools/call`). On expiry, the call is reported as an error to the AI."
         }
       }
     }

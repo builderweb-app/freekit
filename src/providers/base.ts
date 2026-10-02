@@ -17,6 +17,7 @@ import {
   humanType
 } from '../human-behavior';
 import { installMutationTracker, waitForAbort, waitStep } from '../mutation';
+import { autoAcceptPopups } from '../popups';
 
 const log = (msg: string) => console.log('[AI Bridge]', msg);
 
@@ -95,11 +96,11 @@ export async function findInput(
     return found.locator;
   }
   throw new Error(
-    'Nu găsesc căsuța de input pentru ' +
+    'I could not find the input box for ' +
       label +
-      ' (selectori încercați: ' +
+      ' (selectors tried: ' +
       selectors.candidates(providerId, 'input').join(', ') +
-      '). Ești logat în Chrome, în profilul AI Bridge?'
+      '). Are you logged in to Chrome with the AI Bridge profile?'
   );
 }
 
@@ -120,9 +121,9 @@ export class LoginRequiredError extends Error {
   readonly code = LOGIN_REQUIRED_CODE;
   constructor(readonly loginUrl: string) {
     super(
-      'Ești pe o pagină de login (' +
+      'You are on a login page (' +
         loginUrl +
-        '). Loghează-te în fereastra Chrome — continuarea e automată după login.'
+        '). Log in through the Chrome window — the flow resumes automatically after login.'
     );
     this.name = 'LoginRequiredError';
   }
@@ -135,6 +136,67 @@ export function isLoginRequiredError(e: any): boolean {
 
 const loginError = (url: string) => new LoginRequiredError(url);
 
+/* =========================================================================
+ * v1.8.0 — DETECȚIE CAPTCHA
+ * Paginile cu verificare „I'm not a robot” (reCAPTCHA challenge / hCaptcha /
+ * Cloudflare „Just a moment”) nu pot fi rezolvate automat — chatView aduce
+ * fereastra Chrome în față (ca la login) și așteaptă ca utilizatorul să le
+ * rezolve, apoi continuă singur.
+ * Detecția e CONSERVATOARE (fără false pozitive pe badge-ul reCAPTCHA v3 /
+ * widget-uri invizibile): doar challenge-uri reale, vizibile.
+ * ========================================================================= */
+
+/** Selectori cu challenge-uri CAPTCHA vizibile (size-ul minim filtrează badge-urile). */
+export const CAPTCHA_SELECTORS = [
+  'iframe[src*="recaptcha"][src*="bframe"]',
+  'iframe[src*="hcaptcha.com"][src*="challenge"]',
+  'iframe[src*="challenges.cloudflare.com"]',
+  '#challenge-stage',
+  '#challenge-running',
+  '#cf-please-wait',
+  'form#challenge-form',
+  'iframe[src*="captcha-delivery.com"]'
+];
+
+/** Rulează ÎN PAGINĂ: true dacă există un challenge CAPTCHA vizibil. */
+const scanCaptcha = (sels: string[]): boolean => {
+  try {
+    // regex-ul de titlu e in-linat: funcția e serializată în pagină (vezi selectors.ts)
+    if (/just a moment|attention required|verifying you are human|unusual traffic/i.test(document.title || '')) {
+      return true;
+    }
+    if (location.pathname.startsWith('/sorry')) return true;
+    for (const sel of sels) {
+      let els: Element[] = [];
+      try {
+        els = Array.prototype.slice.call(document.querySelectorAll(sel));
+      } catch {
+        continue;
+      }
+      for (const el of els) {
+        const r = el.getBoundingClientRect();
+        if (r.width < 80 || r.height < 40) continue; // badge-uri / widget-uri ascunse
+        const s = window.getComputedStyle(el as HTMLElement);
+        if (s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity) < 0.05) continue;
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+};
+
+/** true dacă pagina curentă cere rezolvarea unui CAPTCHA (best-effort). */
+export async function detectCaptcha(page: Page): Promise<boolean> {
+  try {
+    return await page.evaluate(scanCaptcha, CAPTCHA_SELECTORS);
+  } catch (e: any) {
+    log('detectCaptcha failed: ' + (e?.message ?? String(e)));
+    return false;
+  }
+}
+
 /** Deschide providerul în pagină: refolosește tab-ul dacă e deja pe domeniu. */
 export async function openProvider(page: Page, providerId: string, label: string) {
   const url = selectors.url(providerId);
@@ -146,11 +208,15 @@ export async function openProvider(page: Page, providerId: string, label: string
   }
 
   if (current.startsWith(host)) {
+    // v1.8.0: popup-uri de consimțământ care pot bloca inputul
+    await autoAcceptPopups(page, { log }).catch(() => []);
     if (await inputAvailable(page, providerId, 20000)) return;
-    log(label + ': input negăsit pe ' + current + ', navighez la ' + url);
+    log(label + ': input not found on ' + current + ', navigating to ' + url);
   }
 
   await page.goto(url, { waitUntil: 'domcontentloaded' });
+  // v1.8.0: acceptă automat popup-urile de cookie/terms după încărcare
+  await autoAcceptPopups(page, { log }).catch(() => []);
   // FIX v2: dacă aterizăm tot pe login (ex: Claude fără sesiune), nu mai
   // lăsăm healer-ul să rătăcească prin pagina de login (#email).
   if (isLoginUrl(page.url())) {
@@ -161,6 +227,8 @@ export async function openProvider(page: Page, providerId: string, label: string
 
 /** Chat nou: buton dedicat -> auto-reparare (DOAR dacă butonul nu mai există) -> navigare. */
 export async function newChatVia(page: Page, providerId: string, label: string) {
+  // v1.8.0: popup-uri de consimțământ care pot acoperi butonul de chat nou
+  await autoAcceptPopups(page, { log }).catch(() => []);
   for (const sel of selectors.candidates(providerId, 'newChat')) {
     const btn = page.locator(sel).first();
     try {
@@ -185,7 +253,7 @@ export async function newChatVia(page: Page, providerId: string, label: string) 
   // nth-of-type (ex: DeepSeek) — trecem direct la navigare.
   const known = selectors.candidates(providerId, 'newChat');
   if (await anySelectorPresent(page, known)) {
-    log(label + ': butonul de chat nou încă e în DOM — fără auto-reparare, trec la navigare');
+    log(label + ': the new chat button is still in the DOM — no auto-repair, falling back to navigation');
   } else {
     const healed = await healSlot(page, providerId, 'newChat');
     if (healed) {
@@ -195,7 +263,7 @@ export async function newChatVia(page: Page, providerId: string, label: string) 
         await btn.click({ timeout: 2000 });
         await sleep(1200);
         if (await inputAvailable(page, providerId, 8000)) {
-          log(label + ': new chat via selector reparat (' + healed + ')');
+          log(label + ': new chat via repaired selector (' + healed + ')');
           return;
         }
       } catch {
@@ -205,8 +273,10 @@ export async function newChatVia(page: Page, providerId: string, label: string) 
   }
 
   const url = selectors.url(providerId);
-  log(label + ': new chat fallback, navighez la ' + url);
+  log(label + ': new chat fallback, navigating to ' + url);
   await page.goto(url, { waitUntil: 'domcontentloaded' });
+  // v1.8.0: popup-uri de cookie/terms după navigarea proaspătă
+  await autoAcceptPopups(page, { log }).catch(() => []);
   // v0.9.1: sesiunea poate expira între open() și newChat() — același răspuns
   // ca la openProvider (chatView aduce Chrome în față și așteaptă login-ul).
   if (isLoginUrl(page.url())) throw loginError(page.url());
@@ -222,7 +292,7 @@ export async function clickStop(page: Page, providerId: string): Promise<boolean
       await humanClickPrep(page, btn);
       await btn.click({ timeout: 1500 });
       selectors.note(providerId, 'stopButton', sel);
-      log('stop apăsat via ' + sel);
+      log('stop pressed via ' + sel);
       return true;
     } catch {
       /* încearcă următorul */
@@ -368,17 +438,23 @@ export async function sendAndWait(
   const { providerId, label, signal } = cfg;
   await activateTab(page);
 
+  // v1.8.0: închide popup-urile de consimțământ care ar putea bloca căsuța de input
+  const popupsClosed = await autoAcceptPopups(page, { log }).catch(() => []);
+  if (popupsClosed.length) {
+    cfg.onNotice?.('🍪 Popup closed automatically: “' + popupsClosed.join('”, “') + '”.');
+  }
+
   // FAZA II (A): fișierele (imagini/binare) se încarcă în chat ÎNAINTE de text
   if (cfg.files && cfg.files.length) {
     const ok = await uploadChatFiles(page, providerId, cfg.files, label);
     if (ok) {
       cfg.onNotice?.(
-        '📎 ' + cfg.files.length + ' fișier(e) încărcate în chatul web.'
+        '📎 ' + cfg.files.length + ' file(s) uploaded to the web chat.'
       );
     } else {
       cfg.onNotice?.(
-        '⚠️ Fișierele atașate nu au putut fi încărcate în chatul web ' +
-          '(butonul de atașare nu a fost găsit) — AI-ul vede doar descrierea lor.'
+        '⚠️ The attached files could not be uploaded to the web chat ' +
+          '(the attach button was not found) — the AI only sees their description.'
       );
     }
   }
@@ -406,8 +482,8 @@ export async function sendAndWait(
     } else {
       if (human.typing) {
         log(
-          label + ': mesaj de ' + message.length +
-            ' chars — lipire directă (peste limita de tastare)'
+          label + ': message of ' + message.length +
+            ' chars — direct paste (over the typing limit)'
         );
       }
       await page.keyboard.insertText(message);
@@ -421,7 +497,7 @@ export async function sendAndWait(
   }
   await sleep(400);
   await page.keyboard.press('Enter');
-  log(label + ': mesaj trimis, aștept răspunsul...');
+  log(label + ': message sent, waiting for the response...');
 
   // v0.8.0: MutationObserver — "liniștea" din DOM încheie așteptarea instant;
   // cu setarea oprită rămâne polling-ul clasic la 500ms.
@@ -455,7 +531,7 @@ export async function sendAndWait(
       healIndex++;
       if (await anySelectorMatches(page, responseSelectors)) {
         if (healIndex === 1) {
-          log(label + ': selectorii de răspuns funcționează, aștept stream-ul');
+          log(label + ': response selectors work, waiting for the stream');
         }
       } else {
         const healed = await healSlot(page, providerId, 'response', message);
@@ -465,13 +541,13 @@ export async function sendAndWait(
             selectors.candidates(providerId, 'response')
           );
           if (probe && isEchoOf(probe, message)) {
-            log(label + ': reparare respinsă (a prins mesajul nostru) — revin la JSON');
+            log(label + ': repair rejected (it caught our message) — falling back to JSON');
             selectors.forget(providerId, 'response');
           } else {
             responseSelectors = selectors.candidates(providerId, 'response');
             previousText = '';
             lastChangeAt = Date.now();
-            log(label + ': selector de răspuns reparat -> ' + healed);
+            log(label + ': response selector repaired -> ' + healed);
           }
         }
       }
@@ -486,7 +562,7 @@ export async function sendAndWait(
         await input.click({ timeout: 2000 });
         await sleep(150);
         await page.keyboard.press('Enter');
-        log(label + ': Enter retrimis (mesajul nu a plecat?)');
+        log(label + ': Enter re-sent (the message did not go out?)');
       } catch {
         /* ignorăm */
       }
@@ -519,7 +595,7 @@ export async function sendAndWait(
       if (Date.now() - lastChangeAt >= STABLE_MS) {
         log(
           label +
-            ': răspuns stabil după ' +
+            ': stable response after ' +
             (Date.now() - started) +
             'ms (' +
             currentText.length +
@@ -549,7 +625,7 @@ export async function sendAndWait(
   }
 
   throw new Error(
-    'Timeout: niciun răspuns stabil de la ' + label + ' după 150s.'
+    'Timeout: no stable response from ' + label + ' after 150s.'
   );
 }
 
@@ -663,7 +739,7 @@ export async function uploadChatFiles(
       keywords: UPLOAD_ANCESTOR_BLACKLIST
     });
     if (!marked) {
-      log(label + ': niciun input[type=file] pentru chat găsit');
+      log(label + ': no input[type=file] found for the chat');
       return false;
     }
     const loc = page
@@ -672,10 +748,10 @@ export async function uploadChatFiles(
     await loc.setInputFiles(files, { timeout: 15000 });
     // lăsăm site-ul să proceseze atașamentele înainte de trimiterea textului
     await sleep(2500);
-    log(label + ': ' + files.length + ' fișier(e) încărcate în chat');
+    log(label + ': ' + files.length + ' file(s) uploaded to the chat');
     return true;
   } catch (e: any) {
-    log(label + ': upload eșuat — ' + (e?.message ?? String(e)));
+    log(label + ': upload failed — ' + (e?.message ?? String(e)));
     return false;
   } finally {
     try {

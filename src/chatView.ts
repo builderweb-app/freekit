@@ -33,8 +33,9 @@ import { mcp } from './mcp/manager';
 import { Attachment, describePath, prepareAttachments } from './attachments';
 import { detectProject, formatProjectInfo } from './project';
 import { initLogChannel, logLine } from './log';
-import { isLoginRequiredError, isLoginUrl, sleep } from './providers/base';
+import { detectCaptcha, isLoginRequiredError, isLoginUrl, sleep } from './providers/base';
 import { runVerification, createPromptCheckpoint, restoreToCheckpoint, Checkpoint } from './verifier';
+import { ConversationStore, ConversationMessage } from './conversations';
 import { EditRollback } from './rollback';
 import { transcribeAudioFile } from './stt';
 import {
@@ -83,7 +84,7 @@ const LAST_BROWSER_KEY = 'aiBridge.lastBrowserProvider';
 const NO_ASK_KEY = 'aiBridge.noAskFiles';
 
 // v0.5.0: eticheta butonului „nu mai întreba" din notificarea de diff
-const NO_ASK_LABEL = 'Accept (nu mai întreba)';
+const NO_ASK_LABEL = 'Accept (don\'t ask again)';
 
 // v1.7.1: verbose mode — pașii AI afișați în chat (persistat în globalState)
 const VERBOSE_KEY = 'aiBridge.verboseMode';
@@ -97,6 +98,10 @@ const LOGIN_WAIT_MS = 5 * 60_000;
 const LOGIN_POLL_MS = 2500;
 const LOGIN_MAX_ASSISTS = 2;
 
+// v1.8.0: asistentul de CAPTCHA — aceleași limite ca la login (5 min, poll 2.5s)
+const CAPTCHA_WAIT_MS = 5 * 60_000;
+const CAPTCHA_POLL_MS = 2500;
+
 // v1.3.0: auto-verify — tool-urile de scriere care declanșează verificarea
 const AUTO_VERIFY_TOOLS = new Set(['edit_file', 'write_file', 'write_files']);
 
@@ -106,6 +111,9 @@ const MAX_VERIFY_REPAIRS = 3;
 // v1.4.0: checkpoint-uri git per prompt (persistate în globalState)
 const CHECKPOINTS_KEY = 'aiBridge.checkpoints';
 const CHECKPOINTS_MAX = 50;
+
+// v1.9.0: id-uri sigure de mesaj (leagă mesajul de checkpoint / conversație)
+const MSG_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 interface StoredMessage {
   role: 'user' | 'assistant';
@@ -179,7 +187,7 @@ async function getProjectStructure(
   await walk(root, 1, '');
 
   if (count >= STRUCTURE_MAX_ENTRIES) {
-    lines.push('... (trunchiat la ' + STRUCTURE_MAX_ENTRIES + ' intrări)');
+    lines.push('... (truncated at ' + STRUCTURE_MAX_ENTRIES + ' entries)');
   }
   return lines.join('\n');
 }
@@ -208,7 +216,7 @@ export function generateDiffPreview(oldText: string, newText: string): string {
     if (n !== undefined) out.push('+ ' + n);
     changes++;
   }
-  return out.join('\n') || '(fără modificări)';
+  return out.join('\n') || '(no changes)';
 }
 
 /** Preview combinat pentru toate fișierele unui review (cap 8000 de caractere). */
@@ -219,7 +227,7 @@ export function buildReviewPreview(changes: FileChangePreview[]): string {
       generateDiffPreview(c.oldContent, c.newContent)
   );
   const text = parts.join('\n\n');
-  return text.length > 8000 ? text.slice(0, 8000) + '\n… (trunchiat)' : text;
+  return text.length > 8000 ? text.slice(0, 8000) + '\n… (truncated)' : text;
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -263,10 +271,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     output: string;
     seconds: string;
   };
-  /** v1.4.0: checkpoint-urile git per mesaj (butonul 🔄 de restore). */
+  /** v1.4.0: checkpoint-urile git per mesaj (butonul ⟲ de restore). */
   private checkpoints: Checkpoint[] = [];
   /** v1.5.0: explicația „fără checkpoint” se afișează o singură dată */
   private checkpointNoticeShown = false;
+  /** v1.9.0: conversațiile multiple (fork / edit prompt) — persistate în globalState. */
+  private readonly conversations: ConversationStore;
   /** v1.7.1: verbose mode — contor de id-uri + cardul „Thinking" al mesajului curent */
   private verboseSeq = 0;
   private verboseThinkId?: string;
@@ -287,11 +297,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     log('auto-approve: ' + (this.autoApprove ? 'ON' : 'OFF'));
     // v1.4.0: istoricul de checkpoint-uri git (max CHECKPOINTS_MAX)
     this.checkpoints = state.get<Checkpoint[]>(CHECKPOINTS_KEY, []) ?? [];
+    // v1.9.0: magazinul de conversații (listă + conversația activă, în globalState)
+    this.conversations = new ConversationStore(state);
 
     // FAZA I: anunță în chat când un selector a fost reparat automat
     selectors.setNotifier((info) => {
       const text =
-        'Selector reparat automat: ' +
+        'Selector repaired automatically: ' +
         info.provider +
         '.' +
         info.slot +
@@ -384,8 +396,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.postVerboseStep({
       kind: 'thinking',
       id: this.verboseThinkId,
-      title: 'Gândirea modelului',
-      text: clean.length > 6000 ? clean.slice(0, 6000) + '\n… (trunchiat)' : clean,
+      title: 'Model thinking',
+      text: clean.length > 6000 ? clean.slice(0, 6000) + '\n… (truncated)' : clean,
       status: 'done',
       append: true
     });
@@ -399,8 +411,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (typeof a.command === 'string' && a.command) bits.push('$ ' + a.command);
       if (typeof a.script === 'string' && a.script) bits.push('script: ' + a.script);
       if (typeof a.path === 'string' && a.path) bits.push(a.path);
-      if (Array.isArray(a.files)) bits.push(a.files.length + ' fișiere');
-      if (typeof a.query === 'string' && a.query) bits.push('„' + a.query + '”');
+      if (Array.isArray(a.files)) bits.push(a.files.length + ' files');
+      if (typeof a.query === 'string' && a.query) bits.push('"' + a.query + '"');
       if (typeof a.url === 'string' && a.url) bits.push(a.url);
       if (!bits.length) {
         const json = JSON.stringify(a);
@@ -468,7 +480,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.voiceStarting = false;
       this.voiceCapture = cap;
       cap.onAutoStop = () => {
-        log('voice: recorderul s-a oprit singur — finalizez');
+        log('voice: recorder stopped on its own — finishing up');
         void this.handleSttStop();
       };
       if (this.voiceStopQueued) {
@@ -476,19 +488,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         void this.handleSttStop();
         return;
       }
-      log('voice: înregistrez (' + cap.kind + ') → ' + outFile);
+      log('voice: recording (' + cap.kind + ') → ' + outFile);
       this.postSttState('recording', { startedAt: cap.startedAt, backend: cap.kind });
     } catch (e: any) {
       this.voiceStarting = false;
       const msg = e?.message ?? String(e);
-      log('voice: pornire eșuată — ' + msg);
+      log('voice: start failed — ' + msg);
       this.postSttResult({
         ok: false,
         stage: 'capture',
         error:
-          'Nu am putut porni microfonul: ' +
+          'Could not start the microphone: ' +
           msg +
-          '\nVerifică microfonul implicit și permisiunea Windows (Setări → Confidențialitate → Microfon).'
+          '\nCheck the default microphone and the Windows permission (Settings → Privacy → Microphone).'
       });
       try {
         fs.rmSync(dir, { recursive: true, force: true });
@@ -532,22 +544,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /** Validează înregistrarea și o transcrie cu whisper.cpp (local, offline). */
   private async finishStt(file: string, res: VoiceCaptureResult): Promise<void> {
     if (!res.ok) {
-      log('voice: captare eșuată — ' + (res.error ?? 'necunoscut'));
+      log('voice: capture failed — ' + (res.error ?? 'unknown'));
       this.postSttResult({
         ok: false,
         stage: 'capture',
-        error: res.error ?? 'captarea audio a eșuat'
+        error: res.error ?? 'audio capture failed'
       });
       return;
     }
     const bytes = res.bytes ?? 0;
     const seconds = Math.round((bytes / 32000) * 10) / 10;
-    log('voice: captură OK (' + bytes + ' bytes ≈ ' + seconds + 's)');
+    log('voice: capture OK (' + bytes + ' bytes ≈ ' + seconds + 's)');
     if (isTooShortVoiceWav(bytes)) {
       this.postSttResult({
         ok: false,
         stage: 'short',
-        error: 'Înregistrare prea scurtă — încearcă din nou și vorbește puțin mai mult.'
+        error: 'Recording too short — try again and speak a little longer.'
       });
       return;
     }
@@ -559,7 +571,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       });
       if (tres.ok) {
         log(
-          'stt: transcris în ' + tres.seconds + 's (' + tres.engine + '): „' +
+          'stt: transcribed in ' + tres.seconds + 's (' + tres.engine + '): „' +
             (tres.text ?? '').slice(0, 80) + '”'
         );
         this.postSttResult({
@@ -569,7 +581,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           engine: tres.engine
         });
       } else {
-        log('stt: eșec — ' + tres.error);
+        log('stt: failure — ' + tres.error);
         this.postSttResult({
           ok: false,
           stage: 'transcribe',
@@ -578,7 +590,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         });
       }
     } catch (e: any) {
-      log('stt: eroare neașteptată — ' + (e?.message ?? String(e)));
+      log('stt: unexpected error — ' + (e?.message ?? String(e)));
       this.postSttResult({
         ok: false,
         stage: 'transcribe',
@@ -617,12 +629,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const enable = msg.enabled === true;
       if (enable && !this.autoApprove) {
         const pick = await vscode.window.showWarningMessage(
-          '⚡ Auto-approve: TOATE operațiile (scriere de fișiere, comenzi shell, git) ' +
-            'vor rula FĂRĂ carduri de confirmare. Continui?',
+          '⚡ Auto-approve: ALL operations (file writes, shell commands, git) ' +
+            'will run WITHOUT confirmation cards. Continue?',
           { modal: true },
-          'Activează'
+          'Enable'
         );
-        if (pick !== 'Activează') {
+        if (pick !== 'Enable') {
           // revertează bifa din UI (utilizatorul a renunțat)
           this.view?.webview.postMessage({ type: 'auto_approve', enabled: false });
           return;
@@ -638,10 +650,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.wakePendingReview();
         this.post(
           'notice',
-          '⚡ Auto-approve ACTIV — scrierile și comenzile rulează fără confirmare.'
+          '⚡ Auto-approve ON — file writes and commands run without confirmation.'
         );
       } else {
-        this.post('notice', 'Auto-approve dezactivat — operațiile cer din nou confirmare.');
+        this.post('notice', 'Auto-approve off — operations ask for confirmation again.');
       }
       this.view?.webview.postMessage({ type: 'auto_approve', enabled: this.autoApprove });
       log('auto-approve: ' + (this.autoApprove ? 'ON' : 'OFF'));
@@ -656,8 +668,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.post(
         'notice',
         enabled
-          ? '🔍 Verbose mode ACTIV — pașii AI (Thinking / Executing / Result / Decision) apar în chat.'
-          : '🔍 Verbose mode dezactivat — doar rezultatele finale rămân vizibile.'
+          ? '🔍 Verbose mode ON — AI steps (Thinking / Executing / Result / Decision) appear in the chat.'
+          : '🔍 Verbose mode off — only the final results stay visible.'
       );
       log('verbose mode: ' + (enabled ? 'ON' : 'OFF'));
       return;
@@ -706,10 +718,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     // FAZA E: butonul Clear golește și istoricul persistat
+    // v1.9.0: golește conversația activă (conversația rămâne în lista de conversații)
     if (msg.type === 'clear') {
       await this.state.update(HISTORY_KEY, []);
+      await this.conversations.clearActive();
       this.attachments = [];
       this.postAttachments();
+      this.postConversations();
       log('history cleared');
       return;
     }
@@ -723,13 +738,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         canSelectMany: true,
         canSelectFiles: isFiles,
         canSelectFolders: !isFiles,
-        openLabel: isFiles ? 'Atașează fișiere' : 'Atașează foldere',
-        title: isFiles ? 'Atașează fișiere' : 'Atașează foldere',
+        openLabel: isFiles ? 'Attach files' : 'Attach folders',
+        title: isFiles ? 'Attach files' : 'Attach folders',
         filters: isFiles
           ? {
-              'Toate fișierele': ['*'],
+              'All files': ['*'],
               'Text': ['txt', 'md', 'json', 'ts', 'js', 'astro', 'html', 'css', 'yml', 'yaml'],
-              'Imagini': ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg']
+              'Images': ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg']
             }
           : undefined
       });
@@ -778,12 +793,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const cfg = configInfo();
       log('selectors.json v' + cfg.version + ' (' + cfg.updated + ') — ' + cfg.providers.join(', '));
       this.post('provider', this.currentProviderId());
+      // v1.9.0: migrează o singură dată istoricul legacy într-o conversație
+      await this.ensureConversationsMigrated();
       this.postAttachments();
       this.view?.webview.postMessage({
         type: 'history',
-        items: this.getHistory()
+        items: this.activeHistoryItems()
       });
-      // v1.4.0: checkpoint-urile git (butoanele 🔄 din istoric)
+      // v1.4.0: checkpoint-urile git (butoanele ⟲ din istoric)
       this.view?.webview.postMessage({
         type: 'checkpoints',
         items: this.checkpoints
@@ -807,6 +824,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           ...pendingPayload
         });
       }
+      // v1.9.0: lista de conversații (dropdown-ul de comutare)
+      this.postConversations();
       // v0.4.0: status providers pentru badge-ul din toolbar
       void this.refreshProviderStatus();
       return;
@@ -830,9 +849,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    // v1.4.0: restore la checkpoint-ul de dinaintea unui prompt (butonul 🔄)
+    // v1.4.0: restore la checkpoint-ul de dinaintea unui prompt (butonul ⟲)
     if (msg.type === 'restore_checkpoint') {
       await this.handleRestoreCheckpoint(String(msg.messageId ?? ''));
+      return;
+    }
+
+    // v1.9.0: edit prompt (✐), fork (ᛉ) și conversațiile multiple (dropdown)
+    if (msg.type === 'edit_prompt') {
+      await this.handleEditPrompt(
+        String(msg.messageId ?? ''),
+        String(msg.text ?? '')
+      );
+      return;
+    }
+    if (msg.type === 'fork_conversation') {
+      await this.handleForkConversation(String(msg.messageId ?? ''));
+      return;
+    }
+    if (msg.type === 'switch_conversation') {
+      await this.handleSwitchConversation(String(msg.id ?? ''));
+      return;
+    }
+    if (msg.type === 'new_conversation') {
+      await this.handleNewConversation();
+      return;
+    }
+    if (msg.type === 'delete_conversation') {
+      await this.handleDeleteConversation();
       return;
     }
 
@@ -840,7 +884,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const userText: string = msg.text;
     // v1.4.0: id-ul mesajului (generat de webview) → leagă mesajul de checkpoint
     const msgId =
-      typeof msg.msgId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(msg.msgId)
+      typeof msg.msgId === 'string' && MSG_ID_RE.test(msg.msgId)
         ? msg.msgId
         : 'auto' + Date.now().toString(36);
     log('user message: ' + userText.slice(0, 60));
@@ -850,14 +894,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!vscode.workspace.isTrusted) {
       this.post(
         'error',
-        'Workspace neîncrezut: AI Bridge poate scrie fișiere și rula comenzi. ' +
-          'Activează Workspace Trust pentru acest folder („Manage Workspace Trust”), apoi reîncearcă.'
+        'Untrusted workspace: AI Bridge can write files and run commands. ' +
+          'Enable Workspace Trust for this folder ("Manage Workspace Trust"), then try again.'
       );
       return;
     }
 
+    // v1.9.0: prima conversație din sesiune se creează automat (titlul = promptul)
+    if (!this.conversations.getActive()) {
+      await this.conversations.create(userText.slice(0, 40));
+      this.postConversations();
+    }
     // FAZA E: salvăm mesajul utilizatorului în istoric (NU se trimite la AI)
     await this.appendHistory('user', userText, msgId);
+    // v1.9.0: primul prompt al unei conversații „Conversație nouă” o redenumește
+    if (await this.conversations.retitleDefault(userText)) this.postConversations();
 
     // FAZA II (A): consumă atașamentele curente (se trimit o singură dată)
     const atts = this.attachments;
@@ -879,7 +930,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     try {
       const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-      if (!root) throw new Error('Nu ai niciun folder deschis în VS Code.');
+      if (!root) throw new Error('You have no folder open in VS Code.');
 
       // v1.4.0: checkpoint git ÎNAINTE de prompt (rollback manual, un click)
       await this.createCheckpoint(root, msgId, userText);
@@ -896,7 +947,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       let structure = '';
       try {
         structure = await getProjectStructure(root);
-        log('project structure: ' + structure.split('\n').length + ' linii');
+        log('project structure: ' + structure.split('\n').length + ' lines');
       } catch (e: any) {
         log('project structure failed: ' + (e?.message ?? String(e)));
       }
@@ -918,9 +969,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           const prep = await prepareAttachments(root, atts);
           attachBlock = prep.block;
           uploads = prep.uploads;
-          log('atașamente: ' + atts.length + ' pregătite, uploads=' + uploads.length);
+          log('attachments: ' + atts.length + ' prepared, uploads=' + uploads.length);
         } catch (e: any) {
-          log('pregătirea atașamentelor a eșuat: ' + (e?.message ?? String(e)));
+          log('preparing attachments failed: ' + (e?.message ?? String(e)));
         }
       }
 
@@ -995,26 +1046,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             // automat, așteptăm autentificarea, apoi reluăm de la sine.
             await this.runWithLoginAssist(label, prep.page, signal, () => prov.open(prep.page));
             await this.runWithLoginAssist(label, prep.page, signal, () => prov.newChat(prep.page));
+            // v1.8.0: dacă pagina cere CAPTCHA, Chrome e adus în față până e rezolvat
+            await this.runWithCaptchaAssist(label, prep.page, signal);
             this.active = { provider, page };
             if (this.abortRequested) throw new Error('__ABORTED__');
             aiReply = await provider.send(page, messageFor(provider), signal, sendOpts);
             if (i > 0) {
-              this.post('notice', '🔄 Auto: răspuns preluat de ' + label + ' (fallback).');
+              this.post('notice', '🔄 Auto: response served by ' + label + ' (fallback).');
             }
-            log('auto: primul răspuns via ' + id + ' (' + aiReply.length + ' chars)');
+            log('auto: first response via ' + id + ' (' + aiReply.length + ' chars)');
             break;
           } catch (e: any) {
             if (this.abortRequested || e?.message === '__ABORTED__') throw e;
             const reason = e?.message ? String(e.message) : String(e);
-            log('auto: ' + id + ' a eșuat — ' + reason);
+            log('auto: ' + id + ' failed — ' + reason);
             if (i === chain.length - 1) {
               throw new Error(
-                'Auto: am încercat ' + chainLabels.join(' → ') +
-                  ', dar toate au eșuat. Ultima eroare (' + label + '): ' + reason
+                'Auto: tried ' + chainLabels.join(' → ') +
+                  ', but all failed. Last error (' + label + '): ' + reason
               );
             }
-            this.post('notice', '⚠️ Auto: ' + label + ' a eșuat (' + reason.slice(0, 220) + ').');
-            this.post('notice', '🔄 Auto: trec la ' + chainLabels[i + 1] + '...');
+            this.post('notice', '⚠️ Auto: ' + label + ' failed (' + reason.slice(0, 220) + ').');
+            this.post('notice', '🔄 Auto: switching to ' + chainLabels[i + 1] + '...');
           }
         }
       } else {
@@ -1026,6 +1079,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // v0.9.1: login assist pentru providerul ales direct
         await this.runWithLoginAssist(label, prep.page, signal, () => prov.open(prep.page));
         await this.runWithLoginAssist(label, prep.page, signal, () => prov.newChat(prep.page));
+        // v1.8.0: CAPTCHA assist (reCAPTCHA / hCaptcha / Cloudflare „Just a moment”)
+        await this.runWithCaptchaAssist(label, prep.page, signal);
         this.active = { provider, page };
 
         if (this.abortRequested) {
@@ -1036,7 +1091,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         aiReply = await provider.send(page, messageFor(provider), signal, sendOpts);
         log('first AI reply length: ' + aiReply.length);
       }
-      if (!provider) throw new Error('Niciun provider disponibil.');
+      if (!provider) throw new Error('No provider available.');
 
       const approve = async (
         tool: string,
@@ -1047,7 +1102,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // v0.2.1: auto-approve activ → fără card, aprobat imediat
         if (this.autoApprove) {
           log('auto-approved: ' + tool + ' → ' + target);
-          this.post('notice', 'Auto-aprobat (fără card): ' + tool + ' → ' + target);
+          this.post('notice', 'Auto-approved (no card): ' + tool + ' → ' + target);
           return true;
         }
 
@@ -1061,20 +1116,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             log('no-ask auto-approved: ' + tool + ' → ' + target);
             this.post(
               'notice',
-              '✅ Aprobat automat („nu mai întreba"): ' + tool + ' → ' + target
+              '✅ Auto-approved ("don\'t ask again"): ' + tool + ' → ' + target
             );
             return true;
           }
 
           this.post(
             'notice',
-            '📝 Diff nativ deschis pentru review: ' + target +
-              ' — alege Accept / Reject din cardul de mai jos sau din notificarea VS Code.'
+            '📝 Native diff opened for review: ' + target +
+              ' — choose Accept / Reject from the card below or from the VS Code notification.'
           );
           const decision = await this.showDiffReview(tool, changes);
           if (decision === 'accept') {
             log('diff review accepted: ' + tool + ' → ' + target);
-            this.post('notice', '✅ Acceptat din diff: ' + target);
+            this.post('notice', '✅ Accepted from diff: ' + target);
             return true;
           }
           if (decision === 'accept_no_ask') {
@@ -1082,13 +1137,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             log('diff review accepted (no-ask): ' + tool + ' → ' + target);
             this.post(
               'notice',
-              '✅ Acceptat din diff (nu mai întreba): ' + target
+              '✅ Accepted from diff (don\'t ask again): ' + target
             );
             return true;
           }
           if (decision === 'reject') {
             log('diff review rejected: ' + tool + ' → ' + target);
-            this.post('notice', '❌ Respins din diff: ' + target);
+            this.post('notice', '❌ Rejected from diff: ' + target);
             return false;
           }
           // 'fallback' — diff-ul nu s-a putut afișa / fără webview → cardul clasic din chat
@@ -1118,7 +1173,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // v0.3.0 (P0.6): verificăm bugetul de timp înainte de fiecare pas
         if (Date.now() > deadline) {
           timedOut = true;
-          log('buget de timp epuizat (' + timeoutMinutes + ' min) — opresc bucla');
+          log('time budget exhausted (' + timeoutMinutes + ' min) — stopping the loop');
           break;
         }
         iterations++;
@@ -1143,13 +1198,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 textRetries +
                 '/' +
                 MAX_TEXT_RETRIES +
-                ': modelul a răspuns cu text în loc de tool call — cer din nou JSON-ul de acțiune.'
+                ': the model replied with text instead of a tool call — asking again for the action JSON.'
             );
             // v1.7.1: verbose — decizia de auto-retry
             this.postVerboseStep({
               kind: 'decision',
               title: 'Auto-retry ' + textRetries + '/' + MAX_TEXT_RETRIES,
-              text: 'Răspuns cu text în loc de tool call — cer din nou JSON-ul de acțiune.',
+              text: 'Replied with text instead of a tool call — asking again for the action JSON.',
               status: 'done'
             });
             aiReply = await provider.send(page, TEXT_RETRY_NUDGE, signal, {
@@ -1160,8 +1215,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           // v1.7.1: verbose — răspuns final, fără acțiuni
           this.postVerboseStep({
             kind: 'decision',
-            title: 'Răspuns final',
-            text: 'Modelul a încheiat cu text — nu mai sunt acțiuni de executat.',
+            title: 'Final answer',
+            text: 'The model finished with text — no more actions to execute.',
             status: 'done'
           });
           log('no valid tool call, final answer (iteration ' + iterations + ')');
@@ -1180,7 +1235,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.postVerboseStep({
           kind: 'decision',
           id: 'dec' + iterations,
-          title: 'Unealta aleasă: ' + toolCall.tool,
+          title: 'Tool chosen: ' + toolCall.tool,
           text: vSummary,
           status: 'done'
         });
@@ -1215,8 +1270,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.postVerboseStep({
           kind: 'result',
           id: 'res' + iterations,
-          title: result.ok ? 'OK: ' + toolCall.tool : 'Eroare: ' + toolCall.tool,
-          text: vOut.length > 4000 ? vOut.slice(0, 4000) + '\n… (trunchiat)' : vOut,
+          title: result.ok ? 'OK: ' + toolCall.tool : 'Error: ' + toolCall.tool,
+          text: vOut.length > 4000 ? vOut.slice(0, 4000) + '\n… (truncated)' : vOut,
           status: result.ok ? 'done' : 'error'
         });
         if (this.abortRequested) break;
@@ -1229,7 +1284,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (
           AUTO_VERIFY_TOOLS.has(toolCall.tool) &&
           !this.abortRequested &&
-          (result.ok || (result.error ?? '').startsWith('Scrise '))
+          (result.ok || (result.error ?? '').startsWith('Written '))
         ) {
           const v = await this.autoVerify(root);
           verifySuffix = v.suffix;
@@ -1244,22 +1299,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           if (cr.blocked) {
             this.post(
               'heal',
-              '⛔ Auto-healing: „' + cr.command + '” nu mai este rulată (limita de ' +
-                cr.max + ' încercări atinsă). AI-ul trebuie să răspundă cu text.'
+              '⛔ Auto-healing: "' + cr.command + '" is no longer run (the limit of ' +
+                cr.max + ' attempts was reached). The AI must reply with text.'
             );
           } else if (!result.ok) {
             this.post(
               'heal',
-              '⟳ Auto-healing ' + cr.attempt + '/' + cr.max + ': „' + cr.command +
-                '” a eșuat (exit ' + cr.exitCode + ', ' +
+              '⟳ Auto-healing ' + cr.attempt + '/' + cr.max + ': "' + cr.command +
+                '" failed (exit ' + cr.exitCode + ', ' +
                 (cr.duration / 1000).toFixed(1) +
-                's). Trimit eroarea completă AI-ului: analiză → reparare → re-rulare.'
+                's). Sending the full error to the AI: analyze → fix → re-run.'
             );
           } else if (cr.attempt > 1) {
             this.post(
               'heal',
-              '✅ Auto-healing reușit: „' + cr.command + '” a trecut după ' +
-                cr.attempt + ' încercări.'
+              '✅ Auto-healing succeeded: "' + cr.command + '" passed after ' +
+                cr.attempt + ' attempts.'
             );
           }
         }
@@ -1298,29 +1353,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         log('message timeout reached (' + timeoutMinutes + ' min)');
         this.post(
           'stopped',
-          '⏱ Am atins bugetul de timp (' + timeoutMinutes +
-            ' min) pentru acest mesaj. Scrie „continuă” ca să reiau de unde am rămas.'
+          '⏱ The time budget (' + timeoutMinutes +
+            ' min) for this message was reached. Write "continue" to resume from where I left off.'
         );
       } else if (verifyRollbackText) {
         // v1.3.0: auto-repair eșuat definitiv — modificările au fost anulate
-        log('auto-verify: rollback efectuat — închei cu raportul de rollback');
+        log('auto-verify: rollback completed — ending with the rollback report');
         await this.appendHistory('assistant', verifyRollbackText);
         this.post('reply', verifyRollbackText);
       } else if (limitHit) {
         log('max iterations reached (' + MAX_ITERATIONS + ')');
         this.post(
           'stopped',
-          '⏸ Am atins limita de ' + MAX_ITERATIONS + ' pași. Scrie „continuă" ca să duc la capăt restul.'
+          '⏸ Reached the limit of ' + MAX_ITERATIONS + ' steps. Write "continue" to finish the rest.'
         );
       } else {
         // v1.3.0: AI-ul s-a oprit cu text final, dar ultima verificare e încă
         // pe roșu — nu lăsăm proiectul stricat: rollback automat + mesaj
         const lvf = this.getLastVerifyFailure();
         if (this.autoVerifyEnabled() && this.verifyRepairs > 0 && lvf) {
-          log('auto-verify: răspuns final cu verificarea pe roșu — rollback');
+          log('auto-verify: final response while verification is red — rollback');
           const text = this.doRollback(
             root,
-            'AI-ul s-a oprit fără să repare eroarea',
+            'the AI stopped without fixing the error',
             lvf.command,
             lvf.output,
             lvf.seconds
@@ -1382,7 +1437,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // nu pornim Chrome și nu folosim Playwright (page rămâne undefined).
     let page: Page | undefined;
     if (provider.local) {
-      log('provider local (' + provider.name + '): fără browser');
+      log('local provider (' + provider.name + '): no browser');
     } else {
       const host = new URL(provider.url).origin;
       page = await this.browser.ensureOpen(host);
@@ -1413,7 +1468,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       } catch (e: any) {
         if (!isLoginRequiredError(e) || !page || assists >= LOGIN_MAX_ASSISTS) throw e;
         assists++;
-        log('login required (' + label + ') — asistent de login #' + assists);
+        log('login required (' + label + ') — login assistant #' + assists);
         const ok = await this.waitForLogin(label, page, signal);
         if (!ok) throw e;
       }
@@ -1428,14 +1483,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   ): Promise<boolean> {
     this.post(
       'notice',
-      '🔐 ' + label + ' cere autentificare — am adus fereastra Chrome în față. ' +
-        'Loghează-te în ea; continuu automat după login.'
+      '🔐 ' + label + ' requires authentication — the Chrome window was brought to the front. ' +
+        'Log in there; I continue automatically after login.'
     );
     const shown = await this.browser.showTemporarily(LOGIN_WAIT_MS);
     if (!shown.ok) {
       this.post(
         'notice',
-        '⚠️ ' + shown.message + ' (poți folosi și butonul 👁 Show Chrome).'
+        '⚠️ ' + shown.message + ' (you can also use the 👁 Show Chrome button).'
       );
     }
 
@@ -1459,16 +1514,79 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.browser.hideOffscreen();
     if (this.abortRequested || signal.aborted) throw new Error('__ABORTED__');
     if (loggedIn) {
-      this.post('notice', '✅ Login detectat — Chrome a revenit offscreen, continuu.');
+      this.post('notice', '✅ Login detected — Chrome is back in the background, continuing.');
       return true;
     }
     this.post(
       'notice',
-      '⏱ Nu am detectat login-ul în ' +
+      '⏱ Login not detected within ' +
         Math.round(LOGIN_WAIT_MS / 60000) +
-        ' min — Chrome a fost ascuns. Loghează-te, apoi trimite din nou mesajul.'
+        ' min — Chrome is back in the background. Log in, then send the message again.'
     );
     return false;
+  }
+
+  /**
+   * v1.8.0: dacă pagina curentă cere rezolvarea unui CAPTCHA, aduce Chrome în
+   * față (ca la login), așteaptă până dispare verificarea, apoi îl ascunde la
+   * loc și continuă de la sine. Stop anulează și ascunde fereastra imediat.
+   */
+  private async runWithCaptchaAssist(
+    label: string,
+    page: Page | undefined,
+    signal: AbortSignal
+  ): Promise<void> {
+    if (!page) return;
+    let detected = false;
+    try {
+      detected = await detectCaptcha(page);
+    } catch {
+      detected = false;
+    }
+    if (!detected) return;
+
+    this.post(
+      'notice',
+      '🤖 ' + label + ' requires CAPTCHA verification ("I\'m not a robot") — the ' +
+        'Chrome window was brought to the front. Solve the verification; I continue automatically after.'
+    );
+    const shown = await this.browser.showTemporarily(CAPTCHA_WAIT_MS);
+    if (!shown.ok) {
+      this.post(
+        'notice',
+        '⚠️ ' + shown.message + ' (you can also use the 👁 Show Chrome button).'
+      );
+    }
+
+    const deadline = Date.now() + CAPTCHA_WAIT_MS;
+    let solved = false;
+    while (Date.now() < deadline) {
+      if (this.abortRequested || signal.aborted) break;
+      let still = true;
+      try {
+        still = await detectCaptcha(page);
+      } catch {
+        /* pagina poate fi în tranziție (reload după verificare) */
+      }
+      if (!still) {
+        solved = true;
+        break;
+      }
+      await sleep(CAPTCHA_POLL_MS);
+    }
+
+    await this.browser.hideOffscreen();
+    if (this.abortRequested || signal.aborted) throw new Error('__ABORTED__');
+    if (solved) {
+      this.post('notice', '✅ CAPTCHA solved — Chrome is back in the background, continuing.');
+    } else {
+      this.post(
+        'notice',
+        '⏱ CAPTCHA not solved within ' +
+          Math.round(CAPTCHA_WAIT_MS / 60000) +
+          ' min — Chrome is back in the background. Solve the verification, then send the message again.'
+      );
+    }
   }
 
   /* ======================================================================
@@ -1538,7 +1656,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const vres = await runVerification(root);
     if (!vres.command) {
-      log('auto-verify: nicio verificare detectată — sar peste');
+      log('auto-verify: no verification detected — skipping');
       return { suffix: '', rollbackText: '' };
     }
     const seconds = (vres.duration / 1000).toFixed(1);
@@ -1549,19 +1667,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (this.verifyRepairs > 0) {
         this.post(
           'heal',
-          '✅ Auto-verify: „' + vres.command + '” trece din nou (după ' +
+          '✅ Auto-verify: "' + vres.command + '" passes again (after ' +
             this.verifyRepairs +
-            (this.verifyRepairs === 1 ? ' auto-repair' : ' auto-repair-uri') +
+            (this.verifyRepairs === 1 ? ' auto-repair' : ' auto-repairs') +
             ').'
         );
         // v1.7.1: verbose — decizia de recuperare
         this.postVerboseStep({
           kind: 'decision',
-          title: 'Verificarea trece din nou',
-          text: '„' + vres.command + '” OK.',
+          title: 'Verification passes again',
+          text: '"' + vres.command + '" OK.',
           status: 'done'
         });
-        log('auto-verify: recuperat după ' + this.verifyRepairs + ' auto-repair-uri');
+        log('auto-verify: recovered after ' + this.verifyRepairs + ' auto-repairs');
         this.verifyRepairs = 0;
       } else {
         log('auto-verify OK: ' + vres.command + ' (' + seconds + 's)');
@@ -1584,21 +1702,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       seconds
     };
     log(
-      'auto-verify EȘUAT (' + attempt + '/' + MAX_VERIFY_REPAIRS + '): ' + vres.command
+      'auto-verify FAILED (' + attempt + '/' + MAX_VERIFY_REPAIRS + '): ' + vres.command
     );
 
     if (attempt <= MAX_VERIFY_REPAIRS) {
       this.post(
         'heal',
-        '🔧 Auto-verify ' + attempt + '/' + MAX_VERIFY_REPAIRS + ': „' +
-          vres.command + '” a eșuat (' + seconds +
-          's) — trimit eroarea AI-ului pentru auto-repair.'
+        '🔧 Auto-verify ' + attempt + '/' + MAX_VERIFY_REPAIRS + ': "' +
+          vres.command + '" failed (' + seconds +
+          's) — sending the error to the AI for auto-repair.'
       );
       // v1.7.1: verbose — decizia de auto-repair
       this.postVerboseStep({
         kind: 'decision',
         title: 'Auto-repair ' + attempt + '/' + MAX_VERIFY_REPAIRS,
-        text: '„' + vres.command + '” a eșuat (' + seconds + 's) — eroarea completă merge la AI.',
+        text: '"' + vres.command + '" failed (' + seconds + 's) — the full error goes to the AI.',
         status: 'done'
       });
       return {
@@ -1616,15 +1734,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // v1.7.1: verbose — decizia de rollback
     this.postVerboseStep({
       kind: 'decision',
-      title: 'Rollback automat',
-      text: 'Auto-repair epuizat — modificările sunt anulate la ultima stare verificată OK.',
+      title: 'Automatic rollback',
+      text: 'Auto-repair exhausted — changes are rolled back to the last verified-good state.',
       status: 'error'
     });
     return {
       suffix: '',
       rollbackText: this.doRollback(
         root,
-        'după ' + MAX_VERIFY_REPAIRS + ' auto-repair-uri',
+        'after ' + MAX_VERIFY_REPAIRS + ' auto-repairs',
         vres.command,
         vres.output,
         seconds
@@ -1639,7 +1757,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    */
   private doRollback(
     root: string,
-    reasonRo: string,
+    reason: string,
     command: string,
     output: string,
     seconds: string
@@ -1651,43 +1769,43 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     };
     const lines: string[] = [];
     for (const p of rb.restored) {
-      lines.push('- ↩ `' + rel(p) + '` — restaurat la versiunea verificată');
+      lines.push('- ↩ `' + rel(p) + '` — restored to the verified version');
     }
     for (const p of rb.deleted) {
-      lines.push('- 🗑 `' + rel(p) + '` — fișier nou, șters');
+      lines.push('- 🗑 `' + rel(p) + '` — new file, deleted');
     }
     for (const f of rb.failed) {
-      lines.push('- ⚠️ `' + rel(f.abs) + '` — rollback eșuat: ' + f.error);
+      lines.push('- ⚠️ `' + rel(f.abs) + '` — rollback failed: ' + f.error);
     }
     const list = lines.length
       ? lines.join('\n')
-      : '- (nimic de anulat — fișierele erau deja în stare bună)';
+      : '- (nothing to roll back — the files were already in a good state)';
     const changed = rb.restored.length + rb.deleted.length;
 
     log(
-      'rollback automat (' + reasonRo + '): ' + changed + ' fișiere anulate, ' +
-        rb.failed.length + ' erori'
+      'automatic rollback (' + reason + '): ' + changed + ' files reverted, ' +
+        rb.failed.length + ' errors'
     );
     this.post(
       'heal',
-      '⛔ ROLLBACK automat (' + reasonRo + '): ' + changed +
-        ' fișiere anulate. Proiectul a revenit la ultima stare verificată OK.'
+      '⛔ Automatic ROLLBACK (' + reason + '): ' + changed +
+        ' files rolled back. The project is back to the last verified-good state.'
     );
     vscode.window.showWarningMessage(
-      'AI Bridge: verificarea „' + command + '” a eșuat — ' + reasonRo +
-        '; modificările au fost anulate automat (rollback).'
+      'AI Bridge: verification "' + command + '" failed — ' + reason +
+        '; changes were rolled back automatically.'
     );
     this.verifyRepairs = 0;
     this.lastVerifyFailure = undefined;
 
     return (
-      '⛔ **Auto-verify: „' + command + '” a eșuat — ' + reasonRo +
-      '; am făcut rollback automat.**\n\n' +
-      'Ce am anulat:\n' + list + '\n\n' +
-      'Proiectul e din nou în ultima stare care trecea verificarea. Ultima eroare (' +
+      '⛔ **Auto-verify: "' + command + '" failed — ' + reason +
+      '; an automatic rollback was performed.**\n\n' +
+      'What was rolled back:\n' + list + '\n\n' +
+      'The project is back to the last state that passed verification. Last error (' +
       seconds + 's):\n\n' +
       '```\n' + output.trim().slice(0, 1500) + '\n```\n\n' +
-      'Poți reîncerca, eventual cu pași mai mici sau instrucțiuni mai specifice.'
+      'You can try again, possibly with smaller steps or more specific instructions.'
     );
   }
 
@@ -1695,7 +1813,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * v1.4.0 — CHECKPOINT GIT PER PROMPT + RESTORE CU UN CLICK
    * Înainte de fiecare mesaj se creează un commit de checkpoint
    * („aibridge-prompt:<id>”), persistat în globalState împreună cu id-ul
-   * mesajului; butonul 🔄 din chat cheamă restoreToCheckpoint (git reset
+   * mesajului; butonul ⟲ din chat cheamă restoreToCheckpoint (git reset
    * --hard), cu backup automat al stării curente înainte de reset.
    * ==================================================================== */
 
@@ -1726,31 +1844,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!this.checkpointsEnabled()) return;
     try {
       const cp = await createPromptCheckpoint(root, messageId, promptText, {
-        // v1.5.0: folder fără git → `git init` automat, ca butonul 🔄 de
+        // v1.5.0: folder fără git → `git init` automat, ca butonul ⟲ de
         // restore să apară întotdeauna (înainte: fail tăcut, fără buton)
         autoInit: this.autoInitGitEnabled()
       });
       if (!cp) {
-        log('checkpoint: indisponibil (nu e proiect git / lipsește git) — sar peste');
+        log('checkpoint: unavailable (not a git project / git missing) — skipping');
         // v1.5.0: o singură explicație per sesiune (înainte: fail tăcut)
         if (!this.checkpointNoticeShown) {
           this.checkpointNoticeShown = true;
           this.post(
             'heal',
-            'ℹ️ Checkpoint indisponibil: folderul nu e un repo git sau git nu e instalat — ' +
-              'butonul 🔄 de restore nu apare. Instalează git (sau rulează „git init” în folderul proiectului).'
+            'ℹ️ Checkpoint unavailable: the folder is not a git repo or git is not installed — ' +
+              'the ⟲ restore button will not appear. Install git (or run "git init" in the project folder).'
           );
         }
         return;
       }
       if (cp.repoInitialized) {
         // v1.5.0: am creat repo-ul git (folderul nu era sub git)
-        log('checkpoint: git init automat în ' + root);
+        log('checkpoint: automatic git init in ' + root);
         this.post(
           'heal',
-          '🔧 Folderul nu era un repo git — l-am inițializat automat (git init + .gitignore minimal), ' +
-            'ca checkpoint-urile și butonul 🔄 de restore să funcționeze. ' +
-            'Poți opri asta din setarea aiBridge.autoInitGit.'
+          '🔧 The folder was not a git repo — it was initialized automatically (git init + a minimal .gitignore), ' +
+            'so checkpoints and the ⟲ restore button work. ' +
+            'You can turn this off with the aiBridge.autoInitGit setting.'
         );
       }
       this.checkpoints.push(cp);
@@ -1759,7 +1877,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       await this.state.update(CHECKPOINTS_KEY, this.checkpoints);
       log(
-        'checkpoint ' + cp.id.slice(0, 7) + ' pentru ' + messageId +
+        'checkpoint ' + cp.id.slice(0, 7) + ' for ' + messageId +
           ' (wasClean=' + cp.wasClean + ')'
       );
       this.view?.webview.postMessage({
@@ -1776,57 +1894,57 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  /** Butonul 🔄: confirmare modală → git reset --hard la checkpoint. */
+  /** Butonul ⟲: confirmare modală → git reset --hard la checkpoint. */
   private async handleRestoreCheckpoint(messageId: string): Promise<void> {
     const cp = this.checkpoints.find((c) => c.messageId === messageId);
     if (!cp) {
       this.post(
         'notice',
-        '⚠️ Nu am găsit checkpoint-ul pentru acest mesaj (poate e prea vechi).'
+        '⚠️ Checkpoint not found for this message (it may be too old).'
       );
       return;
     }
     if (this.abortController) {
-      this.post('notice', '⏳ Oprește mai întâi răspunsul curent (Stop), apoi fă restore.');
+      this.post('notice', '⏳ Stop the current response first (Stop), then restore.');
       return;
     }
     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!root) {
-      this.post('notice', '⚠️ Niciun folder deschis — nu pot face restore.');
+      this.post('notice', '⚠️ No folder open — cannot restore.');
       return;
     }
 
     const pick = await vscode.window.showWarningMessage(
-      '🔄 Revii la starea de dinainte de acest prompt?\n\n„' + cp.text + '”\n\n' +
-        'Toate modificările făcute după acest checkpoint vor fi anulate ' +
-        '(git reset --hard ' + cp.id.slice(0, 7) + '). Starea curentă este ' +
-        'salvată automat ca backup (commit git) înainte de reset.',
+      '⟲ Go back to the state before this prompt?\n\n"' + cp.text + '"\n\n' +
+        'All changes made after this checkpoint will be reverted ' +
+        '(git reset --hard ' + cp.id.slice(0, 7) + '). The current state is ' +
+        'saved automatically as a backup (git commit) before the reset.',
       { modal: true },
-      'Da, revino'
+      'Yes, restore'
     );
-    if (pick !== 'Da, revino') {
-      this.post('notice', 'Restore anulat.');
+    if (pick !== 'Yes, restore') {
+      this.post('notice', 'Restore cancelled.');
       return;
     }
 
-    log('restore checkpoint ' + cp.id.slice(0, 7) + ' (mesaj ' + messageId + ')');
+    log('restore checkpoint ' + cp.id.slice(0, 7) + ' (message ' + messageId + ')');
     const res = await restoreToCheckpoint(root, cp.id);
     if (res.ok) {
       const left = res.leftoverUntracked ?? [];
       this.post(
         'heal',
-        '🔄 Checkpoint restaurat: „' + cp.text +
-          '” — proiectul e din nou la starea de dinainte de acel prompt' +
+        '⟲ Checkpoint restored: "' + cp.text +
+          '" — the project is back to the state before that prompt' +
           (res.backupId
-            ? '. Starea de dinainte de restore e salvată la commit ' +
+            ? '. The state before the restore is saved in commit ' +
               res.backupId.slice(0, 7)
             : '') +
           (left.length
-            ? '. ℹ️ ' + left.length + ' fișiere necomise au rămas pe disc (ex: ' + left.slice(0, 3).join(', ') + ')'
+            ? '. ℹ️ ' + left.length + ' uncommitted files were left on disk (e.g. ' + left.slice(0, 3).join(', ') + ')'
             : '') +
           '.'
       );
-      vscode.window.showInformationMessage('AI Bridge: checkpoint restaurat.');
+      vscode.window.showInformationMessage('AI Bridge: checkpoint restored.');
       this.view?.webview.postMessage({
         type: 'checkpoint_restored',
         messageId,
@@ -1834,12 +1952,254 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         backupId: res.backupId
       });
     } else {
-      log('restore failed: ' + (res.error ?? 'necunoscut'));
-      this.post('heal', '⛔ Restore eșuat: ' + (res.error ?? 'eroare necunoscută'));
+      log('restore failed: ' + (res.error ?? 'unknown'));
+      this.post('heal', '⛔ Restore failed: ' + (res.error ?? 'unknown error'));
       vscode.window.showWarningMessage(
-        'AI Bridge: restore a eșuat — ' + (res.error ?? 'eroare necunoscută')
+        'AI Bridge: restore failed — ' + (res.error ?? 'unknown error')
       );
     }
+  }
+
+  /* ======================================================================
+   * v1.9.0 — CONVERSAȚII MULTIPLE + EDIT PROMPT (✐) + FORK (ᛉ)
+   * Lista conversațiilor trăiește în globalState (vezi conversations.ts);
+   * bara de deasupra chatului comută între ele. Fiecare mesaj user primește
+   * la hover trei butoane: ✐ (edit prompt: restore la checkpoint + trunchiere
+   * + retrimitere), ᛉ (fork: conversație nouă din acel prompt — cea veche
+   * rămâne intactă) și ⟲ (restore, când există checkpoint).
+   * ==================================================================== */
+
+  /** v1.9.0: migrează o singură dată istoricul legacy (aiBridge.history) într-o conversație. */
+  private async ensureConversationsMigrated(): Promise<void> {
+    try {
+      if (this.conversations.list().length > 0) return;
+      const legacy = this.getHistory();
+      if (!legacy.length) return;
+      const now = Date.now();
+      const items: ConversationMessage[] = legacy
+        .slice(-HISTORY_MAX)
+        .map((m, i) => ({
+          role: m.role,
+          text: m.text,
+          ts: m.ts || now,
+          messageId:
+            m.id && MSG_ID_RE.test(m.id)
+              ? m.id
+              : 'h' + now.toString(36) + '-' + i
+        }));
+      const firstUser = legacy.find((m) => m.role === 'user');
+      const title = (firstUser?.text || 'Imported conversation')
+        .trim()
+        .slice(0, 40);
+      await this.conversations.importLegacy(
+        items,
+        title || 'Imported conversation'
+      );
+      // nu re-importa la următoarea pornire
+      await this.state.update(HISTORY_KEY, []);
+      log('conversations: legacy history migrated (' + items.length + ' messages)');
+    } catch (e: any) {
+      log('conversations: migration failed — ' + (e?.message ?? String(e)));
+    }
+  }
+
+  /** Mesajele conversației active, în formatul StoredMessage al webview-ului. */
+  private activeHistoryItems(): StoredMessage[] {
+    const conv = this.conversations.getActive();
+    if (!conv) return this.getHistory();
+    return conv.messages.map((m) => ({
+      role: m.role,
+      text: m.text,
+      ts: m.ts,
+      id: m.messageId
+    }));
+  }
+
+  /** Trimite webview-ului lista de conversații + conversația activă (dropdown). */
+  private postConversations(): void {
+    const items = this.conversations.list().map((c) => ({
+      id: c.id,
+      title: c.title,
+      createdAt: c.createdAt,
+      updatedAt: c.updatedAt,
+      parentId: c.parentId,
+      count: c.messages.length
+    }));
+    this.view?.webview.postMessage({
+      type: 'conversations',
+      items,
+      activeId: this.conversations.getActiveId()
+    });
+  }
+
+  /** Re-randează chatul din conversația activă (comutare / fork / edit). */
+  private rerenderActive(): void {
+    this.view?.webview.postMessage({
+      type: 'history',
+      items: this.activeHistoryItems()
+    });
+  }
+
+  /** v1.9.0: comută la altă conversație (dropdown-ul din bara de conversații). */
+  private async handleSwitchConversation(id: string): Promise<void> {
+    if (this.abortController) {
+      this.post('notice', '⏳ Stop the current response first (Stop), then switch the conversation.');
+      this.postConversations();
+      return;
+    }
+    const conv = await this.conversations.switchTo(id);
+    if (!conv) {
+      this.post('notice', '⚠️ Conversation not found (was it deleted?).');
+      this.postConversations();
+      return;
+    }
+    log('conversation switched → ' + id + ' (' + conv.messages.length + ' messages)');
+    this.postConversations();
+    this.rerenderActive();
+  }
+
+  /** v1.9.0: conversație nouă (goală) — cea curentă rămâne în listă. */
+  private async handleNewConversation(): Promise<void> {
+    if (this.abortController) {
+      this.post('notice', '⏳ Stop the current response first (Stop), then start a new conversation.');
+      return;
+    }
+    const active = this.conversations.getActive();
+    if (active && active.messages.length === 0) {
+      this.post('notice', 'ℹ️ You are already in a new (empty) conversation.');
+      this.postConversations();
+      return;
+    }
+    const conv = await this.conversations.create('New conversation');
+    log('conversation created: ' + conv.id);
+    this.post('heal', '🆕 New conversation — the previous one stays in the list (dropdown).');
+    this.postConversations();
+    this.rerenderActive();
+  }
+
+  /** v1.9.0: șterge conversația activă (cu confirmare nativă). */
+  private async handleDeleteConversation(): Promise<void> {
+    if (this.abortController) {
+      this.post('notice', '⏳ Stop the current response first (Stop), then delete the conversation.');
+      this.postConversations();
+      return;
+    }
+    const active = this.conversations.getActive();
+    if (!active) {
+      this.post('notice', 'ℹ️ There is no conversation to delete.');
+      this.postConversations();
+      return;
+    }
+    const pick = await vscode.window.showWarningMessage(
+      '🗑 Delete the conversation "' + active.title + '"? (' + active.messages.length +
+        ' messages — the action cannot be undone; git checkpoints stay in their history.)',
+      { modal: true },
+      'Delete'
+    );
+    if (pick !== 'Delete') {
+      this.postConversations();
+      return;
+    }
+    await this.conversations.deleteConversation(active.id);
+    log('conversation deleted: ' + active.id);
+    this.post('heal', '🗑 The conversation "' + active.title + '" was deleted.');
+    this.postConversations();
+    this.rerenderActive();
+  }
+
+  /** v1.9.0: fork (ᛉ) — conversație nouă din mesajul ales; cea veche NU se șterge. */
+  private async handleForkConversation(messageId: string): Promise<void> {
+    if (!MSG_ID_RE.test(messageId)) return;
+    if (this.abortController) {
+      this.post('notice', '⏳ Stop the current response first (Stop), then create the fork.');
+      return;
+    }
+    const forked = await this.conversations.forkFrom(messageId);
+    if (!forked) {
+      this.post('notice', '⚠️ Message not found in the active conversation — fork cancelled.');
+      return;
+    }
+    log('fork: ' + messageId + ' → ' + forked.id);
+    this.post(
+      'heal',
+      'ᛉ Fork created from the selected message — the original conversation stays in the list. ' +
+        'Continue here with a new prompt; with ⟲ on the starting message you can also bring ' +
+        'the files back to the state before it.'
+    );
+    this.postConversations();
+    this.rerenderActive();
+  }
+
+  /**
+   * v1.9.0: edit prompt (✐) — Save → (1) restore la checkpoint-ul git al
+   * promptului original, (2) șterge mesajul editat + tot ce a urmat din
+   * conversație, (3) retrimite textul editat (webview → fluxul normal de send).
+   */
+  private async handleEditPrompt(messageId: string, rawText: string): Promise<void> {
+    if (!MSG_ID_RE.test(messageId)) return;
+    const text = String(rawText ?? '').trim();
+    if (!text) {
+      this.post('notice', '⚠️ The edited text is empty — edit cancelled.');
+      this.view?.webview.postMessage({ type: 'edit_cancel', messageId });
+      return;
+    }
+    if (this.abortController) {
+      this.post('notice', '⏳ Stop the current response first (Stop), then edit the prompt.');
+      this.view?.webview.postMessage({ type: 'edit_cancel', messageId });
+      return;
+    }
+    const conv = this.conversations.getActive();
+    const exists = conv?.messages.some(
+      (m) => m.messageId === messageId && m.role === 'user'
+    );
+    if (!exists) {
+      this.post('notice', '⚠️ The message no longer exists in the active conversation — edit cancelled.');
+      this.view?.webview.postMessage({ type: 'edit_cancel', messageId });
+      return;
+    }
+
+    // 1) restore la checkpoint-ul de dinaintea promptului original
+    const cp = this.checkpoints.find((c) => c.messageId === messageId);
+    if (cp) {
+      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (root) {
+        const res = await restoreToCheckpoint(root, cp.id);
+        if (res.ok) {
+          log('edit: restore checkpoint ' + cp.id.slice(0, 7) + ' OK');
+          this.post(
+            'heal',
+            '⟲ Edit: the files are back to the state before the original prompt' +
+              (res.backupId
+                ? ' (the state before the restore is saved in commit ' +
+                  res.backupId.slice(0, 7) + ')'
+                : '') +
+              '. Resending the edited prompt.'
+          );
+        } else {
+          log('edit: restore failed — ' + (res.error ?? 'unknown'));
+          this.post(
+            'heal',
+            '⚠️ Edit: the checkpoint restore failed (' +
+              (res.error ?? 'unknown error') +
+              ') — the file changes remain as they are.'
+          );
+        }
+      }
+    } else {
+      this.post(
+        'notice',
+        'ℹ️ Edit: this message has no checkpoint (not a git repo?) — the history is truncated, but the files are not reset.'
+      );
+    }
+
+    // 2) șterge mesajul editat + tot ce a urmat din conversația activă
+    await this.conversations.truncateBefore(messageId);
+    log('edit prompt ' + messageId + ' → „' + text.slice(0, 60) + '”');
+    this.postConversations();
+
+    // 3) webview-ul re-randează conversația și retrimite promptul editat
+    this.rerenderActive();
+    this.view?.webview.postMessage({ type: 'edit_resend', text });
   }
 
   /** v0.4.0: aduce fereastra Chrome în față (comanda + butonul 👁 din toolbar). */
@@ -1877,18 +2237,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const title = [
         'Provider: ' + label,
         'Chrome (CDP ' + info.port + '): ' +
-          (info.browser ? '🟢 rulează' : '🔴 nu răspunde'),
+          (info.browser ? '🟢 running' : '🔴 not responding'),
         ...(info.browser
           ? [
               '  DeepSeek: ' +
-                (info.deepseekLoggedIn ? 'logat 👍' : 'login nedetectat')
+                (info.deepseekLoggedIn ? 'logged in 👍' : 'login not detected')
             ]
           : []),
         'Ollama (' + info.ollamaUrl + '): ' +
           (info.ollama
-            ? '🟢 OK (' + info.ollamaModels.length + ' modele)'
-            : '🔴 nu răspunde'),
-        'Click pentru raport detaliat.'
+            ? '🟢 OK (' + info.ollamaModels.length + ' models)'
+            : '🔴 not responding'),
+        'Click for the detailed report.'
       ].join('\n');
 
       this.view?.webview.postMessage({ type: 'provider_status', color, title });
@@ -1913,52 +2273,52 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (selected === 'auto') {
       const chain = this.autoChainIds();
       lines.push(
-        'Provider selectat: Auto — lanț: ' +
+        'Selected provider: Auto — chain: ' +
           chain.map((id) => PROVIDER_LABELS[id] ?? id).join(' → ')
       );
     } else {
-      lines.push('Provider selectat: ' + (PROVIDER_LABELS[selected] ?? selected));
+      lines.push('Selected provider: ' + (PROVIDER_LABELS[selected] ?? selected));
     }
     lines.push(
       'Chrome/CDP: port ' +
         info.port +
         ' — ' +
-        (info.browser ? '🟢 rulează' : '🔴 nu răspunde')
+        (info.browser ? '🟢 running' : '🔴 not responding')
     );
     if (info.browser) {
       lines.push(
         '  DeepSeek: ' +
           (info.deepseekLoggedIn
-            ? '🟢 tab de chat găsit (logat)'
-            : '🟡 nu am găsit un tab logat')
+            ? '🟢 chat tab found (logged in)'
+            : '🟡 no logged-in tab found')
       );
     }
     lines.push(
-      'Ollama: ' + info.ollamaUrl + ' — ' + (info.ollama ? '🟢 OK' : '🔴 nu răspunde')
+      'Ollama: ' + info.ollamaUrl + ' — ' + (info.ollama ? '🟢 OK' : '🔴 not responding')
     );
     if (info.ollama) {
-      lines.push('  Modele: ' + (info.ollamaModels.join(', ') || '(niciunul)'));
+      lines.push('  Models: ' + (info.ollamaModels.join(', ') || '(none)'));
       if (info.ollamaModels.length) {
         const base = activeModel.split(':')[0];
         const has = info.ollamaModels.some(
           (m) => m === activeModel || m.split(':')[0] === base
         );
         lines.push(
-          '  Model configurat: ' + activeModel + (has ? ' ✓' : ' ⚠️ nu apare în listă')
+          '  Configured model: ' + activeModel + (has ? ' ✓' : ' ⚠️ not in the list')
         );
       }
     } else {
-      lines.push('  (pornește Ollama cu „ollama serve” pentru modul local)');
+      lines.push('  (start Ollama with "ollama serve" for local mode)');
     }
     // v1.1.0: starea serverelor MCP + numărul de unelte expuse
     lines.push(...mcp.statusLines());
-    lines.push('Recomandare: ' + this.statusRecommendation(selected, info));
+    lines.push('Recommendation: ' + this.statusRecommendation(selected, info));
 
     for (const line of lines) logLine('status', line);
     initLogChannel().show(true);
     this.post('notice', lines.join('\n'));
     vscode.window.showInformationMessage(
-      'AI Bridge: status providers scris în Output → AI Bridge (vezi și chatul).'
+      'AI Bridge: provider status written to Output → AI Bridge (see also the chat).'
     );
   }
 
@@ -1968,23 +2328,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   ): string {
     if (selected === 'auto') {
       if (info.browser && info.ollama)
-        return 'ambele disponibile — Auto folosește browserul, Ollama rămâne rezerva.';
+        return 'both available — Auto uses the browser, Ollama stays as the fallback.';
       if (info.browser)
-        return 'browserul e disponibil — Ollama nu răspunde (fallback inactiv).';
+        return 'the browser is available — Ollama is not responding (fallback inactive).';
       if (info.ollama)
-        return 'browserul nu răspunde — Auto va porni Chrome, iar Ollama e rezerva.';
-      return 'niciun provider disponibil — pornește Chrome sau Ollama.';
+        return 'the browser is not responding — Auto will start Chrome, and Ollama is the fallback.';
+      return 'no provider available — start Chrome or Ollama.';
     }
     if (selected === 'ollama') {
-      if (info.ollama) return 'Ollama e gata de lucru (mod local).';
+      if (info.ollama) return 'Ollama is ready to work (local mode).';
       return info.browser
-        ? 'Ollama nu răspunde — pornește „ollama serve” sau alege un provider web.'
-        : 'pornește Ollama cu „ollama serve”.';
+        ? 'Ollama is not responding — start "ollama serve" or choose a web provider.'
+        : 'start Ollama with "ollama serve".';
     }
-    if (info.browser) return 'providerul web poate fi folosit acum.';
+    if (info.browser) return 'the web provider can be used now.';
     return info.ollama
-      ? 'browserul nu rulează — folosește „Show Chrome”/Open Browser sau alege Ollama (local).'
-      : 'pornește Chrome (Open Browser / Show Chrome) sau Ollama.';
+      ? 'the browser is not running — use "Show Chrome" / Open Browser or choose Ollama (local).'
+      : 'start Chrome (Open Browser / Show Chrome) or Ollama.';
   }
 
   // FAZA II (A): lista de atașamente --------------------------------
@@ -2005,7 +2365,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
     for (const p of paths) {
       if (this.attachments.length >= MAX_ATTACHMENTS) {
-        log('limită de atașamente atinsă (' + MAX_ATTACHMENTS + ')');
+        log('attachment limit reached (' + MAX_ATTACHMENTS + ')');
         break;
       }
       const norm = path.resolve(p).toLowerCase();
@@ -2019,7 +2379,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const att = await describePath(p, root);
       if (!att) continue;
       this.attachments.push(att);
-      log('atașament adăugat: ' + att.relPath + ' (' + att.kind + ')');
+      log('attachment added: ' + att.relPath + ' (' + att.kind + ')');
     }
     this.postAttachments();
   }
@@ -2066,16 +2426,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   async clearNoAskFiles(): Promise<void> {
     const files = this.getNoAskFiles();
     await this.state.update(NO_ASK_KEY, []);
-    log('no-ask list cleared (' + files.length + ' intrări)');
+    log('no-ask list cleared (' + files.length + ' entries)');
     if (files.length) {
       vscode.window.showInformationMessage(
-        'AI Bridge: lista „nu mai întreba" a fost golită (' +
+        'AI Bridge: the "don\'t ask again" list was cleared (' +
           files.length +
-          ' fișiere).'
+          ' files).'
       );
     } else {
       vscode.window.showInformationMessage(
-        'AI Bridge: lista „nu mai întreba" era deja goală.'
+        'AI Bridge: the "don\'t ask again" list was already empty.'
       );
     }
   }
@@ -2124,7 +2484,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       });
     } catch (e: any) {
       log(
-        'diff review: nu am putut scrie fișierele temporare — ' +
+        'diff review: could not write the temporary files — ' +
           (e?.message ?? String(e))
       );
       return 'fallback';
@@ -2151,8 +2511,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const single = changes.length === 1;
     const title = single
       ? 'AI Bridge: ' + toolName + ' → ' + changes[0].label
-      : 'AI Bridge: ' + toolName + ' → ' + changes.length + ' fișiere';
-    log('diff review: ' + title + ' (' + pairs.length + ' fișiere)');
+      : 'AI Bridge: ' + toolName + ' → ' + changes.length + ' files';
+    log('diff review: ' + title + ' (' + pairs.length + ' files)');
 
     // 2) deschide diff-ul nativ VS Code
     try {
@@ -2176,7 +2536,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // fără diff vizibil nu aprobăm „pe nevăzute" — cădem pe cardul din chat
       this.pendingReviewResolve = undefined;
       log(
-        'diff review: deschiderea diff-ului a eșuat — ' +
+        'diff review: opening the diff failed — ' +
           (e?.message ?? String(e))
       );
       return 'fallback';
@@ -2184,7 +2544,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     // v1.2.1: 2b) cardul INLINE din chat — sursa principală de decizie
     // (notificarea VS Code poate fi ascunsă, expirată sau nerandată)
-    const target = single ? changes[0].label : changes.length + ' fișiere';
+    const target = single ? changes[0].label : changes.length + ' files';
     let inlineShown = false;
     if (this.view && resolveInline) {
       const payload = {
@@ -2197,21 +2557,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.pendingInlineReviewPayload = payload;
       this.view.webview.postMessage({ type: 'diff_review', ...payload });
       inlineShown = true;
-      log('diff review: card inline trimis în chat (id ' + reviewId + ')');
+      log('diff review: inline card sent to chat (id ' + reviewId + ')');
     }
 
     // 3) întreabă utilizatorul (butoane nativ VS Code, în bara de jos)
     const msg = single
       ? 'AI Bridge: ' +
         toolName +
-        ' vrea să scrie ' +
+        ' wants to write ' +
         changes[0].label +
-        ' — diff-ul e deschis în editor.'
+        ' — the diff is open in the editor.'
       : 'AI Bridge: ' +
         toolName +
-        ' vrea să scrie ' +
+        ' wants to write ' +
         changes.length +
-        ' fișiere — diff-ul multi-fișier e deschis în editor.';
+        ' files — the multi-file diff is open in the editor.';
     const buttons = single
       ? ['Accept', 'Reject', NO_ASK_LABEL]
       : ['Accept', 'Reject'];
@@ -2253,7 +2613,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     } else if (inlineShown) {
       // v1.2.1: notificarea a fost închisă fără alegere → cardul inline din
       // chat rămâne sursa de decizie (înainte se cădea pe cardul clasic)
-      log('diff review: notificare închisă fără alegere — aștept cardul inline');
+      log('diff review: notification closed without a choice — waiting for the inline card');
       const wake2 = new Promise<void>((resolve) => {
         this.pendingReviewResolve = resolve;
       });
@@ -2294,22 +2654,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return decision;
   }
 
-  // FAZA E: istoricul persistat în globalState (max HISTORY_MAX mesaje)
+  // FAZA E: istoricul persistat în globalState (v1.9.0: doar ca sursă de migrare —
+  // rolul a fost preluat de conversații; vezi ensureConversationsMigrated)
   private getHistory(): StoredMessage[] {
     return this.state.get<StoredMessage[]>(HISTORY_KEY, []);
   }
 
+  // v1.9.0: istoricul trăiește în conversația activă (persistat în globalState);
+  // semnătura e neschimbată — apelanții (send / răspuns final / rollback) nu se ating.
   private async appendHistory(
     role: 'user' | 'assistant',
     text: string,
     id?: string
   ) {
     try {
-      const history = this.getHistory();
-      history.push(
-        id ? { role, text, ts: Date.now(), id } : { role, text, ts: Date.now() }
-      );
-      await this.state.update(HISTORY_KEY, history.slice(-HISTORY_MAX));
+      const ts = Date.now();
+      if (!this.conversations.getActive()) {
+        await this.conversations.create(
+          String(text ?? '').slice(0, 40) || 'Conversation'
+        );
+      }
+      const messageId =
+        id ?? 'a' + ts.toString(36) + Math.random().toString(36).slice(2, 6);
+      await this.conversations.appendMessage({ role, text, ts, messageId });
     } catch (e: any) {
       log('history save failed: ' + (e?.message ?? String(e)));
     }
@@ -2439,34 +2806,39 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 </head><body>
 <div id="toolbar">
   <select id="provider" title="AI Provider">${providerOptions}</select>
-  <span id="status-badge" class="status-badge" title="Se verifică starea providerilor...">⚪</span>
-  <label class="auto-approve-toggle" id="auto-approve-toggle" title="Auto-approve: când e bifat, write_file / edit_file / run_command / git sunt aprobate automat, fără carduri de confirmare">
+  <span id="status-badge" class="status-badge" title="Checking provider status...">⚪</span>
+  <label class="auto-approve-toggle" id="auto-approve-toggle" title="Auto-approve: when checked, write_file / edit_file / run_command / git are approved automatically, without confirmation cards">
     <input type="checkbox" id="auto-approve"/>
     <span>⚡ Auto</span>
   </label>
-  <button id="verbose-toggle" title="Verbose mode: arată în chat fiecare pas al AI-ului (Thinking / Executing / Result / Decision)">🔍</button>
-  <button id="stop" title="Oprește răspunsul" hidden>
+  <button id="verbose-toggle" title="Verbose mode: shows every AI step in the chat (Thinking / Executing / Result / Decision)">🔍</button>
+  <button id="stop" title="Stop the response" hidden>
     <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></svg>
   </button>
-  <button id="show-chrome" title="Arată fereastra Chrome (providerii web)">
+  <button id="show-chrome" title="Show the Chrome window (web providers)">
     <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" d="M8 4C4.9 4 2.4 5.8 1.2 8c1.2 2.2 3.7 4 6.8 4s5.6-1.8 6.8-4C13.6 5.8 11.1 4 8 4Zm0 6.8C6.3 10.8 4.7 9.6 3.8 8c.9-1.6 2.5-2.8 4.2-2.8 1.7 0 3.3 1.2 4.2 2.8-.9 1.6-2.5 2.8-4.2 2.8Z"/><circle cx="8" cy="8" r="1.5"/></svg>
   </button>
-  <button id="clear" title="Curăță chatul">
+  <button id="clear" title="Clear the chat">
     <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M6.5 1h3a.5.5 0 0 1 .5.5V2h3.5a.5.5 0 0 1 0 1H14v9.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12.5V3h.5a.5.5 0 0 1 0-1H6v-.5a.5.5 0 0 1 .5-.5ZM3 3v9.5a.5.5 0 0 0 .5.5h9a.5.5 0 0 0 .5-.5V3H3Zm3.5 2a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5Zm3 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5Z"/></svg>
   </button>
 </div>
+<div id="conv-bar">
+  <select id="conversation" title="Conversations — switch between them (old ones stay in the list)"></select>
+  <button id="conv-new" title="New conversation (the current one stays in the list)">➕</button>
+  <button id="conv-delete" title="Delete the current conversation from the list">🗑️</button>
+</div>
 <div id="messages"></div>
-<button id="jump" title="Sari la cele mai noi" hidden>
+<button id="jump" title="Jump to the latest" hidden>
   <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M8.53 13.03a.75.75 0 0 1-1.06 0l-5-5a.75.75 0 1 1 1.06-1.06L7.25 10.69V3.75a.75.75 0 0 1 1.5 0v6.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-5 5Z"/></svg>
 </button>
 <div id="input-area">
   <div id="attachments" hidden></div>
   <div id="input-wrapper">
-    <textarea id="input" rows="1" placeholder="Scrie un mesaj..."></textarea>
-    <button id="attach-file" title="Atașează fișiere">📎</button>
-    <button id="attach-folder" title="Atașează foldere">📁</button>
-    <button id="mic-btn" title="Vorbește (captare în extensie + Whisper local)">🎤</button>
-    <button id="send" title="Trimite (Enter)">
+    <textarea id="input" rows="1" placeholder="Type a message..."></textarea>
+    <button id="attach-file" title="Attach files">📎</button>
+    <button id="attach-folder" title="Attach folders">📁</button>
+    <button id="mic-btn" title="Speak (capture runs in the extension + local Whisper)">🎤</button>
+    <button id="send" title="Send (Enter)">
       <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
         <path d="M15.854.146a.5.5 0 0 1 .11.54l-5.819 14.547a.75.75 0 0 1-1.329.124l-3.178-4.995L.643 7.184a.75.75 0 0 1 .124-1.33L15.314.037a.5.5 0 0 1 .54.11ZM6.636 10.07l2.761 4.338L14.13 2.576 6.636 10.07Zm6.787-8.201L1.591 6.602l4.339 2.76 7.494-7.493Z"/>
       </svg>

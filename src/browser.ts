@@ -5,6 +5,7 @@ import { promisify } from 'util';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { logLine } from './log';
+import { setChromeTaskbarHidden, winWindowSupported } from './winwindow';
 
 const execFileAsync = promisify(execFile);
 const log = (msg: string) => logLine('browser', msg);
@@ -43,11 +44,11 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** v0.9.1: bounds pentru fereastra vizibilă (login) și pentru cea ascunsă. */
 type WindowBounds = {
-  left: number;
-  top: number;
+  left?: number;
+  top?: number;
   width?: number;
   height?: number;
-  windowState: 'normal';
+  windowState: 'normal' | 'minimized';
 };
 
 const ONSCREEN_BOUNDS: WindowBounds = {
@@ -58,10 +59,13 @@ const ONSCREEN_BOUNDS: WindowBounds = {
   windowState: 'normal'
 };
 
-const OFFSCREEN_BOUNDS: WindowBounds = {
-  left: -32000,
-  top: -32000,
-  windowState: 'normal'
+/**
+ * v1.8.0: starea „în fundal” — fereastra e MINIMIZATĂ (nu doar mutată
+offscreen, care lăsa un buton vizibil în taskbar). Pe Windows butonul din
+taskbar dispare complet prin WS_EX_TOOLWINDOW (vezi winwindow.ts).
+ */
+const MINIMIZED_BOUNDS: WindowBounds = {
+  windowState: 'minimized'
 };
 
 async function fileExists(p: string): Promise<boolean> {
@@ -190,8 +194,7 @@ export class BrowserManager {
     const exe = await detectBrowserPath(opts.chromePath);
     if (!exe) {
       throw new Error(
-        'Nu am găsit Chrome sau Edge pe acest sistem. Instalează unul dintre ' +
-          'ele sau setează calea manual în setarea aiBridge.chromePath.'
+        'I could not find Chrome or Edge on this system. Install one of them or set the path manually in the aiBridge.chromePath setting.'
       );
     }
     await fs.mkdir(opts.profileDir, { recursive: true });
@@ -199,9 +202,13 @@ export class BrowserManager {
     const args = [
       '--remote-debugging-port=' + opts.port,
       '--user-data-dir=' + opts.profileDir,
-      // Offscreen: mută fereastra în afara ecranului
+      // Offscreen: dacă fereastra ajunge vizibilă (login/CAPTCHA), poziția e departe de ecran
       '--window-position=-32000,-32000',
       '--window-size=1280,900',
+      // v1.8.0: pornește minimizat. ATENȚIE: cu --no-startup-window, fereastra
+      // e creată mai târziu de Playwright și flag-ul e ignorat — minimizarea
+      // reală se face după conectare, prin CDP (applyHiddenState, vezi ensureOpen).
+      '--start-minimized',
       // Nu porni cu tab în față
       '--no-startup-window',
       '--no-first-run',
@@ -230,8 +237,8 @@ export class BrowserManager {
       if (await this.isRunning()) return;
     }
     throw new Error(
-      'Chrome nu a răspuns pe portul ' + opts.port + ' în 20 secunde ' +
-        '(portul e ocupat de alt proces? schimbă aiBridge.cdpPort).'
+      'Chrome did not respond on port ' + opts.port + ' within 20 seconds ' +
+        '(the port may be occupied by another process — change aiBridge.cdpPort).'
     );
   }
 
@@ -244,11 +251,13 @@ export class BrowserManager {
       return this.page;
     }
 
+    let launched = false;
     if (!(await this.isRunning())) {
       vscode.window.showInformationMessage(
-        'Pornesc Chrome cu profilul AI Bridge (rulează ascuns)...'
+        'Starting Chrome with the AI Bridge profile (running in the background)...'
       );
       await this.launchChrome();
+      launched = true;
     }
 
     try {
@@ -272,9 +281,16 @@ export class BrowserManager {
       }
       this.page =
         existing ?? pages[pages.length - 1] ?? (await this.context.newPage());
+      if (launched) {
+        // v1.8.0: aplică starea „în fundal” abia acum — fereastra există, deci
+        // poate fi minimizată (CDP) și scoasă din taskbar (Windows).
+        await this.applyHiddenState(this.page).catch((e) =>
+          log('applyHiddenState a eșuat: ' + (e?.message ?? String(e)))
+        );
+      }
       return this.page;
     } catch (e: any) {
-      const msg = 'Eroare conectare Chrome: ' + (e?.message ?? String(e));
+      const msg = 'Chrome connection error: ' + (e?.message ?? String(e));
       vscode.window.showErrorMessage(msg);
       throw new Error(msg);
     }
@@ -340,8 +356,9 @@ export class BrowserManager {
   }
 
   /* ========================================================================
-   * v0.4.0 — Show Chrome: aduce fereastra offscreen (-32000,-32000) înapoi
-   * în ecran și o activează. Pornește Chrome dacă nu rulează (apoi o mută).
+   * v0.4.0 — Show Chrome: aduce fereastra din fundal (minimizată / la
+   * -32000,-32000) înapoi în ecran și o activează. Pornește Chrome dacă nu
+   * rulează (apoi o mută).
    * ======================================================================== */
 
   /** Aduce fereastra Chrome în față. Nu aruncă — întoarce { ok, message }. */
@@ -374,8 +391,8 @@ export class BrowserManager {
       return {
         ok: true,
         message: wasRunning
-          ? 'Fereastra Chrome a fost adusă în față.'
-          : 'Chrome a fost pornit și fereastra e acum vizibilă.'
+          ? 'The Chrome window was brought to the front.'
+          : 'Chrome was started and the window is now visible.'
       };
     } catch (e: any) {
       const msg = 'Nu am putut afișa Chrome: ' + (e?.message ?? String(e));
@@ -385,12 +402,13 @@ export class BrowserManager {
   }
 
   /* ========================================================================
-   * v0.9.1 — showTemporarily / hideOffscreen: asistentul de LOGIN.
-   * Când un provider cere autentificare, fereastra offscreen e adusă în față
-   * pentru ca utilizatorul să se logheze, iar la final e ascunsă la loc.
+   * v0.9.1 — showTemporarily / hideOffscreen: asistentul de LOGIN/CAPTCHA.
+   * Când un provider cere autentificare (sau rezolvarea unui CAPTCHA),
+   * fereastra din fundal e adusă în față pentru utilizator, iar la final e
+   * trimisă înapoi în fundal (minimizată + fără buton în taskbar, v1.8.0).
    * ======================================================================== */
 
-  /** Aduce fereastra în față și o ascunde automat (offscreen) după `ms`. */
+  /** Aduce fereastra în față și o ascunde automat (fundal) după `ms`. */
   async showTemporarily(ms = 30000): Promise<{ ok: boolean; message: string }> {
     const res = await this.show();
     if (res.ok) {
@@ -400,17 +418,17 @@ export class BrowserManager {
     return res;
   }
 
-  /** Ascunde imediat fereastra în offscreen (anulează ascunderea programată). */
+  /** Ascunde imediat fereastra în fundal (minimizată) — anulează ascunderea programată. */
   async hideOffscreen(): Promise<{ ok: boolean; message: string }> {
     this.cancelScheduledHide();
-    return this.moveOffscreen();
+    return this.hideToBackground();
   }
 
   private scheduleHide(ms: number): void {
     this.cancelScheduledHide();
     this.hideTimer = setTimeout(() => {
       this.hideTimer = undefined;
-      void this.moveOffscreen();
+      void this.hideToBackground();
     }, Math.max(1000, ms));
     // nu ține procesul Node în viață doar pentru acest timer
     this.hideTimer.unref?.();
@@ -423,11 +441,15 @@ export class BrowserManager {
     }
   }
 
-  /** Mută fereastra înapoi la -32000,-32000 (fără bringToFront). */
-  private async moveOffscreen(): Promise<{ ok: boolean; message: string }> {
+  /**
+   * v1.8.0: fereastra trece în fundal — minimizată via CDP, iar pe Windows
+   * butonul dispare complet din taskbar (WS_EX_TOOLWINDOW). Înlocuiește vechea
+   * mutare la -32000,-32000, care lăsa un buton vizibil în taskbar.
+   */
+  private async hideToBackground(): Promise<{ ok: boolean; message: string }> {
     try {
       if (!(await this.isRunning())) {
-        return { ok: true, message: 'Chrome nu rulează.' };
+        return { ok: true, message: 'Chrome is not running.' };
       }
       const browser = await chromium.connectOverCDP(this.cdpUrl());
       const ctx = browser.contexts()[0];
@@ -439,12 +461,9 @@ export class BrowserManager {
       }
       const pages = ctx.pages().filter((p) => !p.isClosed());
       const pg = pages[0] ?? (await ctx.newPage());
-      const moved = await this.setWindowBounds(pg, OFFSCREEN_BOUNDS, false);
-      if (!moved) {
-        return { ok: false, message: 'CDP nu a putut muta fereastra în offscreen.' };
-      }
-      log('hideOffscreen: fereastra mutată la -32000,-32000');
-      return { ok: true, message: 'Fereastra Chrome a fost ascunsă (offscreen).' };
+      await this.applyHiddenState(pg);
+      log('hideToBackground: fereastra minimizată (fundal)');
+      return { ok: true, message: 'The Chrome window has returned to the background (minimized).' };
     } catch (e: any) {
       const msg = 'Nu am putut ascunde Chrome: ' + (e?.message ?? String(e));
       log(msg);
@@ -453,10 +472,60 @@ export class BrowserManager {
   }
 
   /**
+   * v1.8.0: starea „în fundal” = minimizat (CDP) + fără buton în taskbar
+   * (Windows, best-effort). Fereastra continuă să randeze pagina normal —
+   * verificat: JS-ul rulează, visibilityState rămâne 'visible'.
+   */
+  private async applyHiddenState(pg: Page): Promise<void> {
+    const minimized = await this.setWindowBounds(pg, MINIMIZED_BOUNDS, false);
+    if (!minimized) log('applyHiddenState: CDP nu a putut minimiza fereastra');
+    if (winWindowSupported()) {
+      const pid = await this.listenerPid();
+      if (pid) {
+        const hidden = await setChromeTaskbarHidden(pid, true);
+        if (!hidden) {
+          log('applyHiddenState: scoaterea din taskbar a eșuat (fereastra rămâne minimizată)');
+        }
+      }
+    }
+  }
+
+  /** v1.8.0: PID-ul procesului care ascultă pe portul CDP (Windows; pentru taskbar). */
+  private async listenerPid(): Promise<number | null> {
+    if (process.platform !== 'win32') return null;
+    try {
+      const { stdout } = await execFileAsync('netstat', ['-ano', '-p', 'tcp']);
+      for (const line of stdout.split(/\r?\n/)) {
+        const parts = line.trim().split(/\s+/);
+        if (
+          parts.length >= 5 &&
+          parts[0].toUpperCase().startsWith('TCP') &&
+          parts[1].endsWith(':' + this.options().port) &&
+          parts[3].toUpperCase() === 'LISTENING'
+        ) {
+          const pid = Number(parts[4]);
+          if (Number.isFinite(pid) && pid > 0) return pid;
+        }
+      }
+    } catch (e: any) {
+      log('listenerPid a eșuat: ' + (e?.message ?? String(e)));
+    }
+    return null;
+  }
+
+  /**
    * Mută fereastra în ecran (CDP Browser.getWindowForTarget +
-   * Browser.setWindowBounds) și activează tab-ul.
+   * Browser.setWindowBounds) și activează tab-ul. v1.8.0: readuce întâi
+   * butonul în taskbar (Windows) și „de-minimizează” fereastra.
    */
   private async bringWindowOnScreen(pg: Page): Promise<boolean> {
+    if (winWindowSupported()) {
+      const pid = await this.listenerPid();
+      if (pid) {
+        // best-effort: dacă eșuează, fereastra apare oricum (doar fără buton)
+        await setChromeTaskbarHidden(pid, false);
+      }
+    }
     return this.setWindowBounds(pg, ONSCREEN_BOUNDS, true);
   }
 
@@ -476,7 +545,11 @@ export class BrowserManager {
         const { windowId } = (await cdp.send('Browser.getWindowForTarget', {})) as {
           windowId: number;
         };
-        await cdp.send('Browser.setWindowBounds', { windowId, bounds });
+        // adapter: metoda e dinamică („Browser.setWindowBounds” în ambii pași),
+        // dar Playwright tipizează send() pe chei concrete
+        const sendAny = (m: string, p?: object): Promise<unknown> =>
+          (cdp.send as unknown as (m: string, p?: object) => Promise<unknown>)(m, p);
+        await this.applyBoundsVia(sendAny, windowId, bounds);
         if (bringToFront) {
           try {
             await cdp.send('Page.bringToFront');
@@ -505,7 +578,9 @@ export class BrowserManager {
         const { windowId } = (await bcdp.send('Browser.getWindowForTarget', {
           targetId: target.targetId
         })) as { windowId: number };
-        await bcdp.send('Browser.setWindowBounds', { windowId, bounds });
+        const sendAny = (m: string, p?: object): Promise<unknown> =>
+          (bcdp.send as unknown as (m: string, p?: object) => Promise<unknown>)(m, p);
+        await this.applyBoundsVia(sendAny, windowId, bounds);
         return true;
       } finally {
         await bcdp.detach().catch(() => undefined);
@@ -513,6 +588,38 @@ export class BrowserManager {
     } catch (e: any) {
       log('setWindowBounds (sesiune browser) a eșuat: ' + (e?.message ?? String(e)));
       return false;
+    }
+  }
+
+  /**
+   * v1.8.0: aplică bounds-ul în doi pași — CDP interzice combinarea lui
+   * `windowState` cu geometria ({left, top, width, height}). Întâi starea
+   * (normal / minimized), apoi poziția + dimensiunea (restaurarea din
+   * minimized funcționează doar așa; verificat E2E).
+   */
+  private async applyBoundsVia(
+    send: (method: string, params?: object) => Promise<unknown>,
+    windowId: number,
+    bounds: WindowBounds
+  ): Promise<void> {
+    if (bounds.windowState === 'minimized') {
+      await send('Browser.setWindowBounds', {
+        windowId,
+        bounds: { windowState: 'minimized' }
+      });
+      return;
+    }
+    await send('Browser.setWindowBounds', {
+      windowId,
+      bounds: { windowState: 'normal' }
+    });
+    const geometry: Record<string, number> = {};
+    if (bounds.left !== undefined) geometry.left = bounds.left;
+    if (bounds.top !== undefined) geometry.top = bounds.top;
+    if (bounds.width !== undefined) geometry.width = bounds.width;
+    if (bounds.height !== undefined) geometry.height = bounds.height;
+    if (Object.keys(geometry).length) {
+      await send('Browser.setWindowBounds', { windowId, bounds: geometry });
     }
   }
 

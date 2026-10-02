@@ -16,6 +16,10 @@ const attachFolderBtn = document.getElementById('attach-folder');
 const micBtn = document.getElementById('mic-btn');
 // v1.7.1: butonul 🔍 Verbose mode
 const verboseBtn = document.getElementById('verbose-toggle');
+// v1.9.0: bara conversațiilor (dropdown + conversație nouă + șterge)
+const convSel = document.getElementById('conversation');
+const convNewBtn = document.getElementById('conv-new');
+const convDelBtn = document.getElementById('conv-delete');
 const attsEl = document.getElementById('attachments');
 const inputArea = document.getElementById('input-area');
 
@@ -57,13 +61,74 @@ function setVerboseUi(enabled) {
   if (!verboseBtn) return;
   verboseBtn.classList.toggle('active', verboseOn);
   verboseBtn.title = verboseOn
-    ? 'Verbose mode ACTIV — arată fiecare pas al AI-ului. Click pentru a opri.'
-    : 'Verbose mode: arată în chat fiecare pas al AI-ului (Thinking / Executing / Result / Decision)';
+    ? 'Verbose mode ON — shows every AI step. Click to turn off.'
+    : 'Verbose mode: shows every AI step in the chat (Thinking / Executing / Result / Decision)';
 }
 
 let pendingEl = null;
 let busy = false;
 let stick = true; // true = suntem lipiți de capătul listei
+
+// ===== v1.9.0: conversații multiple (dropdown-ul din bara de conversații) =====
+function convLabel(c) {
+  const d = new Date(c.updatedAt || c.createdAt || Date.now());
+  const now = new Date();
+  const hm =
+    String(d.getHours()).padStart(2, '0') +
+    ':' +
+    String(d.getMinutes()).padStart(2, '0');
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  const stamp = sameDay
+    ? hm
+    : String(d.getDate()).padStart(2, '0') +
+      '.' +
+      String(d.getMonth() + 1).padStart(2, '0') +
+      ' ' +
+      hm;
+  return (c.title || 'Conversation') + ' · ' + stamp;
+}
+
+function setConversations(items, activeId) {
+  if (!convSel) return;
+  convSel.innerHTML = '';
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '— no conversations —';
+    convSel.appendChild(opt);
+    convSel.disabled = true;
+    return;
+  }
+  convSel.disabled = false;
+  for (const c of list) {
+    const opt = document.createElement('option');
+    opt.value = c.id;
+    opt.textContent = convLabel(c);
+    opt.title =
+      (c.title || 'Conversation') +
+      (typeof c.count === 'number' ? ' (' + c.count + ' messages)' : '');
+    if (c.id === activeId) opt.selected = true;
+    convSel.appendChild(opt);
+  }
+}
+
+convSel?.addEventListener('change', () => {
+  if (convSel.value) {
+    vscode.postMessage({ type: 'switch_conversation', id: convSel.value });
+  }
+});
+
+convNewBtn?.addEventListener('click', () => {
+  vscode.postMessage({ type: 'new_conversation' });
+});
+
+convDelBtn?.addEventListener('click', () => {
+  vscode.postMessage({ type: 'delete_conversation' });
+});
 
 // ===== Iconițe + timp (FAZA F) =====
 const ICON_USER =
@@ -117,7 +182,7 @@ function renderAttachments() {
     const x = document.createElement('button');
     x.className = 'chip-x';
     x.textContent = '×';
-    x.title = 'Scoate atașamentul';
+    x.title = 'Remove attachment';
     x.onclick = () => vscode.postMessage({ type: 'detach', id: a.id });
     chip.appendChild(x);
 
@@ -160,7 +225,7 @@ function makeHead(role, ts) {
 
   const name = document.createElement('span');
   name.className = 'msg-name';
-  name.textContent = role === 'user' ? 'Tu' : 'AI';
+  name.textContent = role === 'user' ? 'You' : 'AI';
   head.appendChild(name);
 
   const time = document.createElement('span');
@@ -178,7 +243,7 @@ function msgBody(el) {
 function add(role, text, ts, atts, msgId) {
   const wrap = document.createElement('div');
   wrap.className = 'msg ' + role;
-  // v1.5.0: id-ul mesajului se leagă din prima clipă (checkpoint → buton 🔄)
+  // v1.5.0: id-ul mesajului se leagă din prima clipă (checkpoint → buton ⟲)
   if (msgId) wrap.dataset.msgId = msgId;
   wrap.appendChild(makeHead(role, ts));
 
@@ -254,7 +319,7 @@ function ensureVerboseStepEl(step) {
 
   const head = document.createElement('div');
   head.className = 'vstep-head';
-  head.title = 'Click: pliază / extinde detaliile';
+  head.title = 'Click: collapse / expand details';
 
   const icon = document.createElement('span');
   icon.className = 'vstep-icon';
@@ -325,7 +390,7 @@ function addVerboseStep(step) {
 function showTyping(el) {
   const body = msgBody(el);
   body.innerHTML =
-    '<span class="typing" aria-label="AI scrie..."><i></i><i></i><i></i></span>';
+    '<span class="typing" aria-label="AI is typing..."><i></i><i></i><i></i></span>';
 }
 
 // Markdown -> HTML sanitizat (marked + DOMPurify, ambele vendorizate local)
@@ -360,7 +425,7 @@ function addCopyButton(el, rawText) {
 
   const btn = document.createElement('button');
   btn.className = 'copy-btn';
-  btn.title = 'Copiază răspunsul';
+  btn.title = 'Copy response';
   btn.innerHTML = ICON_COPY;
   btn.onclick = () => {
     vscode.postMessage({ type: 'copy', text: rawText });
@@ -383,8 +448,8 @@ const rawTexts = new WeakMap(); // mesaj -> textul brut (pentru citire)
 // scoate markdown-ul care sună rău citit cu voce tare (cod, linkuri, emfază)
 function plainTextForSpeech(text) {
   return String(text || '')
-    .replace(/```[\s\S]*?```/g, ' Cod omis. ')
-    .replace(/~~~[\s\S]*?~~~/g, ' Cod omis. ')
+    .replace(/```[\s\S]*?```/g, ' Code omitted. ')
+    .replace(/~~~[\s\S]*?~~~/g, ' Code omitted. ')
     .replace(/`([^`]*)`/g, '$1')
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
@@ -437,7 +502,7 @@ function resetSpeakBtn(btn) {
   if (!btn) return;
   btn.classList.remove('speaking');
   btn.textContent = '🔊';
-  btn.title = 'Citește răspunsul cu voce tare';
+  btn.title = 'Read the response aloud';
 }
 
 function stopSpeaking() {
@@ -468,7 +533,7 @@ function speakEl(el, btn) {
   speaking = { el, btn, token };
   btn.classList.add('speaking');
   btn.textContent = '⏹';
-  btn.title = 'Oprește lectura';
+  btn.title = 'Stop reading';
 
   const voice = pickSpeechVoice();
   let i = 0;
@@ -503,7 +568,7 @@ function addSpeakButton(el, rawText) {
   const btn = document.createElement('button');
   btn.className = 'speak-btn';
   btn.textContent = '🔊';
-  btn.title = 'Citește răspunsul cu voce tare';
+  btn.title = 'Read the response aloud';
   btn.onclick = () => speakEl(el, btn);
   // înaintea butonului Copy (care are margin-left:auto) — rămân lipite la dreapta
   const copyBtn = head.querySelector('.copy-btn');
@@ -528,16 +593,16 @@ function fmtRecTime(sec) {
 }
 
 function sttPlaceholder() {
-  if (sttState === 'starting') return '🎤 Pornesc microfonul…';
+  if (sttState === 'starting') return '🎤 Starting the microphone…';
   if (sttState === 'recording') {
     return (
-      '🎙 Se înregistrează… (' +
+      '🎙 Recording… (' +
       fmtRecTime(Math.floor((Date.now() - recStartedAt) / 1000)) +
-      ') — click pe 🎤 pentru a opri'
+      ') — click 🎤 to stop'
     );
   }
-  if (sttState === 'transcribing') return '⏳ Transcriu audio (Whisper local)…';
-  return 'Scrie un mesaj...';
+  if (sttState === 'transcribing') return '⏳ Transcribing audio (local Whisper)…';
+  return 'Type a message...';
 }
 
 function applySttState(state, startedAt) {
@@ -589,40 +654,84 @@ function updateMicButton() {
     sttState === 'recording' ? '⏹' : sttState === 'idle' ? '🎤' : '⏳';
   micBtn.title =
     sttState === 'recording'
-      ? 'Oprește înregistrarea'
+      ? 'Stop recording'
       : sttState === 'starting'
-        ? 'Pornesc microfonul…'
+        ? 'Starting the microphone…'
         : sttState === 'transcribing'
-          ? 'Transcriu audio cu Whisper local…'
-          : 'Vorbește (captare în extensie + Whisper local, offline)';
+          ? 'Transcribing audio with local Whisper…'
+          : 'Speak (capture runs in the extension + local, offline Whisper)';
 }
 
 micBtn?.addEventListener('click', toggleRecording);
 
-// ===== v1.4.0: checkpoint-uri git — butonul 🔄 de restore pe mesajele user =====
+// ===== v1.4.0: checkpoint-uri git — butonul ⟲ de restore pe mesajele user =====
+// ===== v1.9.0: + butoanele ✐ (edit prompt) și ᛉ (fork) pe fiecare mesaj user =====
 const restoreCheckpoints = new Map(); // messageId -> checkpoint
+
+function userActionsBox(wrap) {
+  const head = wrap.querySelector('.msg-head');
+  if (!head) return null;
+  let box = head.querySelector('.msg-actions');
+  if (!box) {
+    box = document.createElement('span');
+    box.className = 'msg-actions';
+    head.appendChild(box);
+  }
+  return box;
+}
 
 function attachRestoreButtons() {
   const wraps = messages.querySelectorAll('.msg.user[data-msg-id]');
   for (const wrap of wraps) {
     const id = wrap.dataset.msgId;
-    if (!id || !restoreCheckpoints.has(id)) continue;
-    if (wrap.querySelector('.restore-btn')) continue;
-    const head = wrap.querySelector('.msg-head');
-    if (!head) continue;
-    const cp = restoreCheckpoints.get(id);
-    const btn = document.createElement('button');
-    btn.className = 'restore-btn';
-    btn.textContent = '🔄';
-    btn.title =
-      'Restore: revino la starea de dinainte de „' +
-      String(cp.text || '').slice(0, 60) +
-      '…” (checkpoint git ' +
-      String(cp.id || '').slice(0, 7) +
-      ')';
-    btn.onclick = () =>
-      vscode.postMessage({ type: 'restore_checkpoint', messageId: id });
-    head.appendChild(btn);
+    if (!id) continue;
+    const box = userActionsBox(wrap);
+    if (!box) continue;
+
+    // v1.9.0: ✐ edit prompt — pe ORICE mesaj user (checkpoint-ul e opțional)
+    if (!box.querySelector('.edit-btn')) {
+      const edit = document.createElement('button');
+      edit.className = 'edit-btn';
+      edit.textContent = '✐';
+      edit.title =
+        'Edit prompt: ‹⟲› restore the state before it, delete what followed and resend the edited text';
+      edit.onclick = () => startEditPrompt(wrap);
+      box.appendChild(edit);
+    }
+
+    // v1.9.0: ᛉ fork — conversație nouă pornind din acest prompt
+    if (!box.querySelector('.fork-btn')) {
+      const fork = document.createElement('button');
+      fork.className = 'fork-btn';
+      fork.textContent = 'ᛉ';
+      fork.title =
+        'Fork: start a new conversation from this prompt (the current conversation stays in the list)';
+      fork.onclick = () => {
+        if (busy) {
+          addNotice('⏳ Wait for the current response to finish before creating a fork.');
+          return;
+        }
+        vscode.postMessage({ type: 'fork_conversation', messageId: id });
+      };
+      box.appendChild(fork);
+    }
+
+    // v1.4.0: ⟲ restore — doar dacă mesajul are checkpoint
+    if (restoreCheckpoints.has(id) && !box.querySelector('.restore-btn')) {
+      const cp = restoreCheckpoints.get(id);
+      const btn = document.createElement('button');
+      btn.className = 'restore-btn';
+      btn.textContent = '⟲';
+      btn.title =
+        'Restore: go back to the state before "' +
+        String(cp.text || '').slice(0, 60) +
+        '…" (git checkpoint ' +
+        String(cp.id || '').slice(0, 7) +
+        ')';
+      btn.onclick = () =>
+        vscode.postMessage({ type: 'restore_checkpoint', messageId: id });
+      box.appendChild(btn);
+    }
   }
 }
 
@@ -634,8 +743,98 @@ function markRestored(messageId) {
   if (btn) {
     btn.classList.add('restored');
     btn.textContent = '✅';
-    btn.title = 'Checkpoint restaurat';
+    btn.title = 'Checkpoint restored';
   }
+}
+
+// ===== v1.9.0: edit prompt inline (✐) =====
+function closeEditPrompt(messageId) {
+  const wrap = messages.querySelector(
+    '.msg.user[data-msg-id="' + messageId + '"]'
+  );
+  if (!wrap) return;
+  const area = wrap.querySelector('.edit-area');
+  if (area) area.remove();
+  const body = wrap.querySelector('.msg-body');
+  if (body) body.hidden = false;
+}
+
+function startEditPrompt(wrap) {
+  if (busy) {
+    addNotice('⏳ Wait for the current response to finish before editing a prompt.');
+    return;
+  }
+  if (wrap.querySelector('.edit-area')) return; // deja în editare
+  const id = wrap.dataset.msgId;
+  if (!id) return;
+  const body = msgBody(wrap);
+  if (!body) return;
+
+  const area = document.createElement('div');
+  area.className = 'edit-area';
+
+  const ta = document.createElement('textarea');
+  ta.className = 'edit-textarea';
+  ta.value = body.textContent || '';
+  ta.rows = Math.min(10, Math.max(2, Math.ceil((ta.value.length || 1) / 48)));
+  area.appendChild(ta);
+
+  const row = document.createElement('div');
+  row.className = 'edit-actions';
+
+  const save = document.createElement('button');
+  save.className = 'edit-save';
+  save.textContent = '💾 Save & resend';
+  save.title =
+    '⟲ restore the state before the prompt + delete what followed + resend (Ctrl+Enter)';
+
+  const cancel = document.createElement('button');
+  cancel.className = 'edit-cancel';
+  cancel.textContent = '✕ Cancel';
+  cancel.title = 'Close without changes (Esc)';
+
+  const finish = () => {
+    save.disabled = true;
+    cancel.disabled = true;
+    vscode.postMessage({ type: 'edit_prompt', messageId: id, text: ta.value });
+  };
+  save.onclick = finish;
+  cancel.onclick = () => closeEditPrompt(id);
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      finish();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeEditPrompt(id);
+    }
+  });
+
+  row.appendChild(save);
+  row.appendChild(cancel);
+  area.appendChild(row);
+  wrap.appendChild(area);
+  body.hidden = true;
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+  keepBottom();
+}
+
+// retrimiterea după edit (host-ul a trunchiat deja conversația și a re-randat-o)
+function sendEdited(text) {
+  if (busy) return;
+  const t = String(text || '').trim();
+  if (!t) return;
+  stopSpeaking();
+  if (sttState === 'recording' || sttState === 'starting') stopDictation();
+  stick = true;
+  const msgId =
+    'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  add('user', t, undefined, undefined, msgId);
+  setBusy(true);
+  pendingEl = add('assistant', '', Date.now());
+  showTyping(pendingEl);
+  vscode.postMessage({ type: 'send', text: t, msgId });
 }
 
 // ===== Scroll inteligent (FAZA F) =====
@@ -703,7 +902,7 @@ function addApprovalCard(toolName, path, diff, onApprove, onReject) {
   btnRow.className = 'approval-buttons';
 
   const approve = document.createElement('button');
-  approve.textContent = '✓ Aprob';
+  approve.textContent = '✓ Approve';
   approve.className = 'approve-btn';
   approve.onclick = () => {
     card.classList.add('resolved');
@@ -712,7 +911,7 @@ function addApprovalCard(toolName, path, diff, onApprove, onReject) {
   };
 
   const reject = document.createElement('button');
-  reject.textContent = '✗ Respinge';
+  reject.textContent = '✗ Reject';
   reject.className = 'reject-btn';
   reject.onclick = () => {
     card.classList.add('resolved');
@@ -767,7 +966,7 @@ function addDiffReviewCard(payload) {
 
   const pre = document.createElement('pre');
   pre.className = 'approval-diff';
-  pre.textContent = payload.preview || '(fără modificări)';
+  pre.textContent = payload.preview || '(no changes)';
   card.appendChild(pre);
 
   const btnRow = document.createElement('div');
@@ -800,7 +999,7 @@ function addDiffReviewCard(payload) {
 
   const hint = document.createElement('div');
   hint.className = 'approval-hint';
-  hint.textContent = 'Poți alege și din notificarea VS Code — decizia e aceeași.';
+  hint.textContent = 'You can also decide from the VS Code notification — the decision is the same.';
   card.appendChild(hint);
 
   messages.appendChild(card);
@@ -812,7 +1011,7 @@ function send() {
   const text = input.value.trim();
   if (!text && !attachments.length) return;
 
-  const shown = text || 'Vezi fișierele atașate.';
+  const shown = text || 'See the attached files.';
   const attsSnapshot = attachments.slice();
 
   // v1.4.0: id stabil al mesajului (leagă mesajul de checkpoint-ul git);
@@ -850,7 +1049,7 @@ input.addEventListener('input', autoResize);
 // ===== Stop =====
 stopBtn.addEventListener('click', () => {
   vscode.postMessage({ type: 'stop' });
-  if (pendingEl) pendingEl.textContent = '⏹ Se oprește...';
+  if (pendingEl) pendingEl.textContent = '⏹ Stopping...';
 });
 
 // ===== Clear =====
@@ -1002,14 +1201,14 @@ document.addEventListener('drop', (e) => {
   dragDepth = 0;
   inputArea.classList.remove('drag-over');
   if (busy) {
-    addNotice('Așteaptă să se termine răspunsul curent înainte de a atașa fișiere.');
+    addNotice('Wait for the current response to finish before attaching files.');
     return;
   }
   const paths = collectDropPaths(e);
   if (paths.length) {
     vscode.postMessage({ type: 'attach_paths', paths });
   } else {
-    addNotice('Nu am putut determina path-ul fișierelor trase — folosește butonul 📎.');
+    addNotice('Could not determine the path of the dropped files — use the 📎 button.');
   }
 });
 
@@ -1053,7 +1252,7 @@ window.addEventListener('message', (event) => {
     setBusy(false);
     if (!stick) jumpBtn.hidden = false;
   } else if (msg.type === 'stopped') {
-    if (pendingEl) setPendingText(msg.text || '(oprit)');
+    if (pendingEl) setPendingText(msg.text || '(stopped)');
     pendingEl = null;
     setBusy(false);
     if (!stick) jumpBtn.hidden = false;
@@ -1097,11 +1296,11 @@ window.addEventListener('message', (event) => {
         input.scrollTop = input.scrollHeight;
         input.focus();
       } else {
-        addNotice('🎤 Nu am detectat vorbire în înregistrare.');
+        addNotice('🎤 No speech detected in the recording.');
       }
     } else {
-      const prefix = msg.stage === 'transcribe' ? '🎤 Transcrierea a eșuat: ' : '🎤 ';
-      addNotice(prefix + (msg.error || 'eroare necunoscută'));
+      const prefix = msg.stage === 'transcribe' ? '🎤 Transcription failed: ' : '🎤 ';
+      addNotice(prefix + (msg.error || 'unknown error'));
     }
   } else if (msg.type === 'attachments') {
     attachments = Array.isArray(msg.items) ? msg.items : [];
@@ -1151,14 +1350,14 @@ window.addEventListener('message', (event) => {
     if (card) {
       const labels = {
         accept:
-          msg.via === 'auto' ? '✅ Acceptat (auto-approve)' : '✅ Acceptat',
-        accept_no_ask: '✅ Acceptat (nu mai întreba)',
-        reject: msg.via === 'stop' ? '⏹ Anulat (Stop)' : '❌ Respins'
+          msg.via === 'auto' ? '✅ Accepted (auto-approve)' : '✅ Accepted',
+        accept_no_ask: '✅ Accepted (don\'t ask again)',
+        reject: msg.via === 'stop' ? '⏹ Cancelled (Stop)' : '❌ Rejected'
       };
-      setDiffReviewStatus(card, labels[msg.decision] || '⏹ Închis');
+      setDiffReviewStatus(card, labels[msg.decision] || '⏹ Closed');
     }
   } else if (msg.type === 'checkpoint') {
-    // v1.4.0: checkpoint creat pentru un mesaj → afișează butonul 🔄
+    // v1.4.0: checkpoint creat pentru un mesaj → afișează butonul ⟲
     if (msg.messageId) {
       restoreCheckpoints.set(msg.messageId, msg);
       attachRestoreButtons();
@@ -1172,6 +1371,15 @@ window.addEventListener('message', (event) => {
     attachRestoreButtons();
   } else if (msg.type === 'checkpoint_restored') {
     if (msg.messageId) markRestored(msg.messageId);
+  } else if (msg.type === 'conversations') {
+    // v1.9.0: lista de conversații (dropdown-ul de comutare)
+    setConversations(msg.items, msg.activeId);
+  } else if (msg.type === 'edit_resend') {
+    // v1.9.0: după edit — host-ul a trunchiat + re-randat; retrimit promptul editat
+    sendEdited(msg.text);
+  } else if (msg.type === 'edit_cancel') {
+    // v1.9.0: edit respins de host (ocupat / mesaj inexistent) — închide editorul
+    closeEditPrompt(String(msg.messageId || ''));
   }
 
   keepBottom();

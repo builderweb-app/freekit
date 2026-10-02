@@ -1,0 +1,54 @@
+FILE media\chat.js :: 1 strings
+  ? 
+FILE media\marked.min.js :: 22 strings
+  ^ {0,3}(?:<(script|pre|style|textarea)[\s>][\s\S]*?(?:</\1>[^\n]*\n+|$)|comment[^\n]*(\n+|$)|<\?[\s\S]*?(?:\?>\n*|$)|<![A-Z][\s\S]*?(?:>\n*|$)|<!\[CDATA\[[\s\S]*?(?:\]\]>\n*|$)|</?(tag)(?: +|\n|/?>)[\s\S]*?(?:(?:\n[ 	]*)
+   {0,3}#{1,6}(?:\s|$)
+   {0,3}(?:`{3,}(?=[^`\n]*\n)|~{3,})[^\n]*\n
+   {0,3}(?:[*+-]|1[.)]) 
+  </?(?:tag)(?: +|\n|/?>)|<(?:script|pre|style|textarea|!--)
+  ^ *([^\n ].*)\n {0,3}((?:\| *)?:?-+:? *(?:\| *:?-+:? *)*(?:\| *)?)(?:\n((?:(?! *\n|hr|heading|blockquote|code|fences|list|html).*(?:\n|$))*)\n*|$)
+   {0,3}#{1,6}(?:\s|$)
+  (?: {4}| {0,3}	)[^\n]
+   {0,3}(?:`{3,}(?=[^`\n]*\n)|~{3,})[^\n]*\n
+   {0,3}(?:[*+-]|1[.)]) 
+  </?(?:tag)(?: +|\n|/?>)|<(?:script|pre|style|textarea|!--)
+   {0,3}#{1,6}(?:\s|$)
+   {0,3}(?:`{3,}(?=[^`\n]*\n)|~{3,})[^\n]*\n
+   {0,3}(?:[*+-]|1[.)]) 
+  </?(?:tag)(?: +|\n|/?>)|<(?:script|pre|style|textarea|!--)
+  ^ *(?:comment *(?:\n|\s*$)|<(tag)[\s\S]+?</\1> *(?:\n{2,}|\s*$)|<tag(?:"[^"]*"|'[^']*'|\s[^'"/>\s]*)*?/?> *(?:\n{2,}|\s*$))
+  (?!(?:a|em|strong|small|s|cite|q|dfn|abbr|data|time|code|var|samp|kbd|sub|sup|i|b|u|mark|ruby|rt|rp|bdi|bdo|span|br|wbr|ins|del|img)\b)\w+(?!:|[^\w\s@]*@)\b
+  ^[^_*]*?__[^_*]*?\*[^_*]*?(?=__)|[^*]+(?=[^*])|(?!\*)punct(\*+)(?=[\s]|$)|notPunctSpace(\*+)(?!\*)(?=punctSpace|$)|(?!\*)punctSpace(\*+)(?=notPunctSpace)|[\s](\*+)(?!\*)(?=punct)|(?!\*)punct(\*+)(?!\*)(?=punct)|notPunctS
+  ^[^_*]*?\*\*[^_*]*?_[^_*]*?(?=\*\*)|[^_]+(?=[^_])|(?!_)punct(_+)(?=[\s]|$)|notPunctSpace(_+)(?!_)(?=punctSpace|$)|(?!_)punctSpace(_+)(?=notPunctSpace)|[\s](_+)(?!_)(?=punct)|(?!_)punct(_+)(?!_)(?=punct)
+  (?:-->|$)
+  ^comment|^</[a-zA-Z][\w:-]*\s*>|^<[a-zA-Z][\w-]*(?:attribute)*?\s*/?>|^<\?[\s\S]*?\?>|^<![a-zA-Z]+\s[\s\S]*?>|^<!\[CDATA\[[\s\S]*?\]\]>
+  reflink|nolink(?!\()
+FILE media\purify.min.js :: 1 strings
+  (?=[\t\n\f\r />])
+FILE src\ai-selector-finder.ts :: 1 strings
+  ?
+FILE src\browser.ts :: 1 strings
+  (portul e ocupat de alt proces? schimbă aiBridge.cdpPort).
+FILE src\chatView.ts :: 5 strings
+  will run WITHOUT confirmation cards. Continue?
+  ⟲ Go back to the state before this prompt?\n\n"
+  ⚠️ Conversation not found (was it deleted?).
+  "? (
+  ℹ️ Edit: this message has no checkpoint (not a git repo?) — the history is truncated, but the files are not reset.
+FILE src\devServers.ts :: 1 strings
+  ?
+FILE src\extension.ts :: 1 strings
+  ?
+FILE src\popups.ts :: 1 strings
+  (?:reject|decline|refus|deny|resping|refuz|anulea|renun[tț]|necessary|essential|necesar|esential|only|customiz|manage|settings|preferin|not now|no thanks|nu, mul|mul[tț]umesc|t[âa]rziu|later|skip|close|inchide|închide)
+FILE src\providers\base.ts :: 2 strings
+  ). Ești logat în Chrome, în profilul AI Bridge?
+  : Enter retrimis (mesajul nu a plecat?)
+FILE src\tools.ts :: 4 strings
+  You are an autonomous coding agent in VS Code.\n\n## CRITICAL RULE\nWhen the user asks you to DO something (change, fix, search, create, delete,\nmodify, add, remove, rename, update, find, etc.), you MUST respond with a\
+  AI coding assistant in VS Code. You are a LOCAL model (small context): follow the rules EXACTLY and be concise.\n\nTo use a tool, respond with ONLY this JSON (single line, nothing else):\n{"tool": "NAME", "args": {...}}\
+  ?
+  ?
+FILE src\verifier.ts :: 2 strings
+  git init a eșuat (git lipsește?)
+  ?? 

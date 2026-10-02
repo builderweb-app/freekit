@@ -1,0 +1,415 @@
+src/ai-selector-finder.ts:182 [dia/str] niciun JSON găsit în răspunsul AI
+src/ai-selector-finder.ts:189 [dia/str] JSON invalid în răspunsul AI: 
+src/ai-selector-finder.ts:224 [word/str] caut selectori cu AI pentru 
+src/ai-selector-finder.ts:224 [word/str]  (lipsesc: 
+src/ai-selector-finder.ts:237 [dia/str] captura DOM a eșuat: 
+src/ai-selector-finder.ts:255 [dia/str] timeout după 
+src/ai-selector-finder.ts:259 [dia/str] răspuns AI: 
+src/ai-selector-finder.ts:262 [dia/str] analiza AI a eșuat: 
+src/ai-selector-finder.ts:364 [word/str] respins 
+src/ai-selector-finder.ts:368 [word/str] respins 
+src/ai-selector-finder.ts:372 [word/str] respins 
+src/ai-selector-finder.ts:376 [word/str] respins 
+src/ai-selector-finder.ts:380 [word/str] respins input (nu e editabil): 
+src/ai-selector-finder.ts:385 [dia/str] respins response (e căsuța de input): 
+src/ai-selector-finder.ts:389 [dia/str] respins response (bulă de user): 
+src/ai-selector-finder.ts:394 [dia/str] respins response (fără text de răspuns): 
+src/ai-selector-finder.ts:399 [word/str] respins response (text promo „
+src/ai-selector-finder.ts:403 [dia/str] respins response (conține mesajul trimis): 
+src/ai-selector-finder.ts:408 [word/str] respins 
+src/ai-selector-finder.ts:408 [dia/str]  (buton non-acțiune): 
+src/ai-selector-finder.ts:414 [word/str] respins 
+src/ai-selector-finder.ts:451 [word/str] selectors-user.json salvat (
+src/ai-selector-finder.ts:451 [word/str]  selectori AI)
+src/ai-selector-finder.ts:453 [dia/str] scrierea selectors-user.json a eșuat: 
+src/ai-selector-finder.ts:488 [dia/str] ” respins la încărcare — 
+src/ai-selector-finder.ts:492 [dia/str]  selectori încărcați
+src/ai-selector-finder.ts:515 [word/str] AI finder dezactivat (aiBridge.aiSelectorFinder=false)
+src/ai-selector-finder.ts:528 [dia/str] AI finder: încercare recentă pentru 
+src/ai-selector-finder.ts:532 [dia/str] AI finder: deja în curs pentru 
+src/ai-selector-finder.ts:556 [word/str] AI finder: respins la salvare (
+src/ai-selector-finder.ts:562 [word/str] AI finder: salvat 
+src/ai-selector-finder.ts:564 [dia/str]  (încredere 
+src/ai-selector-finder.ts:573 [dia/str] AI finder a eșuat: 
+src/ai-selector-finder.ts:586 [dia/str] AI selector finder pregătit — fișier: 
+src/ai-selector-finder.ts:587 [dia/str] (fără globalStorage)
+src/attachments.ts:83 [dia/str] describePath eșuat: 
+src/attachments.ts:122 [dia/str]  (listing folder — folosește read_file / read_files pentru conținut)
+src/attachments.ts:133 [dia/str] (fișier netextual — încărcat ca atașament în chatul web)
+src/attachments.ts:155 [dia/str] (fișier încărcat în chatul web ca atașament)
+src/attachments.ts:160 [word/str]  --- (eroare la citire: 
+src/attachments.ts:168 [dia/str]  [...bloc de atașamente trunchiat...]
+src/attachments.ts:201 [dia/str]  intrări)
+src/browser.ts:136 [dia/str] aiBridge.chromePath nu există pe disc: 
+src/browser.ts:136 [dia/str]  — trec la detectare automată
+src/browser.ts:197 [dia/str] Nu am găsit Chrome sau Edge pe acest sistem. Instalează unul dintre 
+src/browser.ts:198 [dia/str] ele sau setează calea manual în setarea aiBridge.chromePath.
+src/browser.ts:241 [dia/str] Chrome nu a răspuns pe portul 
+src/browser.ts:241 [dia/str]  în 20 secunde 
+src/browser.ts:242 [dia/str] (portul e ocupat de alt proces? schimbă aiBridge.cdpPort).
+src/browser.ts:258 [dia/str] Pornesc Chrome cu profilul AI Bridge (rulează în fundal)...
+src/browser.ts:289 [dia/str] applyHiddenState a eșuat: 
+src/browser.ts:294 [word/str] Eroare conectare Chrome: 
+src/browser.ts:329 [word/str] Browser.close trimis prin CDP
+src/browser.ts:333 [dia/str] Browser.close a eșuat: 
+src/browser.ts:336 [dia/str] Chrome închis (CDP)
+src/browser.ts:341 [dia/str] fallback: închid procesul de pe portul 
+src/browser.ts:348 [dia/str] Chrome închis (kill pe port)
+src/browser.ts:348 [dia/str] Chrome încă rulează după kill
+src/browser.ts:371 [dia/str] show: Chrome nu rula — îl pornesc pe portul 
+src/browser.ts:379 [dia/str] Chrome rulează, dar nu are nicio fereastră (context) disponibilă.
+src/browser.ts:388 [dia/str] CDP nu a putut muta fereastra Chrome în ecran.
+src/browser.ts:391 [dia/str] show: fereastra adusă în față
+src/browser.ts:395 [dia/str] Fereastra Chrome a fost adusă în față.
+src/browser.ts:396 [dia/str] Chrome a fost pornit și fereastra e acum vizibilă.
+src/browser.ts:399 [dia/str] Nu am putut afișa Chrome: 
+src/browser.ts:417 [dia/str] showTemporarily: fereastra rămâne vizibilă cel mult 
+src/browser.ts:453 [dia/str] Chrome nu rulează.
+src/browser.ts:460 [dia/str] Chrome rulează, dar nu are nicio fereastră (context).
+src/browser.ts:466 [dia/str] hideToBackground: fereastra minimizată (fundal)
+src/browser.ts:467 [dia/str] Fereastra Chrome a revenit în fundal (minimizată).
+src/browser.ts:469 [word/str] Nu am putut ascunde Chrome: 
+src/browser.ts:488 [dia/str] applyHiddenState: scoaterea din taskbar a eșuat (fereastra rămâne minimizată)
+src/browser.ts:512 [dia/str] listenerPid a eșuat: 
+src/browser.ts:566 [dia/str] setWindowBounds (sesiune pagină) a eșuat: 
+src/browser.ts:590 [dia/str] setWindowBounds (sesiune browser) a eșuat: 
+src/browser.ts:665 [dia/str] taskkill a eșuat: 
+src/browser.ts:669 [dia/str] netstat a eșuat: 
+src/browser.ts:692 [dia/str] fuser a eșuat: 
+src/chatView.ts:483 [word/str] voice: recorderul s-a oprit singur — finalizez
+src/chatView.ts:491 [dia/str] voice: înregistrez (
+src/chatView.ts:496 [dia/str] voice: pornire eșuată — 
+src/chatView.ts:547 [dia/str] voice: captare eșuată — 
+src/chatView.ts:557 [dia/str] voice: captură OK (
+src/chatView.ts:574 [dia/str] stt: transcris în 
+src/chatView.ts:584 [dia/str] stt: eșec — 
+src/chatView.ts:593 [dia/str] stt: eroare neașteptată — 
+src/chatView.ts:972 [dia/str] atașamente: 
+src/chatView.ts:972 [dia/str]  pregătite, uploads=
+src/chatView.ts:974 [dia/str] pregătirea atașamentelor a eșuat: 
+src/chatView.ts:1057 [dia/str] auto: primul răspuns via 
+src/chatView.ts:1062 [dia/str]  a eșuat — 
+src/chatView.ts:1361 [dia/str] auto-verify: rollback efectuat — închei cu raportul de rollback
+src/chatView.ts:1375 [dia/str] auto-verify: răspuns final cu verificarea pe roșu — rollback
+src/chatView.ts:1440 [dia/str] ): fără browser
+src/chatView.ts:1659 [dia/str] auto-verify: nicio verificare detectată — sar peste
+src/chatView.ts:1682 [dia/str] auto-verify: recuperat după 
+src/chatView.ts:1705 [dia/str] auto-verify EȘUAT (
+src/chatView.ts:1745 [dia/str] după 
+src/chatView.ts:1786 [dia/str]  fișiere anulate, 
+src/chatView.ts:1787 [word/str]  erori
+src/chatView.ts:1852 [dia/str] checkpoint: indisponibil (nu e proiect git / lipsește git) — sar peste
+src/chatView.ts:1866 [dia/str] checkpoint: git init automat în 
+src/chatView.ts:1880 [word/str]  pentru 
+src/chatView.ts:1930 [word/str]  (mesaj 
+src/chatView.ts:2000 [word/str]  mesaje)
+src/chatView.ts:2002 [dia/str] conversations: migrarea a eșuat — 
+src/chatView.ts:2046 [dia/str] ⏳ Oprește mai întâi răspunsul curent (Stop), apoi schimbă conversația.
+src/chatView.ts:2056 [word/str]  mesaje)
+src/chatView.ts:2179 [dia/str] edit: restore a eșuat — 
+src/chatView.ts:2368 [dia/str] limită de atașamente atinsă (
+src/chatView.ts:2382 [dia/str] atașament adăugat: 
+src/chatView.ts:2429 [dia/str]  intrări)
+src/chatView.ts:2487 [dia/str] diff review: nu am putut scrie fișierele temporare — 
+src/chatView.ts:2515 [dia/str]  fișiere)
+src/chatView.ts:2539 [dia/str] diff review: deschiderea diff-ului a eșuat — 
+src/chatView.ts:2560 [dia/str] diff review: card inline trimis în chat (id 
+src/chatView.ts:2616 [dia/str] diff review: notificare închisă fără alegere — aștept cardul inline
+src/conversations.ts:41 [dia/str] Conversație nouă
+src/conversations.ts:210 [dia/str] Conversație importată
+src/devServers.ts:537 [dia/str] (terminal închis înainte de trimiterea comenzii)
+src/devServers.ts:592 [dia/str] captură live indisponibilă (shell integration nu s-a activat în acest terminal) — output-ul complet se vede doar în terminal
+src/devServers.ts:596 [dia/str] output-ul de pornire conține linii aparent de eroare — verifică în terminal dacă serverul chiar a pornit corect
+src/devServers.ts:615 [dia/str] (terminal închis)
+src/devServers.ts:615 [dia/str] (fără output)
+src/devServers.ts:617 [dia/str] ” rămâne deschis — output-ul complet e vizibil acolo
+src/devServers.ts:620 [dia/str] captură live indisponibilă (shell integration) — vezi terminalul
+src/devServers.ts:703 [dia/str] ✅ Server pornit în TERMINALUL VS Code „
+src/devServers.ts:705 [dia/str] ” (vizibil în panoul de jos al VS Code)
+src/diagnostics.ts:52 [phrase/str] RESTRICTED (extensia nu va executa unelte)
+src/diagnostics.ts:54 [word/str] (niciunul deschis)
+src/diagnostics.ts:61 [dia/str] NEGĂSIT — instalează Chrome sau Edge, ori setează aiBridge.chromePath
+src/diagnostics.ts:70 [dia/str]  — răspunde (
+src/diagnostics.ts:70 [dia/str] versiune necunoscută
+src/diagnostics.ts:71 [dia/str]  — nu răspunde (browserul nu rulează acum)
+src/diagnostics.ts:84 [dia/str] Ollama: nu răspunde pe 
+src/diagnostics.ts:84 [dia/str]  (opțional — doar pentru modul local)
+src/diagnostics.ts:90 [word/str] Selectori activi: v
+src/diagnostics.ts:92 [dia/str]  — sursă: 
+src/diagnostics.ts:98 [dia/str] , descărcați la 
+src/diagnostics.ts:107 [dia/str] Selectori reparați automat (override-uri): 
+src/diagnostics.ts:121 [dia/str] AI Bridge: diagnostice scrise în Output → AI Bridge.
+src/extension.ts:47 [dia/str] , sursă: 
+src/extension.ts:68 [dia/str] AI Bridge: selectorii au fost actualizați automat la v
+src/extension.ts:78 [dia/str] selectors: verificare automată sărită (ultima verificare < 24h) — folosește „AI Bridge: Update Selectors” pentru una manuală
+src/extension.ts:117 [word/str] Whisper local e gata ✓ — 
+src/extension.ts:125 [dia/str] AI Bridge: setup Whisper a eșuat — 
+src/extension.ts:125 [dia/str] eroare necunoscută
+src/extension.ts:128 [dia/str] 🎤 ⚠️ Setup Whisper a eșuat: 
+src/extension.ts:128 [dia/str] eroare necunoscută
+src/extension.ts:149 [dia/str] Chrome închis.
+src/extension.ts:152 [dia/str] Nu am putut închide Chrome — închide-l manual din Task Manager.
+src/extension.ts:164 [dia/str] AI Bridge: nu există selectori reparați salvați.
+src/extension.ts:168 [dia/str] AI Bridge: am șters 
+src/extension.ts:170 [dia/str]  selectori reparați. Se folosesc din nou selectorii configurați
+src/extension.ts:171 [dia/str]  (bundled sau remote, dacă e activ).
+src/extension.ts:183 [dia/str] AI Bridge: setează mai întâi „aiBridge.selectorsUrl” (URL-ul raw al Gist-ului cu selectors.json).
+src/extension.ts:192 [dia/str] AI Bridge: selectorii au fost actualizați
+src/extension.ts:199 [word/str] AI Bridge: selectorii sunt deja la zi (v
+src/extension.ts:203 [dia/str] AI Bridge: actualizarea selectorilor a eșuat — 
+src/extension.ts:203 [dia/str] eroare necunoscută
+src/extension.ts:247 [dia/str] AI Bridge: nu rulează niciun server de dezvoltare pornit de AI Bridge.
+src/extension.ts:255 [word/str]  servere oprite, 
+src/extension.ts:257 [word/str]  nu au putut fi oprite (
+src/extension.ts:267 [word/str]  server(e) de dezvoltare oprit(e): 
+src/extension.ts:277 [word/str]  oprite
+src/extension.ts:285 [dia/str]  eșuate
+src/mcp/client.ts:169 [dia/str]  — nu poate fi afișată în chat]
+src/mcp/client.ts:204 [word/str] " (doar stdio)
+src/mcp/client.ts:209 [dia/str] : lipsește "command"
+src/mcp/client.ts:333 [word/str]  dezactivat — sar peste
+src/mcp/client.ts:345 [word/str] " nu a pornit: 
+src/mcp/client.ts:415 [dia/str]  s-a închis (code 
+src/mcp/client.ts:428 [word/str] proces terminat (code 
+src/mcp/client.ts:572 [word/str] eroare
+src/mcp/client.ts:615 [dia/str]  nu rulează
+src/mcp/client.ts:689 [word/str]  a fost oprit
+src/mcp/manager.ts:203 [word/str] Respins de utilizator
+src/mcp/manager.ts:211 [dia/str] (fără rezultat)
+src/mcp/manager.ts:216 [word/str]  a raportat o eroare: 
+src/mcp/manager.ts:224 [dia/str]  a eșuat: 
+src/mcp/manager.ts:225 [dia/str]  (Poți verifica serverele cu comanda „AI Bridge: MCP Servers”. Nu reîncerca în buclă.)
+src/mcp/manager.ts:239 [dia/str] MCP: servere configurate dar ne pornite — folosește „AI Bridge: MCP Servers”.
+src/mcp/manager.ts:252 [word/str] nu a pornit
+src/mcp/manager.ts:272 [word/str] MCP dezactivat (aiBridge.mcpEnabled = false)
+src/mcp/manager.ts:343 [word/str] 🔌 MCP dezactivat — serverele au fost oprite.
+src/mcp/manager.ts:357 [dia/str] 🔌 MCP: nicio configurație de servere — am oprit tot.
+src/mcp/manager.ts:364 [dia/str] 🔌 MCP reîncărcat: 
+src/mcp/manager.ts:375 [word/str] 🔌 MCP: repornit — 
+src/mcp/manager.ts:401 [word/str] eroare: 
+src/mcp/manager.ts:408 [word/str] $(info) Niciun server MCP pornit
+src/mcp/manager.ts:409 [dia/str] adaugă servere în .vscode/mcp.json sau în aiBridge.mcpServers
+src/mcp/manager.ts:414 [dia/str] $(refresh) Repornește toate serverele
+src/mcp/manager.ts:419 [dia/str] $(tools) Arată toate uneltele MCP (
+src/mcp/manager.ts:423 [word/str] $(json) Deschide .vscode/mcp.json
+src/mcp/manager.ts:424 [dia/str] îl creează cu un exemplu dacă nu există
+src/mcp/manager.ts:434 [dia/str] Alege un server sau o acțiune
+src/mcp/manager.ts:474 [dia/str] $(refresh) Repornește serverul
+src/mcp/manager.ts:475 [dia/str] $(stop) Oprește serverul
+src/mcp/manager.ts:476 [dia/str] $(tools) Arată uneltele serverului
+src/mcp/manager.ts:485 [word/str] ” a fost repornit.
+src/mcp/manager.ts:486 [word/str] ” repornit — 
+src/mcp/manager.ts:489 [word/str] ” nu a pornit — 
+src/mcp/manager.ts:494 [word/str] ” a fost oprit.
+src/mcp/manager.ts:500 [dia/str] (fără parametri)
+src/mcp/manager.ts:543 [dia/str] AI Bridge: am creat .vscode/mcp.json cu un server exemplu — editează-l, apoi rulează „AI Bridge: MCP Servers” → Repornește.
+src/mcp/manager.ts:547 [phrase/str] AI Bridge: nu am putut crea .vscode/mcp.json — 
+src/mutation.ts:50 [dia/str] tracker de mutații 
+src/mutation.ts:50 [word/str] instalat (reset)
+src/mutation.ts:50 [word/str] indisponibil — fallback pe timp
+src/mutation.ts:53 [dia/str] installMutationTracker a eșuat: 
+src/popups.ts:45 [dia/str] acceptă toate
+src/popups.ts:46 [word/str] accept toate
+src/popups.ts:47 [word/str] acceptati toate
+src/popups.ts:48 [dia/str] acceptați toate
+src/popups.ts:49 [dia/str] acceptă toate cookie urile
+src/popups.ts:50 [word/str] accept toate cookie urile
+src/popups.ts:55 [dia/str] acceptă
+src/popups.ts:56 [word/str] accepta
+src/popups.ts:57 [dia/str] acceptați
+src/popups.ts:68 [dia/str] accept și continuă
+src/popups.ts:69 [word/str] accept si continua
+src/popups.ts:72 [dia/str] am înțeles
+src/popups.ts:72 [dia/str] înțeleg
+src/popups.ts:80 [dia/str] (?:reject|decline|refus|deny|resping|refuz|anulea|renun[tț]|necessary|essential|necesar|esential|only|customiz|manage|settings|preferin|not now|no thanks|nu, mul|mul[tț]umesc|t[âa]rziu|later|skip|close|inchide|închide)
+src/popups.ts:240 [dia/str] popup închis: „
+src/popups.ts:244 [dia/str] autoAcceptPopups a eșuat: 
+src/providers/base.ts:99 [dia/str] Nu găsesc căsuța de input pentru 
+src/providers/base.ts:101 [dia/str]  (selectori încercați: 
+src/providers/base.ts:103 [dia/str] ). Ești logat în Chrome, în profilul AI Bridge?
+src/providers/base.ts:124 [dia/str] Ești pe o pagină de login (
+src/providers/base.ts:126 [dia/str] ). Loghează-te în fereastra Chrome — continuarea e automată după login.
+src/providers/base.ts:214 [dia/str] : input negăsit pe 
+src/providers/base.ts:256 [dia/str] : butonul de chat nou încă e în DOM — fără auto-reparare, trec la navigare
+src/providers/base.ts:295 [dia/str] stop apăsat via 
+src/providers/base.ts:444 [dia/str] 🍪 Popup închis automat: „
+src/providers/base.ts:452 [dia/str]  fișier(e) încărcate în chatul web.
+src/providers/base.ts:456 [dia/str] ⚠️ Fișierele atașate nu au putut fi încărcate în chatul web 
+src/providers/base.ts:457 [dia/str] (butonul de atașare nu a fost găsit) — AI-ul vede doar descrierea lor.
+src/providers/base.ts:485 [word/str] : mesaj de 
+src/providers/base.ts:486 [dia/str]  chars — lipire directă (peste limita de tastare)
+src/providers/base.ts:500 [dia/str] : mesaj trimis, aștept răspunsul...
+src/providers/base.ts:534 [dia/str] : selectorii de răspuns funcționează, aștept stream-ul
+src/providers/base.ts:544 [dia/str] : reparare respinsă (a prins mesajul nostru) — revin la JSON
+src/providers/base.ts:550 [dia/str] : selector de răspuns reparat -> 
+src/providers/base.ts:565 [word/str] : Enter retrimis (mesajul nu a plecat?)
+src/providers/base.ts:598 [dia/str] : răspuns stabil după 
+src/providers/base.ts:628 [dia/str] Timeout: niciun răspuns stabil de la 
+src/providers/base.ts:628 [dia/str]  după 150s.
+src/providers/base.ts:742 [dia/str] : niciun input[type=file] pentru chat găsit
+src/providers/base.ts:751 [dia/str]  fișier(e) încărcate în chat
+src/providers/base.ts:754 [dia/str] : upload eșuat — 
+src/providers/ollama.ts:38 [dia/str] Ollama nu rulează pe 
+src/providers/ollama.ts:38 [dia/str] . Pornește-l cu "ollama serve".
+src/providers/ollama.ts:63 [dia/str] ⚠️ Ollama rulează local: fișierele binare/imagini nu pot fi trimise — 
+src/providers/ollama.ts:64 [dia/str] doar conținutul text al atașamentelor ajunge la model.
+src/remoteSelectors.ts:105 [dia/str] : lipsește
+src/remoteSelectors.ts:109 [word/str] : nu este obiect
+src/remoteSelectors.ts:114 [dia/str] : „primary” lipsește sau e invalid
+src/remoteSelectors.ts:137 [dia/str] selectors remote invalide: rădăcina nu este un obiect JSON
+src/remoteSelectors.ts:140 [dia/str] lipsește câmpul „version” (string, max 
+src/remoteSelectors.ts:145 [dia/str] lipsește obiectul „providers”
+src/remoteSelectors.ts:156 [word/str] : nu este obiect
+src/remoteSelectors.ts:161 [dia/str] : câmpul „url” lipsește sau nu e http(s)
+src/remoteSelectors.ts:209 [word/str] URL invalid (trebuie http/https): 
+src/remoteSelectors.ts:221 [dia/str] răspuns prea mare (
+src/remoteSelectors.ts:270 [dia/str] persist auto-check a eșuat: 
+src/remoteSelectors.ts:273 [dia/str] persist auto-check a eșuat: 
+src/remoteSelectors.ts:289 [word/str] aiBridge.selectorsUrl nu este setat
+src/remoteSelectors.ts:318 [dia/str] timeout la descărcarea Gist-ului
+src/remoteSelectors.ts:320 [word/str] EROARE la verificarea remote: 
+src/rollback.ts:73 [word/str] snapshot: sar peste directorul 
+src/rollback.ts:82 [dia/str] snapshot eșuat pentru 
+src/rollback.ts:101 [dia/str] markGood eșuat pentru 
+src/rollback.ts:140 [dia/str]  șterse, 
+src/rollback.ts:142 [dia/str]  eșuate
+src/selectors.ts:426 [dia/str] override fragil (pozițional) ignorat: 
+src/selectors.ts:432 [dia/str] overrides încărcate: 
+src/selectors.ts:522 [word/str] ignor selectorul prea generic pentru 
+src/selectors.ts:528 [dia/str] ignor selectorul fragil (pozițional) pentru 
+src/selectors.ts:534 [word/str] ignor selectorul blocat (blacklist/UI chrome) pentru 
+src/selectors.ts:556 [dia/str] notifier a eșuat: 
+src/selectors.ts:565 [dia/str] override șters: 
+src/selectors.ts:593 [word/str] cache remote ignorat: URL-ul setat s-a schimbat
+src/selectors.ts:599 [dia/str] ) nu e mai nou decât bundled (v
+src/selectors.ts:606 [word/str] selectori remote activi din cache: v
+src/selectors.ts:656 [dia/str] selectori remote aplicați: v
+src/selectors.ts:657 [dia/str]  — override-uri înlocuite: 
+src/selectors.ts:674 [dia/str] persist cache remote a eșuat: 
+src/selectors.ts:683 [dia/str] persist overrides a eșuat: 
+src/selectors.ts:1302 [dia/str] heal evaluate a eșuat (
+src/selectors.ts:1315 [word/str] heal: niciun candidat pentru 
+src/selectors.ts:1315 [dia/str]  — încerc AI finder
+src/selectors.ts:1321 [word/str] AI finder: niciun selector utilizabil pentru 
+src/selectors.ts:1323 [dia/str] AI finder a eșuat pentru 
+src/selectors.ts:1326 [word/str] heal: niciun candidat pentru 
+src/selectors.ts:1460 [dia/str] citirea răspunsului a eșuat: 
+src/stt.ts:211 [dia/str] Rulează comanda „AI Bridge: Setup Local Whisper” (descarcă whisper.cpp + modelul ggml-base o singură dată, ~160 MB).
+src/stt.ts:212 [dia/str] Sau setează manual aiBridge.whisperCliPath și aiBridge.whisperModelPath.
+src/stt.ts:215 [dia/str] Whisper CLI (whisper-cli) nu a fost găsit.
+src/stt.ts:217 [dia/str] Modelul ggml pentru Whisper nu a fost găsit.
+src/stt.ts:232 [word/str]  pentru 
+src/stt.ts:258 [dia/str] Descărcare incompletă (
+src/stt.ts:285 [dia/str] Extragerea zip a eșuat (cod 
+src/stt.ts:321 [dia/str] setup: binarele există deja — sar peste descărcare
+src/stt.ts:329 [dia/str] setup: modelul există deja — sar peste descărcare
+src/stt.ts:334 [dia/str] eșec — 
+src/stt.ts:338 [word/str] setup: eroare — 
+src/stt.ts:341 [dia/str] Setup Whisper a eșuat: 
+src/stt.ts:360 [word/str] Whisper indisponibil.
+src/stt.ts:441 [dia/str] Transcrierea a depășit 
+src/stt.ts:450 [dia/str] whisper-cli a ieșit cu codul 
+src/stt.ts:456 [dia/str] transcriere gata în 
+src/tools.ts:218 [word/str]  [TIMEOUT — procesul a fost oprit]
+src/tools.ts:328 [dia/str] You are an autonomous coding agent in VS Code. ## CRITICAL RULE When the user asks you to DO something (change, fix, search, create, delete, modify, add, remove, rename, update, find, etc.), you MUST respond with a TOOL 
+src/tools.ts:405 [dia/str] AI coding assistant in VS Code. You are a LOCAL model (small context): follow the rules EXACTLY and be concise. To use a tool, respond with ONLY this JSON (single line, nothing else): {"tool": "NAME", "args": {...}} Tool
+src/tools.ts:531 [word/str] Respins de utilizator
+src/tools.ts:569 [word/str] Respins de utilizator
+src/tools.ts:595 [dia/str]  (comandă long-running — server de dezvoltare: pornește într-un TERMINAL VS Code VIZIBIL; primești imediat URL-ul + primele secunde de output)
+src/tools.ts:604 [word/str] Respins de utilizator
+src/tools.ts:651 [dia/str] 📄 Fișier nou: 
+src/tools.ts:654 [dia/str] (fără modificări)
+src/tools.ts:713 [dia/str] (fără modificări)
+src/tools.ts:871 [dia/str] ✅ Serverul rulează deja în terminalul VS Code „
+src/tools.ts:874 [dia/str] Nu am pornit o a doua instanță. Continue with your task or reply 
+src/tools.ts:919 [dia/str] DEV-SERVER NOTE: această comandă a fost pornită într-un terminal VS Code VIZIBIL („
+src/tools.ts:921 [dia/str] ”), dar procesul s-a terminat imediat după 
+src/tools.ts:923 [dia/str] s — de obicei o eroare de pornire (port ocupat, syntax error, script lipsă, dependențe neinstalate). Terminalul rămâne deschis cu output-ul complet. Citește output-ul de mai sus, repară CAUZA și re-rulează comanda.
+src/tools.ts:944 [dia/str] Nu e un proiect Node (lipsește package.json). Folosește run_command dacă e nevoie.
+src/tools.ts:968 [dia/str] run_npm: lipsește args.script. Scripturi disponibile: 
+src/tools.ts:976 [dia/str] " nu există în package.json. Disponibile: 
+src/tools.ts:985 [word/str] run_npm: numele de script "
+src/tools.ts:985 [dia/str] " conține caractere neobișnuite — folosește run_command.
+src/tools.ts:1006 [dia/str]  (server de dezvoltare — pornește într-un TERMINAL VS Code VIZIBIL: primești imediat URL-ul + primele secunde de output; rămâne pornit până la Ctrl+C sau „AI Bridge: Stop Dev Servers”)
+src/tools.ts:1010 [word/str] Respins de utilizator
+src/tools.ts:1080 [dia/str] read_files: lipsește args.paths (array de căi)
+src/tools.ts:1102 [word/str]  --- (eroare: 
+src/tools.ts:1115 [dia/str]  căi ignorate — max 
+src/tools.ts:1136 [dia/str] write_files: lipsește args.files (array de {"path","content"})
+src/tools.ts:1145 [dia/str]  fișiere per apel (
+src/tools.ts:1173 [dia/str] … (restul fișierelor: diff omis)
+src/tools.ts:1188 [dia/str]  fișiere: 
+src/tools.ts:1193 [word/str] Respins de utilizator
+src/tools.ts:1226 [word/str]  Eroare la 
+src/tools.ts:1238 [word/str] ANTI-SPAM LIMIT: toate cele 
+src/tools.ts:1240 [dia/str]  fișiere au atins limita de scriere (max 
+src/tools.ts:1242 [dia/str] /fișier, 
+src/tools.ts:1244 [word/str] /mesaj): 
+src/tools.ts:1246 [dia/str] . Nu le mai rescrie — răspunde cu text.
+src/tools.ts:1255 [dia/str]  fișiere: 
+src/tools.ts:1258 [word/str]  BLOCATE de limita anti-spam (nu le mai scrie): 
+src/tools.ts:1346 [word/str] Respins de utilizator
+src/tools.ts:1388 [dia/str] git commit: lipsește args.message
+src/tools.ts:1397 [dia/str]  (cu git add -A înainte)
+src/tools.ts:1403 [dia/str] git add -A a eșuat: 
+src/tools.ts:1448 [dia/str] git revert: args.commit trebuie să fie un hash (4-40 caractere hex)
+src/tools.ts:1456 [dia/str]  (creează un commit nou care anulează 
+src/tools.ts:1469 [dia/str] git restore: lipsește args.path
+src/tools.ts:1477 [dia/str]  (ATENȚIE: aruncă modificările locale din fișier)
+src/tools.ts:1493 [dia/str] git: acțiune necunoscută "
+src/tools.ts:1495 [dia/str] ". Folosește: status, diff, log, commit, branch, revert, restore.
+src/verifier.ts:59 [dia/str] package.json invalid — verificarea nu poate fi detectată
+src/verifier.ts:142 [dia/str] nicio verificare configurată pentru acest proiect
+src/verifier.ts:153 [word/str] rulez verificarea: 
+src/verifier.ts:168 [dia/str] verificare TRECUTĂ în 
+src/verifier.ts:179 [dia/str] verificare EȘUATĂ în 
+src/verifier.ts:269 [dia/str] git commit a eșuat: 
+src/verifier.ts:303 [dia/str] git init a eșuat în 
+src/verifier.ts:307 [dia/str] git init a eșuat (git lipsește?)
+src/verifier.ts:318 [word/str] # creat automat de AI Bridge (checkpoint-uri git)
+src/verifier.ts:333 [dia/str] scrierea .gitignore a eșuat: 
+src/verifier.ts:337 [dia/str] git init automat în 
+src/verifier.ts:340 [dia/str] ensureGitRepo a eșuat: 
+src/verifier.ts:368 [dia/str] checkpoint: ensureGitRepo a eșuat — 
+src/verifier.ts:389 [dia/str] checkpoint: git add a eșuat — 
+src/verifier.ts:450 [dia/str] git add -A a eșuat: 
+src/verifier.ts:453 [dia/str] commit-ul de backup a eșuat (verifică git user.name/email)
+src/verifier.ts:465 [dia/str] git reset --hard a eșuat: 
+src/verifier.ts:482 [dia/str] , untracked rămase: 
+src/voiceRecorder.ts:141 [dia/str] Windows nativ — PowerShell + winmm (waveIn), zero dependențe externe
+src/voiceRecorder.ts:146 [dia/str] INDISPONIBIL — Windows PowerShell lipsește și SoX (`rec`/`sox`) nu e instalat
+src/voiceRecorder.ts:159 [dia/str] param( [Parameter(Mandatory=$true)][string]$OutFile, [Parameter(Mandatory=$true)][string]$StopFile, [int]$Rate = 16000, [int]$Channels = 1, [int]$Bits = 16, [int]$MaxSeconds = 600, [int]$ChunkMs = 500 ) $ErrorActionPrefe
+src/voiceRecorder.ts:583 [dia/str] Recorderul s-a oprit înainte de READY (cod 
+src/voiceRecorder.ts:615 [word/str] microfonul nu a pornit
+src/voiceRecorder.ts:618 [dia/str] recorderul a ieșit cu cod 
+src/voiceRecorder.ts:620 [dia/str] fișierul audio nu a fost scris
+src/voiceRecorder.ts:662 [dia/str] voice: recorderul nu a răspuns la stop — îl omor
+src/voiceRecorder.ts:768 [dia/str] node-audiorecorder nu a putut porni (lipsește SoX / `rec`).
+src/voiceRecorder.ts:777 [word/str] SoX / `rec` nu a pornit: 
+src/voiceRecorder.ts:816 [dia/str] fișierul audio nu a fost scris
+src/voiceRecorder.ts:858 [dia/str] Niciun backend de captare audio: Windows PowerShell (nativ) sau SoX (`rec`/`sox` în PATH) nu au fost găsite.
+src/voiceRecorder.ts:876 [word/str] microfon deschis (winmm)
+src/voiceRecorder.ts:887 [word/str] microfon deschis (SoX)
+src/winwindow.ts:31 [word/str] param( [string]$Action = 'hide', [int]$RootPid = 0 ) Add-Type @' using System; using System.Text; using System.Collections.Generic; using System.Runtime.InteropServices; public class AiBridgeWin { [DllImport("user32.dll"
+src/winwindow.ts:159 [dia/str] fără răspuns JSON (hidden=
+src/winwindow.ts:164 [dia/str] eșec (hidden=
+src/winwindow.ts:170 [dia/str] setChromeTaskbarHidden a eșuat: 
+media/chat.css:73 [dia/css] /* ===== v0.6.0: notificări terminal auto-healing ===== */
+media/chat.css:184 [dia/css] /* ===== FIX v1.2.1: card inline de review diff (Accept/Reject în chat) ===== */
+media/chat.css:391 [dia/css] /* ===== Markdown în răspunsurile assistant ===== */
+media/chat.css:484 [dia/css] /* ===== FAZA F: head mesaj (iconițe + timestamp) ===== */
+media/chat.css:698 [dia/css] /* ===== FAZA II (A): atașamente ===== */
+media/chat.css:776 [dia/css] /* butoanele de atașare / dictare din zona de input (📎 fișiere / 📁 foldere / 🎤 voce) */
+media/chat.css:811 [dia/css] /* v1.6.0: butonul 🎤 (voice input) — roșu pulsant cât timp ascultă */
+media/chat.css:829 [dia/css] /* evidențiere la drag & drop peste zona de input */
+media/chat.css:839 [dia/css] /* indicator „streaming" pe răspunsul în curs */
+media/chat.css:853 [dia/css] /* ===== v1.7.1: Verbose mode — pașii AI în chat ===== */
+media/chat.css:954 [dia/css] /* v1.7.2: butonul 🎤 în timpul transcrierii (Whisper local) */
+media/chat.css:966 [dia/css] /* ===== v1.9.0: conversații multiple (bara de conversații) ===== */
+media/chat.css:1017 [dia/css] /* ===== v1.9.0: acțiuni pe mesajele user (✐ edit / ᛉ fork / ⟲ restore) ===== */
+selectors.json:0 [ERR/Error: ENOENT: no such file or directory, open 'C:\Users\Lanon\ai-bridge\selectors.json'] 
+CHANGELOG.md:22 [dia/md] - **Auto-accept for consent popups** — cookie banners and terms/consent dialogs are now closed automatically: after a page load, before clicking New Chat and right before typing a message. Three confidence tiers — strong
+CHANGELOG.md:31 [dia/md] - **Long-running commands no longer block the AI — dev servers run in the background** — `npm run dev`, `npm run serve`, `npm start`, `watch` / `preview` scripts and known dev binaries (`vite`, `nodemon`, `next dev`, `as
+CHANGELOG.md:41 [dia/md] - **Same recording UX, clearer failures** — 🎤 starts the capture (`🎤 Pornesc microfonul…` → `🎙 Se înregistrează… (m:ss)` with a pulsing button and live timer; stop with ⏹ or by sending a message), then `⏳ Transcriu au
+CHANGELOG.md:48 [dia/md] - **Recording UX** — the button shows ⏹ + a pulsing red state while recording and the input shows a live timer (`🎙 Se înregistrează… (0:07)`); while transcribing it shows ⏳ / `Transcriu audio (Whisper local)…`, and the 
+CHANGELOG.md:138 [word/md] - **Human-like typing** — messages are typed character by character with randomized delays (15–50 ms), punctuation pauses and occasional fast bursts instead of instant insertion (anti-detect); typing can be cancelled wit

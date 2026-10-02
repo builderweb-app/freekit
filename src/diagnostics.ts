@@ -36,7 +36,7 @@ export async function runDiagnostics(
 
   lines.push('===== AI Bridge Diagnostics — ' + new Date().toLocaleString() + ' =====');
   lines.push(
-    'Extensie: ' +
+    'Extension: ' +
       ctx.extension.packageJSON.version +
       ' | VS Code: ' +
       vscode.version +
@@ -49,26 +49,26 @@ export async function runDiagnostics(
   );
   lines.push(
     'Workspace trust: ' +
-      (vscode.workspace.isTrusted ? 'TRUSTED' : 'RESTRICTED (extensia nu va executa unelte)') +
+      (vscode.workspace.isTrusted ? 'TRUSTED' : 'RESTRICTED (the extension will not run tools)') +
       ' | folder: ' +
-      (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '(niciunul deschis)')
+      (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '(none open)')
   );
 
   const chrome = await detectBrowserPath(opts.chromePath);
   lines.push(
     'Chrome/Edge: ' +
       (chrome ??
-        'NEGĂSIT — instalează Chrome sau Edge, ori setează aiBridge.chromePath')
+        'NOT FOUND — install Chrome or Edge, or set aiBridge.chromePath')
   );
 
   const running = await browser.isRunning();
   const version = running ? await browser.chromeVersion() : null;
   lines.push(
-    'CDP: portul ' +
+    'CDP: port ' +
       opts.port +
       (running
-        ? ' — răspunde (' + (version ?? 'versiune necunoscută') + ')'
-        : ' — nu răspunde (browserul nu rulează acum)')
+        ? ' — responds (' + (version ?? 'unknown version') + ')'
+        : ' — not responding (the browser is not running now)')
   );
   lines.push('Profil Chrome: ' + opts.profileDir);
 
@@ -78,24 +78,24 @@ export async function runDiagnostics(
     const models = Array.isArray(ollama.models)
       ? ollama.models.map((m: any) => m?.name).filter(Boolean)
       : [];
-    lines.push('Ollama: OK — modele: ' + (models.join(', ') || '(niciunul)'));
+    lines.push('Ollama: OK — models: ' + (models.join(', ') || '(none)'));
   } else {
     lines.push(
-      'Ollama: nu răspunde pe ' + ollamaUrl + ' (opțional — doar pentru modul local)'
+      'Ollama: not responding at ' + ollamaUrl + ' (optional — local mode only)'
     );
   }
 
   const selInfo = selectors.info();
   lines.push(
-    'Selectori activi: v' +
+    'Active selectors: v' +
       selInfo.version +
-      ' — sursă: ' +
+      ' — source: ' +
       selInfo.source +
       (selInfo.remoteUrl
         ? ' (' +
           selInfo.remoteUrl +
           (selInfo.remoteFetchedAt
-            ? ', descărcați la ' + new Date(selInfo.remoteFetchedAt).toLocaleString()
+            ? ', downloaded at ' + new Date(selInfo.remoteFetchedAt).toLocaleString()
             : '') +
           ')'
         : '') +
@@ -104,7 +104,7 @@ export async function runDiagnostics(
   );
 
   const learned = selectors.listLearned();
-  lines.push('Selectori reparați automat (override-uri): ' + learned.length);
+  lines.push('Auto-repaired selectors (overrides): ' + learned.length);
   for (const l of learned) {
     lines.push('  - ' + l.provider + '.' + l.slot + ' → ' + l.selector);
   }
@@ -118,6 +118,6 @@ export async function runDiagnostics(
   for (const line of lines) logLine('diagnostics', line);
   channel.show();
   vscode.window.showInformationMessage(
-    'AI Bridge: diagnostice scrise în Output → AI Bridge.'
+    'AI Bridge: diagnostics were written to Output → AI Bridge.'
   );
 }

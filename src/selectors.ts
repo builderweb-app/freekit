@@ -416,20 +416,20 @@ export class SelectorStore {
       // și texte secundare (ex: „text-subtle” → response).
       if (isPersistBlocked(item.slot, item.selector)) {
         purged++;
-        log('override blocat (blacklist/UI chrome) ignorat: ' + item.provider + '.' + item.slot + ' -> ' + item.selector);
+        log('blocked override (blacklist/UI chrome) ignored: ' + item.provider + '.' + item.slot + ' -> ' + item.selector);
         continue;
       }
       // FIX v2: override-urile fragili (poziționale/nth-of-type) sunt prea
       // fragile ca să fie persistate (ex: DeepSeek newChat reparat greșit).
       if (isFragileSelector(item.selector)) {
         purged++;
-        log('override fragil (pozițional) ignorat: ' + item.provider + '.' + item.slot + ' -> ' + item.selector);
+        log('fragile (positional) override ignored: ' + item.provider + '.' + item.slot + ' -> ' + item.selector);
         continue;
       }
       this.overrides.set(this.key(item.provider, item.slot), item);
     }
     if (saved.length) {
-      log('overrides încărcate: ' + (saved.length - purged));
+      log('overrides loaded: ' + (saved.length - purged));
     }
     if (purged) void this.persist();
   }
@@ -445,7 +445,7 @@ export class SelectorStore {
   config(providerId: string): ProviderConfig {
     const cfg = this.active.providers[providerId];
     if (cfg) return cfg;
-    log('provider necunoscut ("' + providerId + '") — folosesc ' + FALLBACK_PROVIDER);
+    log('unknown provider ("' + providerId + '") — using ' + FALLBACK_PROVIDER);
     return this.active.providers[FALLBACK_PROVIDER];
   }
 
@@ -519,19 +519,19 @@ export class SelectorStore {
     meta?: { confidence?: number; reasoning?: string }
   ): boolean {
     if (!isUsableSelector(selector)) {
-      log('ignor selectorul prea generic pentru ' + providerId + '.' + slot + ': ' + selector);
+      log('ignoring overly generic selector for ' + providerId + '.' + slot + ': ' + selector);
       return false;
     }
     // FIX v2: selectorii fragili (poziționali/nth-of-type) se pot folosi o dată
     // în sesiunea curentă, dar nu se salvează — se rup la prima schimbare de DOM.
     if (isFragileSelector(selector)) {
-      log('ignor selectorul fragil (pozițional) pentru ' + providerId + '.' + slot + ': ' + selector);
+      log('ignoring fragile (positional) selector for ' + providerId + '.' + slot + ': ' + selector);
       return false;
     }
     // FIX healer: nu salvăm niciodată selectori de disclaimer/cookie/footer
     // (v0.9.1) sau de temă/comutatoare UI, pentru niciun slot.
     if (isPersistBlocked(slot, selector)) {
-      log('ignor selectorul blocat (blacklist/UI chrome) pentru ' + providerId + '.' + slot + ': ' + selector);
+      log('ignoring blocked selector (blacklist/UI chrome) for ' + providerId + '.' + slot + ': ' + selector);
       return false;
     }
     const key = this.key(providerId, slot);
@@ -548,12 +548,12 @@ export class SelectorStore {
     if (meta?.confidence !== undefined) entry.confidence = meta.confidence;
     if (meta?.reasoning) entry.reasoning = meta.reasoning;
     this.overrides.set(key, entry);
-    log('selector reparat: ' + key + ' -> ' + selector + ' (' + how + ')');
+    log('selector repaired: ' + key + ' -> ' + selector + ' (' + how + ')');
     void this.persist();
     try {
       this.notifier?.(entry);
     } catch (e: any) {
-      log('notifier a eșuat: ' + (e?.message ?? String(e)));
+      log('notifier failed: ' + (e?.message ?? String(e)));
     }
     return true;
   }
@@ -562,7 +562,7 @@ export class SelectorStore {
   forget(providerId: string, slot: SlotName): boolean {
     const key = this.key(providerId, slot);
     if (!this.overrides.delete(key)) return false;
-    log('override șters: ' + key);
+    log('override removed: ' + key);
     void this.persist();
     return true;
   }
@@ -590,22 +590,22 @@ export class SelectorStore {
         return;
       }
       if (cache.url !== url) {
-        log('cache remote ignorat: URL-ul setat s-a schimbat');
+        log('remote cache ignored: the configured URL changed');
         return;
       }
       const merged = mergeConfigs(BUNDLED_CONFIG, cache.data);
       if (compareVersions(merged.version, BUNDLED_CONFIG.version) <= 0) {
         log(
-          'cache remote (v' + merged.version + ') nu e mai nou decât bundled (v' +
-            BUNDLED_CONFIG.version + ') — ignorat'
+          'remote cache (v' + merged.version + ') is not newer than bundled (v' +
+            BUNDLED_CONFIG.version + ') — ignored'
         );
         return;
       }
       this.active = merged;
       this.remoteMeta = { url, fetchedAt: cache.fetchedAt || 0 };
-      log('selectori remote activi din cache: v' + merged.version + ' (' + url + ')');
+      log('remote selectors active from cache: v' + merged.version + ' (' + url + ')');
     } catch (e: any) {
-      log('cache remote invalid — ignorat: ' + (e?.message ?? String(e)));
+      log('remote cache invalid — ignored: ' + (e?.message ?? String(e)));
     }
   }
 
@@ -635,7 +635,7 @@ export class SelectorStore {
     url: string
   ): { applied: boolean; version: string; cleared: string[] } {
     if (compareVersions(remote.version, this.active.version) <= 0) {
-      log('applyRemote ignorat: v' + remote.version + ' <= v activ ' + this.active.version);
+      log('applyRemote ignored: v' + remote.version + ' <= active v' + this.active.version);
       return { applied: false, version: this.active.version, cleared: [] };
     }
     const merged = mergeConfigs(this.active, remote);
@@ -653,8 +653,8 @@ export class SelectorStore {
     if (cleared.length) void this.persist();
     void this.persistRemoteCache();
     log(
-      'selectori remote aplicați: v' + merged.version + ' (' + url + ')' +
-        (cleared.length ? ' — override-uri înlocuite: ' + cleared.join(', ') : '')
+      'remote selectors applied: v' + merged.version + ' (' + url + ')' +
+        (cleared.length ? ' — overrides replaced: ' + cleared.join(', ') : '')
     );
     return { applied: true, version: merged.version, cleared };
   }
@@ -671,7 +671,7 @@ export class SelectorStore {
       };
       await this.memento.update(REMOTE_CACHE_KEY, payload);
     } catch (e: any) {
-      log('persist cache remote a eșuat: ' + (e?.message ?? String(e)));
+      log('persisting remote cache failed: ' + (e?.message ?? String(e)));
     }
   }
 
@@ -680,7 +680,7 @@ export class SelectorStore {
     try {
       await this.memento.update(OVERRIDES_KEY, Array.from(this.overrides.values()));
     } catch (e: any) {
-      log('persist overrides a eșuat: ' + (e?.message ?? String(e)));
+      log('persisting overrides failed: ' + (e?.message ?? String(e)));
     }
   }
 }
@@ -1283,7 +1283,7 @@ export async function healSlot(
 ): Promise<string | null> {
   const fp = selectors.fingerprint(providerId, slot);
   if (!fp) {
-    log('heal: ' + providerId + '.' + slot + ' nu are fingerprint definit');
+    log('heal: ' + providerId + '.' + slot + ' has no fingerprint defined');
     return null;
   }
   // v0.9.0: preferredKeywords (dacă sunt definite) întăresc scorul candidaților
@@ -1299,7 +1299,7 @@ export async function healSlot(
       keywords
     });
   } catch (e: any) {
-    log('heal evaluate a eșuat (' + providerId + '.' + slot + '): ' + (e?.message ?? String(e)));
+    log('heal evaluate failed (' + providerId + '.' + slot + '): ' + (e?.message ?? String(e)));
     return null;
   }
 
@@ -1312,18 +1312,18 @@ export async function healSlot(
     // v0.9.5: fallback AI — healer-ul clasic a eșuat complet
     if (aiFinderFn) {
       try {
-        log('heal: niciun candidat pentru ' + providerId + '.' + slot + ' — încerc AI finder');
+        log('heal: no candidate for ' + providerId + '.' + slot + ' — trying AI finder');
         const aiSel = await aiFinderFn(page, providerId, slot, echoText);
         if (aiSel) {
           log('heal ' + providerId + '.' + slot + ' -> ' + aiSel + ' (AI)');
           return aiSel;
         }
-        log('AI finder: niciun selector utilizabil pentru ' + providerId + '.' + slot);
+        log('AI finder: no usable selector for ' + providerId + '.' + slot);
       } catch (e: any) {
-        log('AI finder a eșuat pentru ' + providerId + '.' + slot + ': ' + (e?.message ?? String(e)));
+        log('AI finder failed for ' + providerId + '.' + slot + ': ' + (e?.message ?? String(e)));
       }
     } else {
-      log('heal: niciun candidat pentru ' + providerId + '.' + slot);
+      log('heal: no candidate for ' + providerId + '.' + slot);
     }
     return null;
   }
@@ -1457,7 +1457,7 @@ export async function getLastResponseText(
   try {
     return await page.evaluate<string, ReadArgs>(readLastText, { sels, fallback });
   } catch (e: any) {
-    log('citirea răspunsului a eșuat: ' + (e?.message ?? String(e)));
+    log('reading the response failed: ' + (e?.message ?? String(e)));
     return '';
   }
 }

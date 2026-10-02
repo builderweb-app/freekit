@@ -8,6 +8,14 @@ import {
   packageManagerBin,
   runProgram
 } from './project';
+import {
+  DEFAULT_GRACE_MS,
+  findRunningDevServer,
+  formatDevServerStartResult,
+  isLongRunningCommand,
+  isLongRunningScript,
+  startDevServer
+} from './devServers';
 
 // Pending approvals: id -> resolver
 export const pendingApprovals = new Map<string, (ok: boolean) => void>();
@@ -143,7 +151,9 @@ function formatCommandOutcome(
   toolLabel: string,
   command: string,
   res: CommandResult,
-  attempt: number
+  attempt: number,
+  /** v1.7.4: notă suplimentară (ex. dev server oprit imediat după pornire). */
+  note?: string
 ): ToolResult {
   const seconds = (res.duration / 1000).toFixed(1);
   const attemptTag = 'attempt ' + attempt + '/' + MAX_COMMAND_ATTEMPTS;
@@ -205,8 +215,9 @@ function formatCommandOutcome(
     error: (
       '✗ ' + toolLabel + ': ' + command + '\n' +
       'COMMAND FAILED — exit ' + res.exitCode +
-      (res.exitCode === 124 ? ' [TIMEOUT — procesul a fost oprit]' : '') +
+      (res.exitCode === 124 ? ' [TIMEOUT — the process was stopped]' : '') +
       ', ' + seconds + 's (' + attemptTag + ')\n\n' +
+      (note ? note + '\n\n' : '') +
       directive + '\n\n' + parts.join('\n\n')
     ).slice(0, 24000),
     commandRun: {
@@ -332,8 +343,8 @@ Your FIRST response to any action request is ALWAYS a tool call.
 3. edit_file(path, old_text, new_text) - find and replace in a file
 4. list_files(dir) - list files in a directory
 5. search_files(pattern) - search for text across files
-6. run_command(command) - shell command (needs approval)
-7. run_npm(action, script) - npm/pnpm/yarn commands
+6. run_command(command) - shell command (needs approval); dev/serve/watch commands start in a VISIBLE VS Code terminal and return immediately with the live URL + first seconds of output
+7. run_npm(action, script) - npm/pnpm/yarn commands; scripts named dev/start/serve/watch/preview start in a VISIBLE VS Code terminal and return immediately with the live URL + first seconds of output
 8. git_status(), git_diff(file?), git_log(n?), git_commit(message, files?),
    git_branch(action, name?), git_revert(commit)
 9. read_files(paths) - batch read (max 12)
@@ -344,21 +355,21 @@ Your FIRST response to any action request is ALWAYS a tool call.
 
 ## WORKFLOW EXAMPLES
 
-USER: "schimbă titlul din X în Y"
+USER: "change the title from X to Y"
 YOU: {"tool": "search_files", "args": {"pattern": "X"}}
 (after result, you know which files contain X)
 YOU: {"tool": "read_file", "args": {"path": "src/file.ts"}}
 (after result, you see the exact text)
 YOU: {"tool": "edit_file", "args": {"path": "src/file.ts", "old_text": "X", "new_text": "Y"}}
 
-USER: "creează un fișier cu numele foo.ts"
+USER: "create a file named foo.ts"
 YOU: {"tool": "write_file", "args": {"path": "foo.ts", "content": "..."}}
 
-USER: "adaugă un comentariu la începutul fișierului main.js"
+USER: "add a comment at the beginning of the main.js file"
 YOU: {"tool": "read_file", "args": {"path": "main.js"}}
-YOU: {"tool": "edit_file", "args": {"path": "main.js", "old_text": "primul rând", "new_text": "// comentariu\\nprimul rând"}}
+YOU: {"tool": "edit_file", "args": {"path": "main.js", "old_text": "first line", "new_text": "// comment\\nfirst line"}}
 
-USER: "rulează testele"
+USER: "run the tests"
 YOU: {"tool": "run_npm", "args": {"action": "script", "script": "test"}}
 
 ## STRICT RULES
@@ -371,6 +382,7 @@ YOU: {"tool": "run_npm", "args": {"action": "script", "script": "test"}}
 - Paths relative to workspace root.
 - When the task is complete, respond with PLAIN TEXT (not JSON).
 - After every edit_file / write_file / write_files the system AUTO-VERIFIES the project (astro check / tsc / build). If you receive "VERIFICATION FAILED", fix the ROOT CAUSE — you get max 3 auto-repair attempts; if it still fails, your changes are ROLLED BACK automatically. Never claim success while a verification is failing.
+- Long-running commands (dev / start / serve / watch / preview — e.g. "npm run dev", "vite", "nodemon") start the server in a VISIBLE VS Code terminal automatically (the user watches the live output there): you receive "✅ Server started in the VS Code TERMINAL …" + the live URL + the first seconds of output IMMEDIATELY. NEVER wait for such a command and NEVER re-run it; the server keeps running until stopped (Ctrl+C in its terminal or the command "AI Bridge: Stop Dev Servers"). If the early output shows a startup error (port in use, syntax error) — or you are told the process exited — fix the root cause and re-run the command once.
 
 ## WHEN TO USE PLAIN TEXT (no tool)
 - User asks a question ("what does this do?", "explain X")
@@ -417,6 +429,7 @@ CRITICAL WRITE RULES (the system REJECTS violations with an error):
 - Write ONLY what the user asked for. No extra functions, files, tests or docs.
 - Several files → ONE write_files call with all of them.
 - Hard limits: max 3 writes per file, max 15 write operations per message. If you get an ANTI-SPAM error, do NOT retry — reply with plain text instead.
+- Dev/start/serve/watch commands (npm run dev, npm start, vite, nodemon, ...) run in a VISIBLE VS Code terminal: you get "✅ Server started in the VS Code TERMINAL …" + the first seconds of output immediately. Do NOT wait for them, do NOT re-run them; if the first seconds show an error — or the process exited — fix it and re-run once.
 - If run_command / run_npm fails: read the FULL error, fix the code, re-run the SAME command (max 5 tries; after that it is blocked and you must reply with text).
 - After every write the system RE-CHECKS the project: if you receive "VERIFICATION FAILED", fix the reported error (max 3 repair attempts — then ALL changes are rolled back automatically). Never claim success while a verification is failing.
 - After the task is done, reply with plain text (short summary). No JSON.
@@ -515,7 +528,7 @@ export async function executeTool(
           }
         ];
         if (!(await approve('write_file', call.args.path, diff, changes))) {
-          return { ok: false, error: 'Respins de utilizator' };
+          return { ok: false, error: 'User rejected' };
         }
         const res = await writeFile(call.args.path, newContent, workspaceRoot);
         if (res.ok) {
@@ -553,7 +566,7 @@ export async function executeTool(
           }
         ];
         if (!(await approve('edit_file', call.args.path, diff, changes))) {
-          return { ok: false, error: 'Respins de utilizator' };
+          return { ok: false, error: 'User rejected' };
         }
         const res = await editFile(
           call.args.path,
@@ -576,10 +589,19 @@ export async function executeTool(
         if (isCommandBlocked(normCommandKey(call.args.command))) {
           return blockedCommandResult(call.args.command);
         }
+        // v1.8.1: comenzile long-running (dev/serve/start/watch) pornesc
+        // vizibil, într-un terminal VS Code dedicat (nu mai rămân invizibile)
+        const lrNote = isLongRunningCommand(call.args.command)
+          ? '\n(long-running command — development server: starts in a VISIBLE VS Code TERMINAL; you immediately get the URL + the first seconds of output)'
+          : '';
         if (
-          !(await approve('run_command', call.args.command, call.args.command))
+          !(await approve(
+            'run_command',
+            call.args.command,
+            call.args.command + lrNote
+          ))
         ) {
-          return { ok: false, error: 'Respins de utilizator' };
+          return { ok: false, error: 'User rejected' };
         }
         return await runCommand(call.args.command);
       }
@@ -626,10 +648,10 @@ async function tryReadInfo(
 
 function makeDiff(filePath: string, oldText: string, newText: string): string {
   if (!oldText) {
-    return '📄 Fișier nou: ' + filePath + '\n\n' + newText.slice(0, 3000);
+    return '📄 New file: ' + filePath + '\n\n' + newText.slice(0, 3000);
   }
   if (oldText === newText) {
-    return '(fără modificări)';
+    return '(no changes)';
   }
 
   const oldLines = oldText.split('\n');
@@ -688,7 +710,7 @@ function makeDiff(filePath: string, oldText: string, newText: string): string {
   }
   if (ctxEnd < newLines.length) out.push('  ...');
 
-  return out.join('\n') || '(fără modificări)';
+  return out.join('\n') || '(no changes)';
 }
 
 function safePath(rel: string, root: string): string {
@@ -770,6 +792,14 @@ async function runCommand(command: string): Promise<ToolResult> {
   const attempt = beginCommandAttempt(key);
   const started = Date.now();
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+  // v1.8.1: comenzile long-running (dev/serve/start/watch/preview) NU se
+  // așteaptă — pornesc într-un TERMINAL VS Code VIZIBIL (răspuns imediat:
+  // URL + primele secunde de output)
+  if (isLongRunningCommand(command)) {
+    return await runDevServerCommand('run_command', command, cwd, key, attempt);
+  }
+
   try {
     const { stdout, stderr } = await execAsync(command, {
       cwd,
@@ -817,6 +847,84 @@ async function runCommand(command: string): Promise<ToolResult> {
 }
 
 /* =========================================================================
+ * v1.8.1 — DEV SERVER în TERMINAL VS Code: vizibil + răspuns imediat
+ * Pornește comanda într-un terminal dedicat, VIZIBIL (utilizatorul vede
+ * output-ul live și poate apăsa Ctrl+C), așteaptă doar primele ~3s de output
+ * (URL + erorile rapide de pornire ajung la AI) și lasă serverul pornit până
+ * la Ctrl+C sau comanda „AI Bridge: Stop Dev Servers”.
+ * ========================================================================= */
+
+async function runDevServerCommand(
+  toolLabel: string,
+  command: string,
+  cwd: string | undefined,
+  key: string,
+  attempt: number
+): Promise<ToolResult> {
+  // anti-dublare: același server (comandă + folder) nu se pornește de două ori
+  const existing = findRunningDevServer(command, cwd);
+  if (existing) {
+    commandSucceeded(key);
+    return {
+      ok: true,
+      result:
+        '✅ The server is already running in the VS Code terminal “' +
+        existing.terminalName + '”\n' +
+        'tool: ' + toolLabel + ' — command: ' + command + '\n' +
+        'I did not start a second instance. Continue with your task or reply ' +
+        'with the final answer — do NOT wait for this command.',
+      commandRun: {
+        command,
+        attempt,
+        max: MAX_COMMAND_ATTEMPTS,
+        exitCode: 0,
+        duration: 0,
+        final: false
+      }
+    };
+  }
+
+  const res = await startDevServer(command, { cwd });
+  if (res.running) {
+    commandSucceeded(key);
+    return {
+      ok: true,
+      result: formatDevServerStartResult(toolLabel, command, res, {
+        cwd,
+        graceMs: DEFAULT_GRACE_MS
+      }),
+      commandRun: {
+        command,
+        attempt,
+        max: MAX_COMMAND_ATTEMPTS,
+        exitCode: 0,
+        duration: res.durationMs,
+        final: false
+      }
+    };
+  }
+
+  return formatCommandOutcome(
+    toolLabel,
+    command,
+    {
+      ok: false,
+      exitCode: res.exitCode ?? 1,
+      stdout: res.stdout,
+      stderr: res.stderr,
+      combined: res.output,
+      duration: res.durationMs
+    },
+    attempt,
+    'DEV-SERVER NOTE: this command was started in a VISIBLE VS Code terminal (“' +
+      (res.terminalName || '?') +
+      '”), but the process exited immediately after ' +
+      (res.durationMs / 1000).toFixed(1) +
+      's — usually a startup error (port in use, syntax error, missing script, missing dependencies). The terminal stays open with the full output. Read the output above, fix the ROOT CAUSE and re-run the command.'
+  );
+}
+
+/* =========================================================================
  * FAZA II (B) — npm/pnpm/yarn cu verificare
  * Folosește package manager-ul detectat din lockfile și validează scripts
  * contra package.json. Output-ul complet (stdout+stderr) ajunge la AI.
@@ -833,7 +941,7 @@ async function runNpmTool(
     return {
       ok: false,
       error:
-        'Nu e un proiect Node (lipsește package.json). Folosește run_command dacă e nevoie.'
+        'This is not a Node project (package.json is missing). Use run_command if needed.'
     };
   }
 
@@ -843,6 +951,9 @@ async function runNpmTool(
   let desc: string;
   let cmdArgs: string[];
   let timeoutMs: number;
+  // v1.8.1: scripturile long-running (dev/serve/start/watch/preview) nu se
+  // așteaptă — rulează vizibil, într-un terminal VS Code dedicat
+  let longRunning = false;
 
   if (action === 'install') {
     desc = pm + ' install';
@@ -854,16 +965,16 @@ async function runNpmTool(
       return {
         ok: false,
         error:
-          'run_npm: lipsește args.script. Scripturi disponibile: ' +
-          (Object.keys(info.scripts).join(', ') || '(niciunul)')
+          'run_npm: args.script is missing. Available scripts: ' +
+          (Object.keys(info.scripts).join(', ') || '(none)')
       };
     }
     if (!info.scripts[script]) {
       return {
         ok: false,
         error:
-          'Scriptul "' + script + '" nu există în package.json. Disponibile: ' +
-          (Object.keys(info.scripts).join(', ') || '(niciunul)')
+          'The script "' + script + '" does not exist in package.json. Available: ' +
+          (Object.keys(info.scripts).join(', ') || '(none)')
       };
     }
     // numele ajunge în linia de comandă (shell pe Windows) — îl ținem strict
@@ -871,12 +982,13 @@ async function runNpmTool(
       return {
         ok: false,
         error:
-          'run_npm: numele de script "' + script + '" conține caractere neobișnuite — folosește run_command.'
+          'run_npm: script name "' + script + '" contains unusual characters — use run_command.'
       };
     }
     desc = pm + ' run ' + script;
     cmdArgs = ['run', script];
     timeoutMs = 180000;
+    longRunning = isLongRunningScript(script);
   }
 
   // v0.6.0: auto-repair — comanda blocată după MAX_COMMAND_ATTEMPTS încercări
@@ -885,12 +997,27 @@ async function runNpmTool(
     return blockedCommandResult(desc);
   }
 
-  if (!(await approve('run_npm', desc, '> ' + desc))) {
-    return { ok: false, error: 'Respins de utilizator' };
+  if (
+    !(await approve(
+      'run_npm',
+      desc,
+      '> ' + desc +
+        (longRunning
+          ? '\n(development server — starts in a VISIBLE VS Code TERMINAL: you immediately get the URL + the first seconds of output; it stays running until Ctrl+C or “AI Bridge: Stop Dev Servers”)'
+          : '')
+    ))
+  ) {
+    return { ok: false, error: 'User rejected' };
   }
 
   log('run_npm: ' + desc);
   const attempt = beginCommandAttempt(key);
+
+  // v1.8.1: script long-running → terminal VS Code vizibil (nu se așteaptă)
+  if (longRunning) {
+    return await runDevServerCommand('run_npm', desc, root, key, attempt);
+  }
+
   const res = await runProgram(packageManagerBin(pm), cmdArgs, {
     cwd: root,
     timeoutMs,
@@ -950,7 +1077,7 @@ async function readFilesBatch(
   if (!paths.length) {
     return {
       ok: false,
-      error: 'read_files: lipsește args.paths (array de căi)'
+      error: 'read_files: args.paths is missing (array of paths)'
     };
   }
 
@@ -965,29 +1092,29 @@ async function readFilesBatch(
       const clipped =
         content.length > READ_PER_FILE
           ? content.slice(0, READ_PER_FILE) +
-            '\n[...truncat, ' +
+            '\n[...truncated, ' +
             (content.length - READ_PER_FILE) +
-            ' caractere omise...]'
+            ' characters omitted...]'
           : content;
       sections.push('--- FILE: ' + rel + ' ---\n' + clipped);
     } catch (e: any) {
       sections.push(
-        '--- FILE: ' + rel + ' ---\n(eroare: ' + (e?.message ?? String(e)) + ')'
+        '--- FILE: ' + rel + ' ---\n(error: ' + (e?.message ?? String(e)) + ')'
       );
     }
   }
 
   let out = sections.join('\n\n');
   if (out.length > READ_TOTAL) {
-    out = out.slice(0, READ_TOTAL) + '\n[...trunchiat...]';
+    out = out.slice(0, READ_TOTAL) + '\n[...truncated...]';
   }
   if (paths.length > limited.length) {
     out +=
       '\n\n(' +
       (paths.length - limited.length) +
-      ' căi ignorate — max ' +
+      ' paths ignored — max ' +
       MAX_BATCH_READ_FILES +
-      ' per apel)';
+      ' per call)';
   }
   return { ok: true, result: out };
 }
@@ -1006,7 +1133,7 @@ async function writeFilesBatch(
   if (!files.length) {
     return {
       ok: false,
-      error: 'write_files: lipsește args.files (array de {"path","content"})'
+      error: 'write_files: args.files is missing (array of {"path","content"})'
     };
   }
   if (files.length > MAX_BATCH_WRITE_FILES) {
@@ -1015,9 +1142,9 @@ async function writeFilesBatch(
       error:
         'write_files: max ' +
         MAX_BATCH_WRITE_FILES +
-        ' fișiere per apel (' +
+        ' files per call (' +
         files.length +
-        ' cerute)'
+        ' requested)'
     };
   }
 
@@ -1043,7 +1170,7 @@ async function writeFilesBatch(
     const piece =
       d.length > 1600 ? d.slice(0, 1600) + '\n[...diff trunchiat...]' : d;
     if (diffBudget <= 0) {
-      diffParts.push('… (restul fișierelor: diff omis)');
+      diffParts.push('… (remaining files: diff omitted)');
       break;
     }
     diffBudget -= piece.length;
@@ -1058,12 +1185,12 @@ async function writeFilesBatch(
     (files.length > 3 ? ' (+' + (files.length - 3) + ')' : '');
   const diff = (
     files.length +
-    ' fișiere:\n\n' +
+    ' files:\n\n' +
     diffParts.join('\n\n')
   ).slice(0, 10000);
 
   if (!(await approve('write_files', summary, diff, changes))) {
-    return { ok: false, error: 'Respins de utilizator' };
+    return { ok: false, error: 'User rejected' };
   }
 
   const written: string[] = [];
@@ -1090,13 +1217,13 @@ async function writeFilesBatch(
       return {
         ok: false,
         error:
-          'Scrise ' +
+          'Written ' +
           written.length +
           '/' +
           files.length +
           ': ' +
           (written.join(', ') || '—') +
-          '\nEroare la ' +
+          '\nError writing ' +
           f.path +
           ': ' +
           (e?.message ?? String(e))
@@ -1108,27 +1235,27 @@ async function writeFilesBatch(
     return {
       ok: false,
       error:
-        'ANTI-SPAM LIMIT: toate cele ' +
+        'ANTI-SPAM LIMIT: all ' +
         files.length +
-        ' fișiere au atins limita de scriere (max ' +
+        ' files reached the write limit (max ' +
         MAX_WRITES_PER_FILE +
-        '/fișier, ' +
+        '/file, ' +
         MAX_WRITES_TOTAL +
-        '/mesaj): ' +
+        '/message): ' +
         blocked.join(', ') +
-        '. Nu le mai rescrie — răspunde cu text.'
+        '. Do not rewrite them — reply with text.'
     };
   }
   recordWriteCall();
   return {
     ok: true,
     result:
-      'Scrise ' +
+      'Written ' +
       written.length +
-      ' fișiere: ' +
+      ' files: ' +
       written.join(', ') +
       (blocked.length
-        ? '\nBLOCATE de limita anti-spam (nu le mai scrie): ' +
+        ? '\nBLOCKED by the anti-spam limit (do not write them again): ' +
           blocked.join(', ')
         : '')
   };
@@ -1216,7 +1343,7 @@ async function gitTool(
   const action = String(args.action || 'status').toLowerCase();
   const run = (cmdArgs: string[], timeoutMs = 60000) =>
     runProgram('git', cmdArgs, { cwd: root, timeoutMs });
-  const rejected: ToolResult = { ok: false, error: 'Respins de utilizator' };
+  const rejected: ToolResult = { ok: false, error: 'User rejected' };
 
   switch (action) {
     case 'status': {
@@ -1258,7 +1385,7 @@ async function gitTool(
     case 'commit': {
       const message = String(args.message ?? '').trim();
       if (!message) {
-        return { ok: false, error: 'git commit: lipsește args.message' };
+        return { ok: false, error: 'git commit: args.message is missing' };
       }
       const addAll = args.add === true;
       const approved = await approve(
@@ -1267,13 +1394,13 @@ async function gitTool(
         'git commit -m "' +
           message +
           '"' +
-          (addAll ? '\n(cu git add -A înainte)' : '')
+          (addAll ? '\n(with git add -A first)' : '')
       );
       if (!approved) return rejected;
       if (addAll) {
         const add = await run(['add', '-A']);
         if (!add.ok) {
-          return { ok: false, error: 'git add -A a eșuat:\n' + add.output };
+          return { ok: false, error: 'git add -A failed:\n' + add.output };
         }
       }
       const r = await run(['commit', '-m', message]);
@@ -1285,7 +1412,7 @@ async function gitTool(
       const name = String(args.name ?? '').trim();
       if (name) {
         if (!BRANCH_RE.test(name)) {
-          return { ok: false, error: 'Nume de branch invalid: ' + name };
+          return { ok: false, error: 'Invalid branch name: ' + name };
         }
         const approved = await approve(
           'git',
@@ -1318,7 +1445,7 @@ async function gitTool(
         return {
           ok: false,
           error:
-            'git revert: args.commit trebuie să fie un hash (4-40 caractere hex)'
+            'git revert: args.commit must be a hash (4-40 hex characters)'
         };
       }
       const approved = await approve(
@@ -1326,7 +1453,7 @@ async function gitTool(
         'revert ' + commit,
         'git revert --no-edit ' +
           commit +
-          '\n(creează un commit nou care anulează ' +
+          '\n(creates a new commit that reverts ' +
           commit +
           ')'
       );
@@ -1339,7 +1466,7 @@ async function gitTool(
     case 'restore': {
       const rel = String(args.path ?? '').trim();
       if (!rel) {
-        return { ok: false, error: 'git restore: lipsește args.path' };
+        return { ok: false, error: 'git restore: args.path is missing' };
       }
       const abs = safePath(rel, root);
       const approved = await approve(
@@ -1347,7 +1474,7 @@ async function gitTool(
         'restore ' + rel,
         'git checkout -- ' +
           rel +
-          '\n(ATENȚIE: aruncă modificările locale din fișier)'
+          '\n(WARNING: discards the local changes in the file)'
       );
       if (!approved) return rejected;
       const r = await run([
@@ -1356,16 +1483,16 @@ async function gitTool(
         path.relative(root, abs).replace(/\\/g, '/')
       ]);
       if (!r.ok) return { ok: false, error: r.output };
-      return { ok: true, result: 'Restaurat: ' + rel };
+      return { ok: true, result: 'Restored: ' + rel };
     }
 
     default:
       return {
         ok: false,
         error:
-          'git: acțiune necunoscută "' +
+          'git: unknown action "' +
           action +
-          '". Folosește: status, diff, log, commit, branch, revert, restore.'
+          '". Use: status, diff, log, commit, branch, revert, restore.'
       };
   }
 }

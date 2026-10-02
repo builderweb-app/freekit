@@ -9,6 +9,7 @@ import { checkAndApplyRemote, shouldAutoCheck } from './remoteSelectors';
 import { initAISelectorFinder } from './ai-selector-finder';
 import { mcp } from './mcp/manager';
 import { setupWhisperAssets } from './stt';
+import { stopDevServers } from './devServers';
 
 /** v0.3.0 (P0.1): opțiunile browserului, citite live din setări. */
 function browserOptionsFromConfig(ctx: vscode.ExtensionContext) {
@@ -43,12 +44,12 @@ export async function activate(ctx: vscode.ExtensionContext) {
       cfg.version +
       ' (' +
       cfg.updated +
-      ', sursă: ' +
+      ', source: ' +
       cfg.source +
       (cfg.remoteUrl ? ' — ' + cfg.remoteUrl : '') +
-      ') — provideri: ' +
+      ') — providers: ' +
       cfg.providers.join(', ') +
-      ' — override-uri salvate: ' +
+      ' — saved overrides: ' +
       selectors.listLearned().length
   );
 
@@ -64,7 +65,7 @@ export async function activate(ctx: vscode.ExtensionContext) {
       void checkAndApplyRemote(selUrl, ctx.globalState).then((r) => {
         if (r.status === 'updated') {
           vscode.window.showInformationMessage(
-            'AI Bridge: selectorii au fost actualizați automat la v' +
+            'AI Bridge: the selectors were updated automatically to v' +
               r.version +
               '.' +
               (r.changelog ? ' ' + r.changelog : '')
@@ -74,7 +75,7 @@ export async function activate(ctx: vscode.ExtensionContext) {
     } else {
       logLine(
         'extension',
-        'selectors: verificare automată sărită (ultima verificare < 24h) — folosește „AI Bridge: Update Selectors” pentru una manuală'
+        'selectors: automatic check skipped (last check < 24h ago) — use “AI Bridge: Update Selectors” for a manual one'
       );
     }
   }
@@ -113,7 +114,7 @@ export async function activate(ctx: vscode.ExtensionContext) {
           );
           if (res.ok) {
             const msg =
-              'Whisper local e gata ✓ — ' +
+              'Local Whisper is ready ✓ — ' +
               path.basename(res.cliPath ?? '') +
               ' + ' +
               path.basename(res.modelPath ?? '');
@@ -121,10 +122,10 @@ export async function activate(ctx: vscode.ExtensionContext) {
             chatView.postNotice('🎤 ' + msg);
           } else {
             vscode.window.showErrorMessage(
-              'AI Bridge: setup Whisper a eșuat — ' + (res.error ?? 'eroare necunoscută')
+              'AI Bridge: local Whisper setup failed — ' + (res.error ?? 'unknown error')
             );
             chatView.postNotice(
-              '🎤 ⚠️ Setup Whisper a eșuat: ' + (res.error ?? 'eroare necunoscută')
+              '🎤 ⚠️ Local Whisper setup failed: ' + (res.error ?? 'unknown error')
             );
           }
         }
@@ -135,7 +136,7 @@ export async function activate(ctx: vscode.ExtensionContext) {
   ctx.subscriptions.push(
     vscode.commands.registerCommand('aiBridge.openBrowser', async () => {
       await browser.ensureOpen();
-      vscode.window.showInformationMessage('Conectat la Chrome (profilul AI Bridge).');
+      vscode.window.showInformationMessage('Connected to Chrome (AI Bridge profile).');
     })
   );
 
@@ -145,10 +146,10 @@ export async function activate(ctx: vscode.ExtensionContext) {
     vscode.commands.registerCommand('aiBridge.closeBrowser', async () => {
       const closed = await browser.close();
       if (closed) {
-        vscode.window.showInformationMessage('Chrome închis.');
+        vscode.window.showInformationMessage('Chrome closed.');
       } else {
         vscode.window.showWarningMessage(
-          'Nu am putut închide Chrome — închide-l manual din Task Manager.'
+          'I could not close Chrome — please close it manually from Task Manager.'
         );
       }
     })
@@ -160,14 +161,14 @@ export async function activate(ctx: vscode.ExtensionContext) {
       const removed = selectors.reset();
       if (removed === 0) {
         vscode.window.showInformationMessage(
-          'AI Bridge: nu există selectori reparați salvați.'
+          'AI Bridge: no saved repaired selectors were found.'
         );
       } else {
         vscode.window.showInformationMessage(
-          'AI Bridge: am șters ' +
+          'AI Bridge: removed ' +
             removed +
-            ' selectori reparați. Se folosesc din nou selectorii configurați' +
-            ' (bundled sau remote, dacă e activ).'
+            ' saved repaired selectors. The configured selectors are being used again' +
+            ' (bundled or remote, if enabled).'
         );
       }
     })
@@ -179,7 +180,7 @@ export async function activate(ctx: vscode.ExtensionContext) {
       const url = selectorsUrlFromSettings();
       if (!url) {
         vscode.window.showWarningMessage(
-          'AI Bridge: setează mai întâi „aiBridge.selectorsUrl” (URL-ul raw al Gist-ului cu selectors.json).'
+          'AI Bridge: set the "aiBridge.selectorsUrl" value first (the raw Gist URL for selectors.json).'
         );
         return;
       }
@@ -188,18 +189,18 @@ export async function activate(ctx: vscode.ExtensionContext) {
       if (r.status === 'updated') {
         const from = r.previousVersion ? ' (v' + r.previousVersion + ' → v' + r.version + ')' : '';
         vscode.window.showInformationMessage(
-          'AI Bridge: selectorii au fost actualizați' +
+          'AI Bridge: the selectors were updated' +
             from +
             '.' +
             (r.changelog ? ' ' + r.changelog : '')
         );
       } else if (r.status === 'up-to-date') {
         vscode.window.showInformationMessage(
-          'AI Bridge: selectorii sunt deja la zi (v' + (r.activeVersion ?? '?') + ').'
+          'AI Bridge: the selectors are already up to date (v' + (r.activeVersion ?? '?') + ').'
         );
       } else {
         vscode.window.showErrorMessage(
-          'AI Bridge: actualizarea selectorilor a eșuat — ' + (r.message ?? 'eroare necunoscută')
+          'AI Bridge: updating the selectors failed — ' + (r.message ?? 'unknown error')
         );
       }
     })
@@ -234,6 +235,58 @@ export async function activate(ctx: vscode.ExtensionContext) {
     )
   );
 
+  // v1.8.1: oprește toate serverele de dezvoltare pornite de AI într-un
+  // terminal VS Code (scripturi/comenzi dev, start, serve, watch, preview —
+  // ex. „npm run dev”): Ctrl+C grațios, apoi închiderea terminalului
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand('aiBridge.stopDevServers', async () => {
+      const report = await stopDevServers();
+      const total = report.stopped.length + report.failed.length;
+      if (!total) {
+        vscode.window.showInformationMessage(
+          'AI Bridge: no development server started by AI Bridge is currently running.'
+        );
+        return;
+      }
+      if (report.failed.length) {
+        vscode.window.showWarningMessage(
+          'AI Bridge: ' +
+            report.stopped.length +
+            ' development server(s) stopped, ' +
+            report.failed.length +
+            ' could not be stopped (' +
+            report.failed
+              .map((f) => f.terminalName || 'PID ' + f.pid)
+              .join(', ') +
+            ').'
+        );
+      } else {
+        vscode.window.showInformationMessage(
+          'AI Bridge: ' +
+            report.stopped.length +
+            ' development server(s) stopped: ' +
+            report.stopped
+              .map((s) => s.command + ' (terminal “' + s.terminalName + '”)')
+              .join('; ')
+        );
+      }
+      logLine(
+        'devServers',
+        'Stop Dev Servers: ' +
+          report.stopped.length +
+          ' stopped' +
+          (report.stopped.length
+            ? ' (' +
+              report.stopped
+                .map((s) => s.terminalName + ': ' + s.command)
+                .join(', ') +
+              ')'
+            : '') +
+          (report.failed.length ? ' — ' + report.failed.length + ' failed' : '')
+      );
+    })
+  );
+
   // v1.1.0 — MCP (Model Context Protocol): pornește serverele configurate în
   // .vscode/mcp.json sau în aiBridge.mcpServers, descoperă uneltele lor și le
   // expune AI-ului ca „mcp_<server>_<tool>”. Reîncărcare automată la
@@ -244,6 +297,12 @@ export async function activate(ctx: vscode.ExtensionContext) {
     )
   );
   void mcp.init(ctx, (text) => chatView.postNotice(text));
+
+  // v1.8.1: serverele de dezvoltare pornite în terminale VS Code (run_npm /
+  // run_command cu scripturi dev/serve/watch) sunt oprite best-effort la
+  // închiderea ferestrei — altfel ar rămâne procese orfane pe care comanda
+  // Stop Dev Servers nu le mai poate găsi (registrul e în memorie).
+  ctx.subscriptions.push({ dispose: () => void stopDevServers() });
 
   // la dezactivare doar deconectăm — NU omorâm Chrome (poate fi folosit în continuare)
   ctx.subscriptions.push({ dispose: () => browser.disconnect() });

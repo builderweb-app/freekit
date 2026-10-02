@@ -200,7 +200,7 @@ export class McpManager {
       pretty,
       'MCP tool call → ' + pretty + '\n\n' + preview.slice(0, 4000)
     );
-    if (!approved) return { ok: false, error: 'Respins de utilizator' };
+    if (!approved) return { ok: false, error: 'User rejected' };
 
     try {
       const res = await this.client.callToolDetailed({
@@ -208,12 +208,12 @@ export class McpManager {
         toolName: entry.toolName,
         args
       });
-      const text = (res.text || '(fără rezultat)').slice(0, TOOL_RESULT_MAX);
+      const text = (res.text || '(no result)').slice(0, TOOL_RESULT_MAX);
       if (res.isError) {
         return {
           ok: false,
           error:
-            '✗ MCP ' + pretty + ' a raportat o eroare:\n' + text
+            '✗ MCP ' + pretty + ' reported an error:\n' + text
         };
       }
       return { ok: true, result: '✓ MCP ' + pretty + '\n' + text };
@@ -221,8 +221,8 @@ export class McpManager {
       return {
         ok: false,
         error:
-          '✗ MCP ' + pretty + ' a eșuat: ' + (e?.message ?? String(e)) +
-          '\n(Poți verifica serverele cu comanda „AI Bridge: MCP Servers”. Nu reîncerca în buclă.)'
+          '✗ MCP ' + pretty + ' failed: ' + (e?.message ?? String(e)) +
+          '\n(You can check the servers with the “AI Bridge: MCP Servers” command. Do not retry in a loop.)'
       };
     }
   }
@@ -236,20 +236,20 @@ export class McpManager {
     if (!infos.length) {
       return [
         this.hasServers()
-          ? 'MCP: servere configurate dar ne pornite — folosește „AI Bridge: MCP Servers”.'
-          : 'MCP: niciun server configurat (.vscode/mcp.json sau aiBridge.mcpServers).'
+          ? 'MCP: configured servers are present but not running — use “AI Bridge: MCP Servers”.'
+          : 'MCP: no server is configured (.vscode/mcp.json or aiBridge.mcpServers).'
       ];
     }
     const running = infos.filter((i) => i.state === 'running');
     const failed = infos.filter((i) => i.state === 'failed');
     const tools = this.client.getTools().length;
     const out: string[] = [
-      'MCP: 🟢 ' + running.length + '/' + infos.length + ' servere, ' + tools +
-        ' unelte — ' +
+      'MCP: 🟢 ' + running.length + '/' + infos.length + ' servers, ' + tools +
+        ' tools — ' +
         (running.map((i) => i.name + ' (' + i.tools + ')').join(', ') || '—')
     ];
     for (const f of failed) {
-      out.push('  🔴 ' + f.name + ': ' + (f.error || 'nu a pornit'));
+      out.push('  🔴 ' + f.name + ': ' + (f.error || 'did not start'));
     }
     return out;
   }
@@ -282,13 +282,13 @@ export class McpManager {
         return;
       }
 
-      this.notify('🔌 MCP: pornesc ' + names.length + ' server(e): ' + names.join(', '));
+      this.notify('🔌 MCP: starting ' + names.length + ' server(s): ' + names.join(', '));
       await this.client.startAll();
       const infos = this.client.getServerInfos();
       const running = infos.filter((i) => i.state === 'running');
       this.notify(
-        '🔌 MCP: ' + running.length + '/' + infos.length + ' servere active, ' +
-          this.client.getTools().length + ' unelte expuse AI-ului.'
+        '🔌 MCP: ' + running.length + '/' + infos.length + ' servers active, ' +
+          this.client.getTools().length + ' tools exposed to the AI.'
       );
 
       // reîncărcare la modificarea configurilor
@@ -340,7 +340,7 @@ export class McpManager {
       const v = require('vscode') as typeof vscode;
       if (!v.workspace.getConfiguration('aiBridge').get<boolean>('mcpEnabled', true)) {
         await this.stopAll();
-        this.notify('🔌 MCP dezactivat — serverele au fost oprite.');
+        this.notify('🔌 MCP disabled — the servers were stopped.');
         return;
       }
       const toolSecs = Number(
@@ -354,15 +354,15 @@ export class McpManager {
     await this.client.loadConfig();
     const names = this.client.serverNames();
     if (!names.length) {
-      this.notify('🔌 MCP: nicio configurație de servere — am oprit tot.');
+      this.notify('🔌 MCP: no server configuration found — everything was stopped.');
       return;
     }
     await this.client.startAll();
     const infos = this.client.getServerInfos();
     const running = infos.filter((i) => i.state === 'running');
     this.notify(
-      '🔌 MCP reîncărcat: ' + running.length + '/' + infos.length +
-        ' servere active, ' + this.client.getTools().length + ' unelte.'
+      '🔌 MCP reloaded: ' + running.length + '/' + infos.length +
+        ' servers active, ' + this.client.getTools().length + ' tools.'
     );
   }
 
@@ -372,8 +372,8 @@ export class McpManager {
     const infos = this.client.getServerInfos();
     const running = infos.filter((i) => i.state === 'running');
     this.notify(
-      '🔌 MCP: repornit — ' + running.length + '/' + infos.length +
-        ' servere active, ' + this.client.getTools().length + ' unelte.'
+      '🔌 MCP: restarted — ' + running.length + '/' + infos.length +
+        ' servers active, ' + this.client.getTools().length + ' tools.'
     );
   }
 
@@ -397,48 +397,48 @@ export class McpManager {
     for (const i of infos) {
       items.push({
         label: icon(i.state) + ' $(server-process) ' + i.name,
-        description: i.state + ' — ' + i.tools + ' unelte',
-        detail: i.error ? 'eroare: ' + i.error : i.command,
+        description: i.state + ' — ' + i.tools + ' tools',
+        detail: i.error ? 'error: ' + i.error : i.command,
         action: 'server',
         server: i.name
       });
     }
     if (!infos.length) {
       items.push({
-        label: '$(info) Niciun server MCP pornit',
-        description: 'adaugă servere în .vscode/mcp.json sau în aiBridge.mcpServers',
+        label: '$(info) No MCP server running',
+        description: 'add servers in .vscode/mcp.json or aiBridge.mcpServers',
         action: 'noop'
       });
     }
     items.push({
-      label: '$(refresh) Repornește toate serverele',
-      description: this.client.serverNames().length + ' configurate',
+      label: '$(refresh) Restart all servers',
+      description: this.client.serverNames().length + ' configured',
       action: 'restart-all'
     });
     items.push({
-      label: '$(tools) Arată toate uneltele MCP (' + cat.length + ')',
+      label: '$(tools) Show all MCP tools (' + cat.length + ')',
       action: 'tools'
     });
     items.push({
-      label: '$(json) Deschide .vscode/mcp.json',
-      description: 'îl creează cu un exemplu dacă nu există',
+      label: '$(json) Open .vscode/mcp.json',
+      description: 'create it with an example if it does not exist',
       action: 'config'
     });
     items.push({
-      label: '$(gear) Setarea aiBridge.mcpServers',
+      label: '$(gear) Open aiBridge.mcpServers setting',
       action: 'settings'
     });
 
     const pick = await v.window.showQuickPick(items, {
       title: 'AI Bridge — MCP Servers',
-      placeHolder: 'Alege un server sau o acțiune'
+      placeHolder: 'Choose a server or action'
     });
     if (!pick) return;
 
     switch (pick.action) {
       case 'restart-all':
         await this.restartAll();
-        v.window.showInformationMessage('AI Bridge: serverele MCP au fost repornite.');
+        v.window.showInformationMessage('AI Bridge: the MCP servers were restarted.');
         break;
       case 'tools':
         await v.window.showQuickPick(
@@ -447,7 +447,7 @@ export class McpManager {
             description: 'server: ' + t.serverName,
             detail: t.description
           })),
-          { title: 'Unelte MCP disponibile (' + cat.length + ')' }
+          { title: 'Available MCP tools (' + cat.length + ')' }
         );
         break;
       case 'config':
@@ -471,9 +471,9 @@ export class McpManager {
     const v = require('vscode') as typeof vscode;
     const pick = await v.window.showQuickPick(
       [
-        { label: '$(refresh) Repornește serverul', action: 'restart' },
-        { label: '$(stop) Oprește serverul', action: 'stop' },
-        { label: '$(tools) Arată uneltele serverului', action: 'tools' }
+        { label: '$(refresh) Restart server', action: 'restart' },
+        { label: '$(stop) Stop server', action: 'stop' },
+        { label: '$(tools) Show server tools', action: 'tools' }
       ],
       { title: 'MCP: ' + name }
     );
@@ -482,25 +482,25 @@ export class McpManager {
     if (pick.action === 'restart') {
       try {
         await this.client.restartServer(name);
-        v.window.showInformationMessage('AI Bridge: serverul MCP „' + name + '” a fost repornit.');
-        this.notify('🔌 MCP: „' + name + '” repornit — ' + this.client.getTools().filter((t) => t.serverName === name).length + ' unelte.');
+        v.window.showInformationMessage('AI Bridge: the MCP server “' + name + '” was restarted.');
+        this.notify('🔌 MCP: “' + name + '” restarted — ' + this.client.getTools().filter((t) => t.serverName === name).length + ' tools.');
       } catch (e: any) {
         v.window.showErrorMessage(
-          'AI Bridge: „' + name + '” nu a pornit — ' + (e?.message ?? String(e))
+          'AI Bridge: “' + name + '” did not start — ' + (e?.message ?? String(e))
         );
       }
     } else if (pick.action === 'stop') {
       await this.client.stopServer(name);
-      v.window.showInformationMessage('AI Bridge: serverul MCP „' + name + '” a fost oprit.');
+      v.window.showInformationMessage('AI Bridge: the MCP server “' + name + '” was stopped.');
     } else if (pick.action === 'tools') {
       const tools = this.catalog().filter((t) => t.serverName === name);
       await v.window.showQuickPick(
         tools.map((t) => ({
           label: t.id,
-          description: t.params.length ? '(' + t.params.join(', ') + ')' : '(fără parametri)',
+          description: t.params.length ? '(' + t.params.join(', ') + ')' : '(no parameters)',
           detail: t.description
         })),
-        { title: 'Uneltele serverului ' + name + ' (' + tools.length + ')' }
+        { title: 'Tools for server ' + name + ' (' + tools.length + ')' }
       );
     }
   }
@@ -540,11 +540,11 @@ export class McpManager {
         await v.workspace.fs.createDirectory(v.Uri.joinPath(folder.uri, '.vscode'));
         await v.workspace.fs.writeFile(uri, Buffer.from(template, 'utf8'));
         v.window.showInformationMessage(
-          'AI Bridge: am creat .vscode/mcp.json cu un server exemplu — editează-l, apoi rulează „AI Bridge: MCP Servers” → Repornește.'
+          'AI Bridge: created .vscode/mcp.json with an example server — edit it, then run “AI Bridge: MCP Servers” → Restart.'
         );
       } catch (e: any) {
         v.window.showErrorMessage(
-          'AI Bridge: nu am putut crea .vscode/mcp.json — ' + (e?.message ?? String(e))
+          'AI Bridge: could not create .vscode/mcp.json — ' + (e?.message ?? String(e))
         );
         return;
       }

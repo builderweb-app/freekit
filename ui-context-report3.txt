@@ -1,0 +1,23 @@
+==== TARGET REMAINING (22) ====
+src/chatView.ts:1375 [WORD<verification>] auto-verify: final response while verification is red — rollback
+src/chatView.ts:1550 [WORD<verification>]  requires CAPTCHA verification ("I'm not a robot") — the 
+src/chatView.ts:1551 [WORD<verification>] Chrome window was brought to the front. Solve the verification; I continue automatically after.
+src/chatView.ts:1587 [WORD<verification>]  min — Chrome is back in the background. Solve the verification, then send the message again.
+src/chatView.ts:1659 [WORD<verification>] auto-verify: no verification detected — skipping
+src/chatView.ts:1678 [WORD<Verification>] Verification passes again
+src/chatView.ts:1690 [WORD<VERIFICATION>]  ✅ VERIFICATION PASSED (
+src/chatView.ts:1724 [WORD<VERIFICATION>]  ❌ VERIFICATION FAILED (auto-repair attempt 
+src/chatView.ts:1728 [WORD<verification>] ): your last edit broke the project. Read the error output above, find the ROOT CAUSE and fix it with edit_file / write_
+src/chatView.ts:1795 [WORD<verification>] AI Bridge: verification "
+src/chatView.ts:1805 [WORD<verification>] The project is back to the last state that passed verification. Last error (
+src/remoteSelectors.ts:114 [WORD<invalid>] : “primary” is missing or invalid
+src/remoteSelectors.ts:137 [WORD<invalid>] invalid remote selectors: the root is not a JSON object
+src/remoteSelectors.ts:145 [WORD<invalid>] invalid remote selectors: 
+src/remoteSelectors.ts:152 [WORD<invalid>] invalid provider name: “
+src/remoteSelectors.ts:197 [WORD<invalid>] JSON invalid: 
+src/remoteSelectors.ts:209 [WORD<Invalid>] Invalid URL (must be http/https): 
+src/selectors.ts:608 [WORD<invalid>] remote cache invalid — ignored: 
+src/tools.ts:328 [WORD<exact>] You are an autonomous coding agent in VS Code. ## CRITICAL RULE When the user asks you to DO something (change, fix, sea
+src/tools.ts:405 [WORD<VERIFICATION>] AI coding assistant in VS Code. You are a LOCAL model (small context): follow the rules EXACTLY and be concise. To use a
+src/tools.ts:451 [WORD<invalid>] SYSTEM NOTICE — NO TOOL CALL DETECTED. Your previous reply contained NO valid tool call (plain text description and/or i
+src/tools.ts:1415 [WORD<Invalid>] Invalid branch name: 

@@ -185,7 +185,7 @@ export async function runVerification(root: string): Promise<VerifyResult> {
  * v1.4.0 — CHECKPOINT GIT PER PROMPT + RESTORE CU UN CLICK
  * Înainte de fiecare mesaj trimis, chatView creează un checkpoint git:
  * dacă working tree-ul e dirty, commit-uiește tot (mesaj-marker
- * „aibridge-prompt:<id>”); altfel creează un commit gol-marker. Butonul 🔄
+ * „aibridge-prompt:<id>”); altfel creează un commit gol-marker. Butonul ⟲
  * din chat readuce proiectul exact la starea de dinaintea promptului
  * (git reset --hard), cu backup automat (commit) al stării curente înainte
  * de reset. Totul e fail-open: fără git (sau fără repo), funcțiile întorc
@@ -348,7 +348,7 @@ export async function ensureGitRepo(
  * „aibridge-prompt:<id>”); dacă e clean, creează un commit gol-marker, ca
  * fiecare prompt să aibă un id unic de restore.
  * v1.5.0: cu opts.autoInit, un folder care nu e (încă) repo git primește
- * `git init` automat — altfel funcția întorcea tăcut null și butonul 🔄
+ * `git init` automat — altfel funcția întorcea tăcut null și butonul ⟲
  * de restore nu apărea niciodată.
  */
 export async function createPromptCheckpoint(

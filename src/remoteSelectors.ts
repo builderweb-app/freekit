@@ -102,16 +102,16 @@ function normalizeSlot(
   optional = false
 ): SlotConfig | undefined {
   if (raw === undefined || raw === null) {
-    if (!optional) errors.push(pid + '.' + slot + ': lipsește');
+    if (!optional) errors.push(pid + '.' + slot + ': missing');
     return undefined;
   }
   if (typeof raw !== 'object' || Array.isArray(raw)) {
-    errors.push(pid + '.' + slot + ': nu este obiect');
+    errors.push(pid + '.' + slot + ': is not an object');
     return undefined;
   }
   const primary = str(raw.primary, MAX_SELECTOR_LEN);
   if (!primary) {
-    errors.push(pid + '.' + slot + ': „primary” lipsește sau e invalid');
+    errors.push(pid + '.' + slot + ': “primary” is missing or invalid');
     return undefined;
   }
   const out: SlotConfig = { primary };
@@ -134,31 +134,31 @@ function normalizeSlot(
 export function normalizeRemoteConfig(raw: any): SelectorConfig {
   const errors: string[] = [];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new Error('selectors remote invalide: rădăcina nu este un obiect JSON');
+    throw new Error('invalid remote selectors: the root is not a JSON object');
   }
   const version = str(raw.version, MAX_VERSION_LEN);
-  if (!version) errors.push('lipsește câmpul „version” (string, max ' + MAX_VERSION_LEN + ' caractere)');
+  if (!version) errors.push('missing the “version” field (string, max ' + MAX_VERSION_LEN + ' characters)');
 
   const providersRaw = raw.providers;
   if (!providersRaw || typeof providersRaw !== 'object' || Array.isArray(providersRaw)) {
     throw new Error(
-      'selectors remote invalide: ' + errors.concat('lipsește obiectul „providers”').join('; ')
+      'invalid remote selectors: ' + errors.concat('missing the “providers” object').join('; ')
     );
   }
 
   const providers: Record<string, ProviderConfig> = {};
   for (const [pid, praw] of Object.entries(providersRaw as Record<string, any>)) {
     if (!/^[a-z0-9_-]{1,40}$/i.test(pid)) {
-      errors.push('nume de provider invalid: „' + pid + '”');
+      errors.push('invalid provider name: “' + pid + '”');
       continue;
     }
     if (!praw || typeof praw !== 'object' || Array.isArray(praw)) {
-      errors.push(pid + ': nu este obiect');
+      errors.push(pid + ': is not an object');
       continue;
     }
     const url = str(praw.url, 300);
     const urlOk = !!url && /^https?:\/\//i.test(url);
-    if (!urlOk) errors.push(pid + ': câmpul „url” lipsește sau nu e http(s)');
+    if (!urlOk) errors.push(pid + ': the “url” field is missing or not http(s)');
 
     const cfg: Partial<ProviderConfig> = {};
     if (urlOk) cfg.url = url;
@@ -175,7 +175,7 @@ export function normalizeRemoteConfig(raw: any): SelectorConfig {
     }
   }
   if (!Object.keys(providers).length && !errors.length) {
-    errors.push('niciun provider valid');
+    errors.push('no valid provider');
   }
   if (errors.length) {
     throw new Error('selectors remote invalide: ' + errors.slice(0, 5).join('; '));
@@ -206,7 +206,7 @@ export async function fetchRemoteSelectorsText(
 ): Promise<string> {
   const clean = String(url || '').trim();
   if (!/^https?:\/\//i.test(clean)) {
-    throw new Error('URL invalid (trebuie http/https): ' + (clean || '(gol)'));
+    throw new Error('Invalid URL (must be http/https): ' + (clean || '(empty)'));
   }
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), Math.max(500, timeoutMs));
@@ -218,7 +218,7 @@ export async function fetchRemoteSelectorsText(
     const text = await res.text();
     if (text.length > REMOTE_MAX_CHARS) {
       throw new Error(
-        'răspuns prea mare (' + text.length + ' > ' + REMOTE_MAX_CHARS + ' caractere)'
+        'response too large (' + text.length + ' > ' + REMOTE_MAX_CHARS + ' characters)'
       );
     }
     return text;
@@ -267,10 +267,10 @@ export function markAutoCheck(
   const rec: AutoCheckState = { url: String(url || '').trim(), at: now };
   try {
     void Promise.resolve(memento.update(AUTO_CHECK_STATE_KEY, rec)).catch((e: any) => {
-      log('persist auto-check a eșuat: ' + (e?.message ?? String(e)));
+      log('persisting auto-check failed: ' + (e?.message ?? String(e)));
     });
   } catch (e: any) {
-    log('persist auto-check a eșuat: ' + (e?.message ?? String(e)));
+    log('persisting auto-check failed: ' + (e?.message ?? String(e)));
   }
 }
 
@@ -286,15 +286,15 @@ export async function checkAndApplyRemote(
 ): Promise<RemoteCheckResult> {
   const clean = String(url || '').trim();
   if (!clean) {
-    return { status: 'disabled', message: 'aiBridge.selectorsUrl nu este setat' };
+    return { status: 'disabled', message: 'aiBridge.selectorsUrl is not set' };
   }
   const before = selectors.info();
-  log('verific ' + clean + ' (activ: v' + before.version + ' — ' + before.source + ')');
+  log('checking ' + clean + ' (active: v' + before.version + ' — ' + before.source + ')');
   try {
     const text = await fetchRemoteSelectorsText(clean);
     const config = parseRemoteConfig(text);
     if (compareVersions(config.version, before.version) <= 0) {
-      log('la zi: remote v' + config.version + ' <= activ v' + before.version);
+      log('up to date: remote v' + config.version + ' <= active v' + before.version);
       return {
         status: 'up-to-date',
         version: config.version,
@@ -315,9 +315,9 @@ export async function checkAndApplyRemote(
   } catch (e: any) {
     let msg = e?.message ?? String(e);
     if (e?.name === 'AbortError' || e?.name === 'TimeoutError') {
-      msg = 'timeout la descărcarea Gist-ului';
+      msg = 'timeout downloading the Gist';
     }
-    log('EROARE la verificarea remote: ' + msg);
+    log('ERROR checking remote: ' + msg);
     return {
       status: 'error',
       message: msg,

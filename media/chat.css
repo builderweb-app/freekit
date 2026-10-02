@@ -962,3 +962,167 @@ body {
     opacity: 0.35;
   }
 }
+
+/* ===== v1.9.0: conversații multiple (bara de conversații) ===== */
+#conv-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(255, 255, 255, 0.08));
+  flex-shrink: 0;
+}
+
+#conversation {
+  flex: 1;
+  min-width: 0;
+  background: var(--vscode-dropdown-background);
+  color: var(--vscode-dropdown-foreground);
+  border: 1px solid var(--vscode-dropdown-border, transparent);
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+#conversation:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+#conv-new,
+#conv-delete {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 13px;
+  line-height: 1;
+}
+
+#conv-new:hover,
+#conv-delete:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(255, 255, 255, 0.1));
+}
+
+/* ===== v1.9.0: acțiuni pe mesajele user (✐ edit / ᛉ fork / ⟲ restore) ===== */
+.msg-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.msg.user:hover .msg-actions,
+.msg.user:focus-within .msg-actions {
+  opacity: 1;
+}
+
+.msg-actions .restore-btn {
+  margin-left: 0;
+}
+
+.edit-btn,
+.fork-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.75;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.edit-btn:hover,
+.fork-btn:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, rgba(255, 255, 255, 0.1));
+}
+
+/* ===== v1.9.0: editorul inline de prompt (✐) ===== */
+.edit-area {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.edit-textarea {
+  width: 100%;
+  min-height: 48px;
+  max-height: 220px;
+  resize: vertical;
+  background: rgba(0, 0, 0, 0.25);
+  color: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+  outline: none;
+}
+
+.edit-textarea:focus {
+  border-color: var(--vscode-focusBorder);
+}
+
+.edit-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.edit-save,
+.edit-cancel {
+  padding: 4px 12px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.edit-save {
+  background: #2ea043;
+  color: #fff;
+}
+
+.edit-save:hover:not(:disabled) {
+  background: #3fb950;
+}
+
+.edit-save:disabled,
+.edit-cancel:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.edit-cancel {
+  background: rgba(255, 255, 255, 0.16);
+  color: inherit;
+}
+
+.edit-cancel:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.26);
+}

@@ -23,6 +23,7 @@ import {
 } from './indexer';
 import { ollamaBaseUrl, OLLAMA_DOWNLOAD_URL } from './providers/ollama';
 import { getProviderStatus, ollamaInstallState } from './providers';
+import { ReportingService } from './reporting';
 
 /** v0.3.0 (P0.1): opțiunile browserului, citite live din setări. */
 function browserOptionsFromConfig(ctx: vscode.ExtensionContext) {
@@ -140,6 +141,83 @@ export async function activate(ctx: vscode.ExtensionContext) {
   );
   ctx.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, chatView)
+  );
+
+  // v2.4.0 — integrare self-maintaining cu serverul de raportare:
+  // register la prima pornire, health check periodic (selectorii stricați
+  // sunt reparați local sau raportați) și fetch periodic de selectori.
+  const reporting = new ReportingService(ctx, {
+    browser,
+    notify: (text) => chatView.postNotice(text)
+  });
+  reporting.start();
+  ctx.subscriptions.push(reporting);
+
+  // v2.4.0: starea integrării + acțiuni de control
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand('freekit.reportingStatus', async () => {
+      const text = 'Freekit reporting — ' + reporting.client.statusText();
+      logLine('reporting', 'status: ' + reporting.client.statusText());
+      const pick = await vscode.window.showInformationMessage(
+        text,
+        'Run health check now',
+        'Reset registration'
+      );
+      if (pick === 'Run health check now') {
+        await vscode.commands.executeCommand('freekit.reportingCheckNow');
+      } else if (pick === 'Reset registration') {
+        await vscode.commands.executeCommand('freekit.reportingReset');
+      }
+    })
+  );
+
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand('freekit.reportingCheckNow', async () => {
+      const client = reporting.client;
+      if (!client.enabled) {
+        vscode.window.showWarningMessage(
+          'Freekit: reporting is disabled (freekit.reporting.enabled).'
+        );
+        return;
+      }
+      const key = await client.ensureRegistered();
+      if (!key) {
+        vscode.window.showWarningMessage(
+          'Freekit: could not reach the reporting server (' +
+            client.endpoint +
+            '). Check your connection or the freekit.reporting.endpoint setting.'
+        );
+        return;
+      }
+      const out = await reporting.runHealthCheck(true);
+      if (!out.checkedProviders.length) {
+        vscode.window.showInformationMessage(
+          'Freekit: no web AI chat tab is open, so there was nothing to check — open a provider in Chrome first.'
+        );
+        return;
+      }
+      vscode.window.showInformationMessage(
+        'Freekit: health check done — ' +
+          out.checkedProviders.join(', ') +
+          '. ' +
+          (out.failures.length
+            ? out.failures.length + ' selector failure(s) were reported to the server.'
+            : 'All selectors are healthy.')
+      );
+    })
+  );
+
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand('freekit.reportingReset', async () => {
+      const pick = await vscode.window.showWarningMessage(
+        'Freekit: remove the local reporting identity? The extension will register again as a new installation on the next start.',
+        { modal: true },
+        'Reset'
+      );
+      if (pick !== 'Reset') return;
+      await reporting.client.resetIdentity();
+      vscode.window.showInformationMessage('Freekit: reporting identity reset.');
+    })
   );
 
   // v1.6.0: limba voice input (butonul 🎤 din chat)

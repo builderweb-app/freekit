@@ -69,7 +69,7 @@ export interface SelectorConfig {
   providers: Record<string, ProviderConfig>;
 }
 
-export type LearnHow = 'alternative' | 'fingerprint' | 'ai';
+export type LearnHow = 'alternative' | 'fingerprint' | 'ai' | 'server';
 
 export interface LearnedSelector {
   provider: string;

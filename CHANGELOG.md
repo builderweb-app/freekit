@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.4.0 — 2026-10-03
+
+**The selectors now maintain themselves** — beyond the local healer and the Gist, the extension talks to the Freekit reporting server: it reports a selector that it could not repair locally, and it receives the repairs other clients reported. A site redesign found on one machine becomes a fix for everyone, without an extension release.
+
+### Reporting client (`src/reporting.ts`, new)
+
+- **`ReportingClient`** — anonymous registration (`POST /api/v1/extensions/register`) with a random `installationId` kept in globalState, exchanged once for an `apiKey` (idempotent; the key is re-used until reset), best-effort `report()` (`POST /api/v1/reports`, `x-freekit-key` header) and `fetchUpdatedSelectors()` (`GET /api/v1/selectors?since=<revision>`), with a `304` handled as "up to date". Every call has a 10 s timeout and never throws — the extension behaves exactly as before when the server is unreachable.
+- **Health check** — for each provider that already has a tab open in the Freekit Chrome profile, `input` and `newChat` are verified; a missing slot is repaired **locally first** (fingerprint healer → AI finder) and only reported when that also fails, with `failureType` `not_found` (absent) or `hidden` (present but invisible). Chrome is never started just to run the check, and a wrong tab is never probed.
+- **Server selectors are applied** — the list returned by `/api/v1/selectors` is mapped to providers by domain (protocol/port/path/`www`-insensitive) and passed through the normal `selectors.learn()` validation, so fragile, blacklisted and UI-chrome selectors are rejected exactly as they are for local repairs. A new `server` value on `LearnHow` records their origin.
+- **`ReportingService`** — schedules registration at startup, the health check every 6 h and the selector fetch every 24 h, with timers disposed with the extension; new selectors are announced in the chat.
+
+### Settings & commands
+
+- **`freekit.reporting.enabled`** (master switch), **`freekit.reporting.endpoint`**, **`freekit.reporting.shareDomSnapshot`** (off by default — sends a cleaned DOM snapshot with a report), **`freekit.reporting.healthCheck`**, **`freekit.reporting.healthCheckIntervalHours`** (6) and **`freekit.reporting.selectorsIntervalHours`** (24).
+- **`Freekit: Reporting Status`** (state + run/reset shortcuts), **`Freekit: Run Selector Health Check`** (run now, e.g. right after a redesign) and **`Freekit: Reset Reporting Registration`** (new identity).
+
 ## 2.3.1 — 2026-10-02
 
 **The dropdown menus are as wide as the chat** — the model and thinking menus no longer lock to a fixed 210/240 px width. They stretch across the whole composer row, so long model names ellipsize on a single line instead of wrapping onto two.

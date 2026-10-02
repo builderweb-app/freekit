@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen, Kimi) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.3.1",
+  "version": "2.4.0",
   "publisher": "builderweb",
   "homepage": "https://builderweb.app/agent",
   "icon": "media/icon.png",
@@ -137,6 +137,21 @@
         "command": "freekit.clearIndex",
         "title": "Freekit: Clear Index",
         "icon": "$(trash)"
+      },
+      {
+        "command": "freekit.reportingStatus",
+        "title": "Freekit: Reporting Status",
+        "icon": "$(cloud)"
+      },
+      {
+        "command": "freekit.reportingCheckNow",
+        "title": "Freekit: Run Selector Health Check",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "freekit.reportingReset",
+        "title": "Freekit: Reset Reporting Registration",
+        "icon": "$(key)"
       }
     ],
     "configuration": {
@@ -338,6 +353,40 @@
           },
           "default": [],
           "markdownDescription": "Extra directory/file **names** to exclude from indexing, on top of the built-in list (`node_modules`, `.git`, `out`, `dist`, `build`, `.next`, `coverage`, `venv`, `target`, lockfiles, minified files…). Example: `[\"fixtures\", \"snapshots\"]`."
+        },
+        "freekit.reporting.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Master switch for the **Freekit reporting server** integration. When on, the extension registers once (anonymous installation id), periodically checks that the web-AI selectors still work, tries to repair them locally first, and — only if the repair fails — reports the broken selector so a fix can be published to everyone. No code, files or messages are ever sent; disable to opt out completely."
+        },
+        "freekit.reporting.endpoint": {
+          "type": "string",
+          "default": "https://api.builderweb.app",
+          "markdownDescription": "Base URL of the reporting server (the extension calls `/api/v1/extensions/register`, `/api/v1/selectors` and `/api/v1/reports` under it). Change it only for self-hosted servers or testing."
+        },
+        "freekit.reporting.shareDomSnapshot": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "When reporting a broken selector, also send a **cleaned DOM snapshot** of the page (scripts, styles, media and input values are stripped, truncated to a few thousand characters). It makes fixing the selector far easier, but it does send a fragment of the page's HTML — off by default."
+        },
+        "freekit.reporting.healthCheck": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Periodically verifies the selectors of providers that **already have a tab open** in the Freekit Chrome profile. Missing selectors are repaired locally (fingerprint + AI finder) first; only if that also fails is a report sent. Chrome is never started just for this check."
+        },
+        "freekit.reporting.healthCheckIntervalHours": {
+          "type": "number",
+          "default": 6,
+          "minimum": 1,
+          "maximum": 720,
+          "markdownDescription": "Hours between two automatic selector health checks (default **6**). The first check runs shortly after startup."
+        },
+        "freekit.reporting.selectorsIntervalHours": {
+          "type": "number",
+          "default": 24,
+          "minimum": 1,
+          "maximum": 720,
+          "markdownDescription": "Hours between two automatic fetches of repaired selectors from the server (default **24**). Newly received selectors are applied immediately and used on the next message."
         }
       }
     }

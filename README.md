@@ -27,6 +27,7 @@ Connect web AI chats (**DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen, Kimi**
 - 🍪 **Consent popups closed automatically** — cookie banners and terms/OK dialogs are accepted for you (safe exact-match on 3 confidence tiers; “Reject / Only necessary / Customize” are never clicked); scans include iframes and run after page loads, before New Chat and right before typing — toggle with `freekit.autoAcceptPopups`
 - ☁️ **Remote selector fixes** — publish repaired selectors to a public GitHub Gist (`freekit.selectorsUrl`); every client picks them up without an extension update (bundled selectors stay as fallback)
 - 🧠 **AI-powered selector discovery** — when the classic healer fails on a redesigned site, a cleaned DOM snapshot goes to the local Ollama model; the proposed selectors are validated in the live page, applied immediately and saved to `selectors-user.json` (global storage)
+- ☁️ **Self-maintaining selectors (reporting server)** — the extension registers once with `api.builderweb.app`, checks every 6 h that the providers you have open still work, repairs a broken selector **locally first** (fingerprint healer → AI finder) and only reports it if that fails, so a fix can be published to everyone; every 24 h it pulls the repairs other clients reported and applies them without an extension update. Fully optional: no code, files or messages are ever sent — see `freekit.reporting.enabled` and `freekit.reporting.shareDomSnapshot`
 - 🦙 **Ollama mode** — fully local, no browser required; the model chip's **Local · Ollama** section shows your installed models (with their disk size) **and what your machine can actually run**: Freekit detects RAM and VRAM (`nvidia-smi`, the Windows registry, `system_profiler` or Linux sysfs), recommends the best-fitting models (with the GPU/CPU split spelled out), lets you **download** a missing recommendation with one click (`ollama pull`, live progress, cancellable) and hides an **Install Ollama** row that opens the official download page when nothing is installed yet (`Freekit: Install Ollama`) — the same hardware summary is printed by `Freekit: Show Provider Status`
 - 🌙 **Hidden Chrome** — runs completely in the background (minimized; on Windows with **no taskbar button** and absent from Alt+Tab), never steals focus; it automatically comes on screen when a provider asks for **login or a CAPTCHA** (and hides again when you're done), or bring it back anytime with 👁 Show Chrome
 
@@ -62,6 +63,9 @@ Connect web AI chats (**DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen, Kimi**
 | `Freekit: Index Workspace` | Build / update the local semantic index (embeddings via Ollama, incremental, cancellable, with progress) |
 | `Freekit: Index Status` | Show the index: model, dimensions, indexed files, chunks, storage file, size and last update |
 | `Freekit: Clear Index` | Delete the workspace's semantic index from globalStorage (confirmation required) |
+| `Freekit: Reporting Status` | Show the reporting integration: registration, endpoint, selectors revision, last health check / fetch — with shortcuts to run a check now or reset the identity |
+| `Freekit: Run Selector Health Check` | Immediately check the selectors of the providers that have a tab open (repair locally, report only if the repair fails) |
+| `Freekit: Reset Reporting Registration` | Remove the local reporting identity (apiKey + installation id); the extension registers as a new installation on the next start |
 
 ## Settings
 
@@ -97,6 +101,12 @@ Connect web AI chats (**DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen, Kimi**
 | `freekit.semanticIndex.maxFileKb` | `256` | Skip files larger than this (KB) when indexing |
 | `freekit.semanticIndex.topK` | `8` | Number of chunks returned by `search_semantic` (1–25) |
 | `freekit.semanticIndex.exclude` | `[]` | Extra directory/file names to exclude from indexing |
+| `freekit.reporting.enabled` | `true` | Master switch for the reporting-server integration (anonymous registration + selector health checks + selector fixes) |
+| `freekit.reporting.endpoint` | `https://api.builderweb.app` | Base URL of the reporting server |
+| `freekit.reporting.shareDomSnapshot` | `false` | Also send a cleaned DOM snapshot (scripts/styles/media/input values stripped) when reporting a broken selector |
+| `freekit.reporting.healthCheck` | `true` | Periodically verify the selectors of providers that already have a tab open; repair locally first, report only if the repair fails |
+| `freekit.reporting.healthCheckIntervalHours` | `6` | Hours between two automatic selector health checks |
+| `freekit.reporting.selectorsIntervalHours` | `24` | Hours between two automatic fetches of repaired selectors from the server |
 
 ## Semantic code search
 
@@ -122,6 +132,17 @@ Selector repairs can reach every client without shipping a new extension version
 3. Set `freekit.selectorsUrl` to the Gist **raw** URL, e.g. `https://gist.githubusercontent.com/<user>/<id>/raw/selectors.json`.
 
 Freekit then checks on startup — rate-limited to once every 24 h — and on demand via `Freekit: Update Selectors`, applying the config only when its `version` is newer than the active one. The update is validated, merged over the bundled config, cached locally, and local auto-repairs for the slots it touches are replaced by the curated fix. Any failure (invalid JSON, HTTP error, timeout) leaves the current config in place.
+
+## Reporting server (self-maintaining)
+
+Freekit can feed a central reporting server (`https://api.builderweb.app` by default) so a site redesign discovered on one machine turns into a fix for everybody — without waiting for an extension release.
+
+- **Register once** — on first start the extension creates a random **installation id** (globalStorage) and exchanges it for an `apiKey` (`POST /api/v1/extensions/register`). The call is idempotent: the key is cached and re-used until you run `Freekit: Reset Reporting Registration`.
+- **Health check every 6 h** (`freekit.reporting.healthCheckIntervalHours`) — for every provider that **already has a tab open** in the Freekit Chrome profile, the `input` and `newChat` selectors are verified. Chrome is never started just for this. Broken slots are repaired **locally first** (fingerprint healer → AI finder); only if that also fails is a report sent (`POST /api/v1/reports`) with the domain, the failing selector, the failure type (`not_found` / `hidden`) and the page URL.
+- **Selector updates every 24 h** (`freekit.reporting.selectorsIntervalHours`) — the extension asks `GET /api/v1/selectors?since=<revision>`, applies anything new (validated by the same fragile/blacklist rules as local repairs) and remembers the revision, so a `304` is the normal, cheap answer.
+- **Privacy** — nothing from your code, prompts or files is ever sent. The only optional payload is the **cleaned DOM snapshot** (scripts, styles, media and input values are stripped, truncated) and it is **off by default** (`freekit.reporting.shareDomSnapshot`). Set `freekit.reporting.enabled` to `false` to opt out completely.
+
+Use `Freekit: Reporting Status` for the current state (registration, revision, last check), `Freekit: Run Selector Health Check` to run a check immediately (e.g. right after a site redesign) and `Freekit: Reset Reporting Registration` to start over with a new identity.
 
 ## MCP servers
 

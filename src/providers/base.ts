@@ -369,25 +369,6 @@ export async function clickStop(page: Page, providerId: string): Promise<boolean
 }
 
 /**
- * FAZA G: aduce tab-ul în prim-plan FĂRĂ să ridice fereastra Chrome peste VS Code.
- * `page.bringToFront()` (Playwright) ridică fereastra la nivel de OS;
- * CDP `Page.bringToFront` doar activează tab-ul din Chrome.
- * FIX 2: fără fallback la page.bringToFront() — pe Windows readucea fereastra în față.
- */
-export async function activateTab(page: Page): Promise<void> {
-  // Doar CDP, fără page.bringToFront()
-  try {
-    const cdp = await page.context().newCDPSession(page);
-    await cdp.send('Page.bringToFront');
-    await cdp.detach();
-  } catch (e: any) {
-    log('activateTab failed: ' + e.message);
-    // NU fallback la page.bringToFront() — acela ridică fereastra
-  }
-  await sleep(500);
-}
-
-/**
  * Trimitere generică: scrie în input (v0.8.0: tastare "umană" caracter-cu-caracter
  * pe mesaje scurte, insertText pe cele lungi — nu `type`, altfel \n devine Enter),
  * apasă Enter, apoi așteaptă ca ultimul răspuns să se stabilizeze (~2s neschimbat).
@@ -503,7 +484,11 @@ export async function sendAndWait(
   cfg: SendConfig
 ): Promise<string> {
   const { providerId, label, signal } = cfg;
-  await activateTab(page);
+
+  // v2.0.5: NU mai aducem tab-ul/fereastra în prim-plan la fiecare mesaj — asta
+  // făcea fereastra Chrome să sară peste VS Code. Randarea rămâne activă în
+  // fundal prin flag-urile de lansare + override-ul de vizibilitate (browser.ts).
+  // Aducerea în față rămâne doar pentru login/CAPTCHA (BrowserManager.show()).
 
   // v1.8.0: închide popup-urile de consimțământ care ar putea bloca căsuța de input
   const popupsClosed = await autoAcceptPopups(page, { log }).catch(() => []);

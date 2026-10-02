@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.0.5 — 2026-10-02
+
+**Chrome stays in the background** — the window no longer jumps in front of VS Code on every message sent or received.
+
+- **No more bring-to-front on every send** — `sendAndWait` (`src/providers/base.ts`) used to activate the tab through CDP `Page.bringToFront`, which on Windows also restores a minimized window to the front. That call — and the now-unused `activateTab` helper — is gone. The window is brought forward **only** for login/CAPTCHA (`BrowserManager.show()` / `showTemporarily()`), which is unchanged.
+- **Anti-throttling launch flags** — Chrome now starts with `--disable-features=Translate,MediaRouter,CalculateNativeWinOcclusion` (merged into the existing switch, because Chrome keeps only the last `--disable-features` value) next to the existing `--disable-renderer-backgrounding`, `--disable-backgrounding-occluded-windows` and `--disable-background-timer-throttling`. Rendering, timers and networking stay active while the window is minimized.
+- **Page-level visibility override** — new `enableVisibilityOverride()` in `src/browser.ts`, called from `ensureOpen()`, keeps the page "visible and focused" from the site's point of view: CDP `Emulation.setFocusEmulationEnabled` + `Page.setWebLifecycleState: active`, plus a `document.visibilityState` / `document.hidden` override for the current document and future navigations (CDP has no direct visibility override). The CDP session is kept attached on purpose — Chrome resets emulation overrides when the session detaches. Everything is best-effort: a failure is only logged and never blocks a message.
+- **Chrome goes back to the background after login** — when a login error brings the window forward (the v2.0.4 Retry card), the next message hides it again (`src/chatView.ts`), so the window does not stay visible after you sign in.
+
+> **Update note:** launch flags only apply to a Chrome instance started after the update. If Chrome was already running on the CDP port, run **Freekit: Close Browser** once so it relaunches with the new flags.
+
 ## 2.0.4 — 2026-10-02
 
 **Better login UX** — when a provider needs you to sign in, the chat no longer shows a bare “could not find the input box” error. The Chrome window comes to the front and a **Retry** button appears right in the chat.

@@ -1,4 +1,4 @@
-import { chromium, BrowserContext, Page } from 'playwright';
+import { chromium, BrowserContext, Page, CDPSession } from 'playwright';
 import * as vscode from 'vscode';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
@@ -150,6 +150,63 @@ export async function detectBrowserPath(override?: string): Promise<string | nul
   ]);
 }
 
+/* =========================================================================
+ * v2.0.5 — ANTI-THROTTLING LA NIVEL DE PAGINĂ
+ * Fereastra Chrome stă minimizată în fundal, iar site-urile SPA își opresc
+ * streaming-ul și timer-ele când `document.visibilityState` devine `hidden`
+ * sau când pagina nu are focus. Din cauza asta, versiunile anterioare ridicau
+ * fereastra în față la fiecare mesaj. Aici forțăm pagina să se creadă
+ * vizibilă/focusată — per pagină, best-effort.
+ * ========================================================================= */
+
+/** Rulează ÎN PAGINĂ: raportează mereu pagina ca vizibilă și focusată. */
+const forceVisibleInPage = (): void => {
+  try {
+    Object.defineProperty(Document.prototype, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible'
+    });
+    Object.defineProperty(Document.prototype, 'hidden', {
+      configurable: true,
+      get: () => false
+    });
+  } catch {
+    /* suprapunerea nu e permisă — ignorăm */
+  }
+};
+
+/** Sesiunile CDP rămân atașate: Chrome resetează suprapunerile la detașare. */
+const visibilitySessions = new WeakMap<Page, CDPSession>();
+/** Paginile cu init script-ul deja instalat (anti-duplicare). */
+const visibilityScripts = new WeakSet<Page>();
+
+/**
+ * v2.0.5: forțează pagina să se comporte ca „vizibilă și activă" chiar și cu
+ * fereastra minimizată. CDP nu expune un override direct al lui
+ * `visibilityState` (nu există `Emulation.setPageVisibilityOverride`), așa că
+ * folosim `Emulation.setFocusEmulationEnabled` (pagina se crede focusată și
+ * activă), `Page.setWebLifecycleState: active` (împotriva înghețului) și un
+ * override JS pentru `document.visibilityState` / `document.hidden`.
+ */
+export async function enableVisibilityOverride(pg: Page): Promise<void> {
+  if (visibilitySessions.has(pg)) return;
+  try {
+    if (!visibilityScripts.has(pg)) {
+      visibilityScripts.add(pg);
+      await pg.addInitScript(forceVisibleInPage);
+      await pg.evaluate<void, undefined>(forceVisibleInPage, undefined);
+    }
+    const cdp = await pg.context().newCDPSession(pg);
+    await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+    await cdp.send('Page.setWebLifecycleState', { state: 'active' });
+    // păstrăm sesiunea deschisă intenționat (vezi comentariul de mai sus)
+    visibilitySessions.set(pg, cdp);
+    log('visibility override activat (pagina rămâne activă în fundal)');
+  } catch (e: any) {
+    log('visibility override a eșuat (non-fatal): ' + (e?.message ?? String(e)));
+  }
+}
+
 export class BrowserManager {
   private context?: BrowserContext;
   private page?: Page;
@@ -214,9 +271,14 @@ export class BrowserManager {
       '--no-first-run',
       '--no-default-browser-check',
       // Reduce zgomotul
-      '--disable-features=Translate,MediaRouter',
+      // v2.0.5: CalculateNativeWinOcclusion oprește detecția de ocluzie de pe
+      // Windows (fereastra minimizată nu mai e tratată ca ascunsă). Stă în
+      // ACELAȘI --disable-features: Chrome păstrează doar ultima valoare a
+      // flag-ului, deci un al doilea --disable-features ar re-activa Translate.
+      '--disable-features=Translate,MediaRouter,CalculateNativeWinOcclusion',
       '--disable-background-networking',
-      // Păstrează randarea activă (important!)
+      // v2.0.5: păstrează randarea/timer-ele active cât fereastra e în fundal —
+      // de-aia NU mai e nevoie s-o aducem în față la fiecare mesaj.
       '--disable-renderer-backgrounding',
       '--disable-backgrounding-occluded-windows',
       '--disable-background-timer-throttling',
@@ -248,6 +310,8 @@ export class BrowserManager {
       !this.page.isClosed() &&
       (!preferHost || this.page.url().includes(preferHost))
     ) {
+      // v2.0.5: reafirmă anti-throttling-ul (ieftin — no-op dacă e deja activ)
+      await enableVisibilityOverride(this.page);
       return this.page;
     }
 
@@ -279,16 +343,19 @@ export class BrowserManager {
           (p) => p.url().startsWith('http') && !p.url().includes('sign_in')
         );
       }
-      this.page =
+      const page =
         existing ?? pages[pages.length - 1] ?? (await this.context.newPage());
+      this.page = page;
       if (launched) {
-        // v1.8.0: aplică starea „în fundal” abia acum — fereastra există, deci
+        // v1.8.0: aplică starea „în fundal" abia acum — fereastra există, deci
         // poate fi minimizată (CDP) și scoasă din taskbar (Windows).
-        await this.applyHiddenState(this.page).catch((e) =>
+        await this.applyHiddenState(page).catch((e) =>
           log('applyHiddenState a eșuat: ' + (e?.message ?? String(e)))
         );
       }
-      return this.page;
+      // v2.0.5: fereastra poate sta în fundal — randarea rămâne activă
+      await enableVisibilityOverride(page);
+      return page;
     } catch (e: any) {
       const msg = 'Chrome connection error: ' + (e?.message ?? String(e));
       vscode.window.showErrorMessage(msg);

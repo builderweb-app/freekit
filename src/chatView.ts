@@ -271,6 +271,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private attachments: Attachment[] = [];
   /** v2.0.4: ultimul prompt trimis — folosit de butonul Retry din cardul de login. */
   private lastUserText = '';
+  /** v2.0.5: Chrome a fost adus automat în față pentru login — îl trimitem înapoi
+   *  în fundal la următorul mesaj (randarea nu mai are nevoie de el vizibil). */
+  private chromeShownForLogin = false;
   /** v0.2.1: aprobă automat toate operațiile care necesită confirmare. */
   private autoApprove = false;
   /** v0.4.0: guard anti-suprapunere pentru verificarea de status. */
@@ -1190,6 +1193,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
       if (!root) throw new Error('You have no folder open in VS Code.');
 
+      // v2.0.5: fereastra adusă în față pentru login se întoarce în fundal la
+      // reluarea mesajului — randarea nu mai are nevoie de ea vizibilă. Dacă
+      // login-ul încă nu a reușit, asistentul de login o readuce imediat în față.
+      if (this.chromeShownForLogin) {
+        this.chromeShownForLogin = false;
+        await this.browser.hideOffscreen().catch(() => undefined);
+      }
+
       // v1.4.0: checkpoint git ÎNAINTE de prompt (rollback manual, un click)
       await this.createCheckpoint(root, msgId, userText);
 
@@ -1665,6 +1676,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // „login required" cu butonul Retry, care reia ultimul prompt.
         log('login required: ' + (e?.message ?? String(e)));
         await this.showChrome().catch(() => {});
+        // v2.0.5: reținem că fereastra e vizibilă din cauza login-ului, ca s-o
+        // ducem înapoi în fundal la reluarea mesajului (după autentificare).
+        this.chromeShownForLogin = true;
         this.post('login_required', e?.message ?? String(e));
       } else {
         log('error: ' + (e?.message ?? String(e)));

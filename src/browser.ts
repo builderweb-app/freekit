@@ -23,9 +23,9 @@ const CHAT_HOSTS = [
  * v0.3.0 (P0.1) — PORTABILITATE
  * Nimic specific utilizatorului nu mai e hardcodat:
  *   - executabilul Chrome/Edge e detectat automat per platformă
- *     (sau setat manual din aiBridge.chromePath)
+ *     (sau setat manual din freekit.chromePath)
  *   - profilul stă în globalStorage-ul extensiei, NU în folderul proiectului
- *   - portul CDP e configurabil (aiBridge.cdpPort, implicit 9222)
+ *   - portul CDP e configurabil (freekit.cdpPort, implicit 9222)
  * ========================================================================= */
 
 /** Opțiunile browserului — injectate din extension.ts (citite live din setări). */
@@ -133,7 +133,7 @@ async function whichAny(names: string[]): Promise<string | null> {
 export async function detectBrowserPath(override?: string): Promise<string | null> {
   if (override) {
     if (await fileExists(override)) return override;
-    log('aiBridge.chromePath nu există pe disc: ' + override + ' — trec la detectare automată');
+    log('freekit.chromePath nu există pe disc: ' + override + ' — trec la detectare automată');
   }
   if (process.platform === 'win32' || process.platform === 'darwin') {
     for (const candidate of platformCandidates()) {
@@ -194,7 +194,7 @@ export class BrowserManager {
     const exe = await detectBrowserPath(opts.chromePath);
     if (!exe) {
       throw new Error(
-        'I could not find Chrome or Edge on this system. Install one of them or set the path manually in the aiBridge.chromePath setting.'
+        'I could not find Chrome or Edge on this system. Install one of them or set the path manually in the freekit.chromePath setting.'
       );
     }
     await fs.mkdir(opts.profileDir, { recursive: true });
@@ -238,7 +238,7 @@ export class BrowserManager {
     }
     throw new Error(
       'Chrome did not respond on port ' + opts.port + ' within 20 seconds ' +
-        '(the port may be occupied by another process — change aiBridge.cdpPort).'
+        '(the port may be occupied by another process — change freekit.cdpPort).'
     );
   }
 
@@ -254,7 +254,7 @@ export class BrowserManager {
     let launched = false;
     if (!(await this.isRunning())) {
       vscode.window.showInformationMessage(
-        'Starting Chrome with the AI Bridge profile (running in the background)...'
+        'Starting Chrome with the Freekit profile (running in the background)...'
       );
       await this.launchChrome();
       launched = true;

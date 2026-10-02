@@ -19,7 +19,7 @@ import {
 import { installMutationTracker, waitForAbort, waitStep } from '../mutation';
 import { autoAcceptPopups } from '../popups';
 
-const log = (msg: string) => console.log('[AI Bridge]', msg);
+const log = (msg: string) => console.log('[Freekit]', msg);
 
 /** Momentele (ms de la trimitere) la care verificăm dacă e nevoie de reparare. */
 const HEAL_CHECKPOINTS = [4000, 9000, 20000, 40000];
@@ -100,7 +100,7 @@ export async function findInput(
       label +
       ' (selectors tried: ' +
       selectors.candidates(providerId, 'input').join(', ') +
-      '). Are you logged in to Chrome with the AI Bridge profile?'
+      '). Are you logged in to Chrome with the Freekit profile?'
   );
 }
 
@@ -646,7 +646,7 @@ interface UploadScanArgs {
 
 /**
  * Rulează ÎN PAGINĂ: alege input[type=file] cel mai apropiat de căsuța de
- * chat (composer) și îl marchează cu data-ai-bridge-fileinput="1".
+ * chat (composer) și îl marchează cu data-freekit-fileinput="1".
  * Acceptă și inputuri ascunse (setInputFiles nu are nevoie de vizibilitate).
  */
 const markUploadInput = (args: UploadScanArgs): boolean => {
@@ -719,7 +719,7 @@ const markUploadInput = (args: UploadScanArgs): boolean => {
   }
 
   if (!best) return false;
-  best.setAttribute('data-ai-bridge-fileinput', '1');
+  best.setAttribute('data-freekit-fileinput', '1');
   return true;
 };
 
@@ -743,7 +743,7 @@ export async function uploadChatFiles(
       return false;
     }
     const loc = page
-      .locator('input[type="file"][data-ai-bridge-fileinput="1"]')
+      .locator('input[type="file"][data-freekit-fileinput="1"]')
       .first();
     await loc.setInputFiles(files, { timeout: 15000 });
     // lăsăm site-ul să proceseze atașamentele înainte de trimiterea textului
@@ -756,9 +756,9 @@ export async function uploadChatFiles(
   } finally {
     try {
       await page.evaluate(() => {
-        const els = document.querySelectorAll('[data-ai-bridge-fileinput]');
+        const els = document.querySelectorAll('[data-freekit-fileinput]');
         for (let i = 0; i < els.length; i++) {
-          els[i].removeAttribute('data-ai-bridge-fileinput');
+          els[i].removeAttribute('data-freekit-fileinput');
         }
       });
     } catch {

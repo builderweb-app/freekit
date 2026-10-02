@@ -6,7 +6,7 @@ const log = (msg: string) => logLine('conv', msg);
 /* =========================================================================
  * v1.9.0 — CONVERSAȚII MULTIPLE (Fork ᛉ + Edit prompt ✐)
  * Fiecare conversație e o listă de mesaje persistată în globalState
- * (`aiBridge.conversations`), cu conversația activă în `aiBridge.activeConversationId`.
+ * (`freekit.conversations`), cu conversația activă în `freekit.activeConversationId`.
  * Edit prompt: trunchiere înainte de mesajul editat + retrimitere.
  * Fork: conversație nouă din toate mesajele până la cel ales (inclusiv) —
  * conversația originală NU se șterge.
@@ -33,8 +33,8 @@ export interface Conversation {
   messages: ConversationMessage[];
 }
 
-const STORAGE_KEY = 'aiBridge.conversations';
-const ACTIVE_KEY = 'aiBridge.activeConversationId';
+const STORAGE_KEY = 'freekit.conversations';
+const ACTIVE_KEY = 'freekit.activeConversationId';
 const MAX_CONVERSATIONS = 50;
 
 /** Default title for a new empty conversation (can be changed on the first prompt). */
@@ -200,7 +200,7 @@ export class ConversationStore {
   }
 
   /**
-   * v1.9.0 (migrare): importă istoricul legacy (aiBridge.history) într-o
+   * v1.9.0 (migrare): importă istoricul legacy (freekit.history) într-o
    * conversație nouă — se întâmplă o singură dată, la prima pornire după update.
    */
   async importLegacy(

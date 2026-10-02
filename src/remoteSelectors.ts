@@ -20,7 +20,7 @@ const log = (msg: string) => logLine('remote', msg);
  * Scop: reparațiile de selectori publicate de developer într-un Gist public
  * ajung la TOȚI clienții fără update de extensie.
  *
- * Flux: aiBridge.selectorsUrl (URL raw Gist) -> fetch (10s timeout) ->
+ * Flux: freekit.selectorsUrl (URL raw Gist) -> fetch (10s timeout) ->
  * validare + sanitizare strictă -> dacă version > versiunea activă =>
  * selectors.ts îl aplică (merge cu configul activ) și îl salvează în
  * cache-ul din globalState. ORICE eroare lasă configul activ neatins —
@@ -38,7 +38,7 @@ const MAX_VERSION_LEN = 40;
 
 /** v0.7.1: verificarea automată de la pornire rulează cel mult o dată pe zi. */
 export const AUTO_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const AUTO_CHECK_STATE_KEY = 'aiBridge.selectorsAutoCheck';
+const AUTO_CHECK_STATE_KEY = 'freekit.selectorsAutoCheck';
 
 export interface RemoteCheckResult {
   status: 'updated' | 'up-to-date' | 'disabled' | 'error';
@@ -286,7 +286,7 @@ export async function checkAndApplyRemote(
 ): Promise<RemoteCheckResult> {
   const clean = String(url || '').trim();
   if (!clean) {
-    return { status: 'disabled', message: 'aiBridge.selectorsUrl is not set' };
+    return { status: 'disabled', message: 'freekit.selectorsUrl is not set' };
   }
   const before = selectors.info();
   log('checking ' + clean + ' (active: v' + before.version + ' — ' + before.source + ')');

@@ -383,7 +383,7 @@ YOU: {"tool": "run_npm", "args": {"action": "script", "script": "test"}}
 - Paths relative to workspace root.
 - When the task is complete, respond with PLAIN TEXT (not JSON).
 - After every edit_file / write_file / write_files the system AUTO-VERIFIES the project (astro check / tsc / build). If you receive "VERIFICATION FAILED", fix the ROOT CAUSE — you get max 3 auto-repair attempts; if it still fails, your changes are ROLLED BACK automatically. Never claim success while a verification is failing.
-- Long-running commands (dev / start / serve / watch / preview — e.g. "npm run dev", "vite", "nodemon") start the server in a VISIBLE VS Code terminal automatically (the user watches the live output there): you receive "✅ Server started in the VS Code TERMINAL …" + the live URL + the first seconds of output IMMEDIATELY. NEVER wait for such a command and NEVER re-run it; the server keeps running until stopped (Ctrl+C in its terminal or the command "AI Bridge: Stop Dev Servers"). If the early output shows a startup error (port in use, syntax error) — or you are told the process exited — fix the root cause and re-run the command once.
+- Long-running commands (dev / start / serve / watch / preview — e.g. "npm run dev", "vite", "nodemon") start the server in a VISIBLE VS Code terminal automatically (the user watches the live output there): you receive "✅ Server started in the VS Code TERMINAL …" + the live URL + the first seconds of output IMMEDIATELY. NEVER wait for such a command and NEVER re-run it; the server keeps running until stopped (Ctrl+C in its terminal or the command "Freekit: Stop Dev Servers"). If the early output shows a startup error (port in use, syntax error) — or you are told the process exited — fix the root cause and re-run the command once.
 
 ## WHEN TO USE PLAIN TEXT (no tool)
 - User asks a question ("what does this do?", "explain X")
@@ -420,7 +420,7 @@ Tools:
 9. read_files(paths) — batch read: up to 12 files in ONE call
 10. write_files(files) — array of {"path": "...", "content": "..."}; ONE call for ALL files
 11. project_info()
-12. search_semantic(query) — find code by MEANING (e.g. "where do we validate login"); works only if the workspace was indexed (command "AI Bridge: Index Workspace")
+12. search_semantic(query) — find code by MEANING (e.g. "where do we validate login"); works only if the workspace was indexed (command "Freekit: Index Workspace")
 
 For git you may also use the short names "git_status", "git_diff", "git_log", "git_commit", "git_branch", "git_revert".
 
@@ -856,7 +856,7 @@ async function runCommand(command: string): Promise<ToolResult> {
  * Pornește comanda într-un terminal dedicat, VIZIBIL (utilizatorul vede
  * output-ul live și poate apăsa Ctrl+C), așteaptă doar primele ~3s de output
  * (URL + erorile rapide de pornire ajung la AI) și lasă serverul pornit până
- * la Ctrl+C sau comanda „AI Bridge: Stop Dev Servers”.
+ * la Ctrl+C sau comanda „Freekit: Stop Dev Servers”.
  * ========================================================================= */
 
 async function runDevServerCommand(
@@ -1008,7 +1008,7 @@ async function runNpmTool(
       desc,
       '> ' + desc +
         (longRunning
-          ? '\n(development server — starts in a VISIBLE VS Code TERMINAL: you immediately get the URL + the first seconds of output; it stays running until Ctrl+C or “AI Bridge: Stop Dev Servers”)'
+          ? '\n(development server — starts in a VISIBLE VS Code TERMINAL: you immediately get the URL + the first seconds of output; it stays running until Ctrl+C or “Freekit: Stop Dev Servers”)'
           : '')
     ))
   ) {
@@ -1067,7 +1067,7 @@ async function projectInfoTool(root: string): Promise<ToolResult> {
  * v1.10.0 — search_semantic: căutare de cod după SENS
  * Folosește indexul semantic local (embeddings Ollama, vezi src/indexer).
  * E read-only (fără aprobare). Dacă indexul lipsește, întoarce un mesaj clar
- * care îi spune AI-ului să ruleze comanda „AI Bridge: Index Workspace".
+ * care îi spune AI-ului să ruleze comanda „Freekit: Index Workspace".
  * ========================================================================= */
 
 async function searchSemanticTool(
@@ -1085,7 +1085,7 @@ async function searchSemanticTool(
     return {
       ok: false,
       error:
-        'Semantic search is disabled (setting aiBridge.semanticIndex.enabled). Use search_files instead.'
+        'Semantic search is disabled (setting freekit.semanticIndex.enabled). Use search_files instead.'
     };
   }
   const text = await formatSearchResults(root, q);

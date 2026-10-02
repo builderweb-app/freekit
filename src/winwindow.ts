@@ -38,7 +38,7 @@ using System;
 using System.Text;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
-public class AiBridgeWin {
+public class FreekitWin {
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lp);
   public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint procId);
@@ -91,21 +91,21 @@ function Get-Descendants([int]$Root) {
 }
 
 $desc = Get-Descendants -Root $RootPid
-$hwnd = [AiBridgeWin]::FindMainWindow([int[]]$desc)
+$hwnd = [FreekitWin]::FindMainWindow([int[]]$desc)
 if ($hwnd -eq [IntPtr]::Zero) {
   Write-Output (@{ ok = $false; error = 'no-window' } | ConvertTo-Json -Compress)
   exit 0
 }
 
-$ex = [AiBridgeWin]::GetWindowLong($hwnd, -20)
+$ex = [FreekitWin]::GetWindowLong($hwnd, -20)
 if ($Action -eq 'hide') {
   $new = ($ex -bor 0x80) -band (-bnot 0x40000)     # + WS_EX_TOOLWINDOW, - WS_EX_APPWINDOW
 } else {
   $new = $ex -band (-bnot 0x80)                    # - WS_EX_TOOLWINDOW
 }
-[void][AiBridgeWin]::SetWindowLong($hwnd, -20, $new)
-[void][AiBridgeWin]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, 0, 0, $SWP)
-$ex2 = [AiBridgeWin]::GetWindowLong($hwnd, -20)
+[void][FreekitWin]::SetWindowLong($hwnd, -20, $new)
+[void][FreekitWin]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, 0, 0, $SWP)
+$ex2 = [FreekitWin]::GetWindowLong($hwnd, -20)
 Write-Output ('{"ok":true,"hwnd":"0x' + $hwnd.ToInt64().ToString('X') + '","exBefore":' + $ex + ',"exAfter":' + $ex2 + '}')
 `;
 
@@ -114,7 +114,7 @@ let scriptPath: string | null = null;
 /** Scrie scriptul PS în %TEMP% (o singură dată per proces) și întoarce calea. */
 function ensureScript(): string {
   if (scriptPath && fs.existsSync(scriptPath)) return scriptPath;
-  const dir = path.join(os.tmpdir(), 'ai-bridge-win');
+  const dir = path.join(os.tmpdir(), 'freekit-win');
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, 'winwindow-v' + SCRIPT_VERSION + '.ps1');
   fs.writeFileSync(file, PS_SCRIPT, 'utf8');

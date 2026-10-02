@@ -17,7 +17,7 @@ const log = (msg: string) => logLine('stt', msg);
  * De ce whisper.cpp direct (nu nodejs-whisper): nodejs-whisper construiește
  * whisper.cpp prin CMake la runtime (necesită toolchain de build); folosim
  * binarele prebuilt oficiale ale ACELUIAȘI motor + modelul ggml, descărcate
- * o singură dată în globalStorage (comanda „AI Bridge: Setup Local Whisper”).
+ * o singură dată în globalStorage (comanda „Freekit: Setup Local Whisper”).
  * ========================================================================= */
 
 /** Asset-uri pinnuite (release stabil whisper.cpp v1.9.2, build BLAS x64). */
@@ -47,7 +47,7 @@ export interface SttResult {
   hints?: string[];
 }
 
-/** Limba setării aiBridge.sttLanguage → codul whisper.cpp. */
+/** Limba setării freekit.sttLanguage → codul whisper.cpp. */
 export function mapSttLanguage(value: string): string {
   const v = String(value || '').toLowerCase();
   if (v.startsWith('ro')) return 'ro';
@@ -156,7 +156,7 @@ async function whichLookup(name: string): Promise<string | undefined> {
 export async function resolveWhisper(
   globalStorageRoot: string
 ): Promise<WhisperAssets> {
-  const cfg = vscode.workspace.getConfiguration('aiBridge');
+  const cfg = vscode.workspace.getConfiguration('freekit');
   const cliSetting = String(cfg.get<string>('whisperCliPath', '') || '').trim();
   const modelSetting = String(cfg.get<string>('whisperModelPath', '') || '').trim();
 
@@ -185,7 +185,7 @@ export async function resolveWhisper(
   let cliPath = firstExisting(cliCandidates);
   let source =
     cliSetting && cliPath === cliSetting
-      ? 'setarea aiBridge.whisperCliPath'
+      ? 'setarea freekit.whisperCliPath'
       : 'detectat automat';
   if (!cliPath) {
     const fromPath = await whichLookup('whisper-cli');
@@ -208,8 +208,8 @@ export async function resolveWhisper(
 
   if (!cliPath || !modelPath) {
     const hints: string[] = [
-      'Rulează comanda „AI Bridge: Setup Local Whisper” (descarcă whisper.cpp + modelul ggml-base o singură dată, ~160 MB).',
-      'Sau setează manual aiBridge.whisperCliPath și aiBridge.whisperModelPath.'
+      'Rulează comanda „Freekit: Setup Local Whisper” (descarcă whisper.cpp + modelul ggml-base o singură dată, ~160 MB).',
+      'Sau setează manual freekit.whisperCliPath și freekit.whisperModelPath.'
     ];
     if (!cliPath) {
       return { ok: false, error: 'Whisper CLI (whisper-cli) nu a fost găsit.', hints };
@@ -366,7 +366,7 @@ export async function transcribeAudioFile(
   const timeoutMs = Math.max(10_000, opts.timeoutMs ?? 180_000);
   const lang = mapSttLanguage(opts.language);
 
-  const dir = path.join(os.tmpdir(), 'ai-bridge-stt');
+  const dir = path.join(os.tmpdir(), 'freekit-stt');
   fs.mkdirSync(dir, { recursive: true });
   const outBase = path.join(
     dir,

@@ -17,7 +17,7 @@ const log = (msg: string) => logLine('mutation', msg);
 /** Rulează ÎN PAGINĂ (serializat): instalează (o dată) tracker-ul de mutații. */
 const installTrackerInPage = (reset: boolean): boolean => {
   const w = window as any;
-  let t = w.__aibridgeTracker;
+  let t = w.__freekitTracker;
   if (!t || !t.observer) {
     t = { lastMutation: Date.now() };
     try {
@@ -33,7 +33,7 @@ const installTrackerInPage = (reset: boolean): boolean => {
     } catch {
       /* fără MutationObserver rămâne doar fallback-ul pe timp */
     }
-    w.__aibridgeTracker = t;
+    w.__freekitTracker = t;
   }
   if (reset) t.lastMutation = Date.now();
   return !!t.observer;
@@ -57,7 +57,7 @@ export async function installMutationTracker(page: Page): Promise<boolean> {
 
 /** Rulează ÎN PAGINĂ: pagina a fost liniștită `quietMs`? */
 const waitQuietInPage = (quietMs: number): boolean => {
-  const t = (window as any).__aibridgeTracker;
+  const t = (window as any).__freekitTracker;
   return !!t && Date.now() - t.lastMutation >= quietMs;
 };
 

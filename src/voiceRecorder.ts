@@ -173,7 +173,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 
-public sealed class AiBridgeWavRecorder : IDisposable
+public sealed class FreekitWavRecorder : IDisposable
 {
     private const int WAVE_MAPPER = -1;
     private const int WAVE_FORMAT_PCM = 1;
@@ -241,7 +241,7 @@ public sealed class AiBridgeWavRecorder : IDisposable
     private bool _opened;
     private bool _stopped;
 
-    public AiBridgeWavRecorder(string filePath, int rate, int channels, int bits, int chunkMs)
+    public FreekitWavRecorder(string filePath, int rate, int channels, int bits, int chunkMs)
     {
         _rate = rate;
         _channels = channels;
@@ -470,7 +470,7 @@ try {
   exit 2
 }
 
-$rec = New-Object AiBridgeWavRecorder($OutFile, $Rate, $Channels, $Bits, $ChunkMs)
+$rec = New-Object FreekitWavRecorder($OutFile, $Rate, $Channels, $Bits, $ChunkMs)
 try {
   $rec.Start()
   [Console]::Out.WriteLine('READY')
@@ -894,5 +894,5 @@ export async function startVoiceCapture(opts: StartVoiceOptions): Promise<VoiceC
 
 /** Folderul temporar standard pentru înregistrări. */
 export function voiceTempDir(): string {
-  return path.join(os.tmpdir(), 'ai-bridge-voice');
+  return path.join(os.tmpdir(), 'freekit-voice');
 }

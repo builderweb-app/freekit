@@ -100,15 +100,15 @@ export interface ProviderStatusInfo {
   ollama: boolean;
   deepseekLoggedIn: boolean;
   ollamaModels: string[];
-  /** Portul CDP configurat (aiBridge.cdpPort). */
+  /** Portul CDP configurat (freekit.cdpPort). */
   port: number;
-  /** URL-ul Ollama configurat (aiBridge.ollamaUrl). */
+  /** URL-ul Ollama configurat (freekit.ollamaUrl). */
   ollamaUrl: string;
 }
 
 /** Starea tuturor providerilor: browser (CDP), logare DeepSeek, Ollama + modele. */
 export async function getProviderStatus(): Promise<ProviderStatusInfo> {
-  const config = vscode.workspace.getConfiguration('aiBridge');
+  const config = vscode.workspace.getConfiguration('freekit');
   const rawPort = Number(config.get<number>('cdpPort', 9222));
   const port =
     Number.isFinite(rawPort) && rawPort >= 1024 && rawPort <= 65535

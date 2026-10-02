@@ -185,7 +185,7 @@ export async function runVerification(root: string): Promise<VerifyResult> {
  * v1.4.0 — CHECKPOINT GIT PER PROMPT + RESTORE CU UN CLICK
  * Înainte de fiecare mesaj trimis, chatView creează un checkpoint git:
  * dacă working tree-ul e dirty, commit-uiește tot (mesaj-marker
- * „aibridge-prompt:<id>”); altfel creează un commit gol-marker. Butonul ⟲
+ * „freekit-prompt:<id>”); altfel creează un commit gol-marker. Butonul ⟲
  * din chat readuce proiectul exact la starea de dinaintea promptului
  * (git reset --hard), cu backup automat (commit) al stării curente înainte
  * de reset. Totul e fail-open: fără git (sau fără repo), funcțiile întorc
@@ -248,7 +248,7 @@ async function gitRun(
 /**
  * Commit cu fallback de identitate: dacă repo-ul nu are user.name/user.email
  * configurat (sau semnarea GPG e pornită fără chei), reîncearcă cu identitatea
- * de bot „AI Bridge” — altfel checkpoint-ul ar eșua tăcut pe astfel de medii.
+ * de bot „Freekit” — altfel checkpoint-ul ar eșua tăcut pe astfel de medii.
  */
 async function gitCommit(
   root: string,
@@ -260,8 +260,8 @@ async function gitCommit(
   const first = await gitRun(root, args);
   if (first.ok) return true;
   const fallback = await gitRun(root, [
-    '-c', 'user.name=AI Bridge',
-    '-c', 'user.email=ai-bridge@local',
+    '-c', 'user.name=Freekit',
+    '-c', 'user.email=freekit@local',
     '-c', 'commit.gpgSign=false',
     ...args
   ]);
@@ -315,7 +315,7 @@ export async function ensureGitRepo(
         fs.writeFileSync(
           ignorePath,
           [
-            '# creat automat de AI Bridge (checkpoint-uri git)',
+            '# creat automat de Freekit (checkpoint-uri git)',
             'node_modules/',
             'dist/',
             'build/',
@@ -345,7 +345,7 @@ export async function ensureGitRepo(
 /**
  * Creează un checkpoint înainte de fiecare prompt.
  * Dacă working tree-ul nu e clean, commit-uiește tot ca checkpoint (marker
- * „aibridge-prompt:<id>”); dacă e clean, creează un commit gol-marker, ca
+ * „freekit-prompt:<id>”); dacă e clean, creează un commit gol-marker, ca
  * fiecare prompt să aibă un id unic de restore.
  * v1.5.0: cu opts.autoInit, un folder care nu e (încă) repo git primește
  * `git init` automat — altfel funcția întorcea tăcut null și butonul ⟲
@@ -392,7 +392,7 @@ export async function createPromptCheckpoint(
     }
     // allowEmpty=true pe ambele ramuri: robust la stări „dirty” doar în
     // metadate (submodule) unde commit-ul normal nu ar avea ce stoca
-    if (!(await gitCommit(root, 'aibridge-prompt:' + safeId, true))) {
+    if (!(await gitCommit(root, 'freekit-prompt:' + safeId, true))) {
       return null;
     }
 
@@ -418,7 +418,7 @@ export async function createPromptCheckpoint(
 
 /**
  * Revine la un checkpoint. Înainte de reset, starea curentă (dacă e dirty)
- * este salvată ca backup-commit „aibridge-backup-before-restore:<ts>”, deci
+ * este salvată ca backup-commit „freekit-backup-before-restore:<ts>”, deci
  * nimic nu se pierde — backupId e întors pentru a putea reveni la ea.
  * Fiindcă backup-ul înregistrează TOATE fișierele neignorate, reset --hard
  * readuce working tree-ul exact la starea checkpoint-ului: fișierele noi
@@ -449,7 +449,7 @@ export async function restoreToCheckpoint(
       if (!add.ok) {
         return { ok: false, error: 'git add -A a eșuat: ' + (add.stderr || add.error || '') };
       }
-      if (!(await gitCommit(root, 'aibridge-backup-before-restore:' + Date.now(), false))) {
+      if (!(await gitCommit(root, 'freekit-backup-before-restore:' + Date.now(), false))) {
         return { ok: false, error: 'commit-ul de backup a eșuat (verifică git user.name/email)' };
       }
       const head = await gitRun(root, ['rev-parse', 'HEAD']);

@@ -697,7 +697,7 @@ function applySttState(state, startedAt) {
   }
   updateMicButton();
   input.placeholder = sttPlaceholder();
-  if (state === 'idle') console.log('[AI Bridge] STT idle');
+  if (state === 'idle') console.log('[Freekit] STT idle');
 }
 
 function toggleRecording() {
@@ -714,7 +714,7 @@ function stopDictation() {
   if (sttState !== 'recording' && sttState !== 'starting') return;
   applySttState('transcribing');
   vscode.postMessage({ type: 'stt_stop' });
-  console.log('[AI Bridge] STT stop requested');
+  console.log('[Freekit] STT stop requested');
 }
 
 // (v1.7.2: conversia MediaRecorder → WAV din pagină a fost eliminată în v1.7.3 — captarea rulează în extensie)

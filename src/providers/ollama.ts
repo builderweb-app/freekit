@@ -5,9 +5,9 @@ import { logLine } from '../log';
 
 const log = (msg: string) => logLine('ollama', msg);
 
-/** v0.4.0: URL-ul de bază Ollama (setarea aiBridge.ollamaUrl; fără slash final). */
+/** v0.4.0: URL-ul de bază Ollama (setarea freekit.ollamaUrl; fără slash final). */
 export function ollamaBaseUrl(): string {
-  const cfg = vscode.workspace.getConfiguration('aiBridge');
+  const cfg = vscode.workspace.getConfiguration('freekit');
   const raw = String(cfg.get<string>('ollamaUrl', '') || '').trim();
   return (raw || 'http://localhost:11434').replace(/\/+$/, '');
 }
@@ -21,7 +21,7 @@ export class OllamaProvider implements AIProvider {
   readonly name = 'ollama';
   /** v1.7.1: thinking-ul modelului (câmpul `thinking` din API) → callback chatView. */
   onThinking?: (text: string) => void;
-  /** v0.4.0: configurabil prin aiBridge.ollamaUrl (implicit localhost:11434). */
+  /** v0.4.0: configurabil prin freekit.ollamaUrl (implicit localhost:11434). */
   get url(): string {
     return ollamaBaseUrl();
   }
@@ -53,7 +53,7 @@ export class OllamaProvider implements AIProvider {
     signal?: AbortSignal,
     opts?: SendOptions
   ): Promise<string> {
-    const config = vscode.workspace.getConfiguration('aiBridge');
+    const config = vscode.workspace.getConfiguration('freekit');
     const model = config.get<string>('ollamaModel', 'qwen2.5-coder:7b');
 
     // Local nu există „upload în chat": binarele/imaginite nu pot pleca.

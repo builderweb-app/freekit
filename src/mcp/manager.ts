@@ -10,12 +10,12 @@ const log = (msg: string) => logLine('mcp', msg);
  *
  * Ține un singur McpClient pentru toată extensia și oferă:
  *  - pornirea/oprirea/repornirea serverelor + reîncărcare la schimbarea
- *    configului (`.vscode/mcp.json` sau `aiBridge.mcpServers`);
+ *    configului (`.vscode/mcp.json` sau `freekit.mcpServers`);
  *  - catalogul de unelte expus AI-ului ca `mcp_<server>_<tool>`;
  *  - execuția apelurilor MCP prin ACELAȘI flux de aprobare ca uneltele
  *    normale (auto-approve funcționează identic);
  *  - secțiunea de prompt + rapoartele de status/diagnostics;
- *  - UI de gestionare (`AI Bridge: MCP Servers`).
+ *  - UI de gestionare (`Freekit: MCP Servers`).
  * ========================================================================= */
 
 export interface McpToolEntry {
@@ -186,7 +186,7 @@ export class McpManager {
           'Unknown MCP tool: "' + name + '". ' +
           (cat.length
             ? 'Available MCP tools: ' + cat.slice(0, 40).map((t) => t.id).join(', ')
-            : 'No MCP server is currently running (use the "AI Bridge: MCP Servers" command to check).') +
+            : 'No MCP server is currently running (use the "Freekit: MCP Servers" command to check).') +
           ' Do NOT invent MCP tool names — use the built-in tools instead.'
       };
     }
@@ -222,7 +222,7 @@ export class McpManager {
         ok: false,
         error:
           '✗ MCP ' + pretty + ' failed: ' + (e?.message ?? String(e)) +
-          '\n(You can check the servers with the “AI Bridge: MCP Servers” command. Do not retry in a loop.)'
+          '\n(You can check the servers with the “Freekit: MCP Servers” command. Do not retry in a loop.)'
       };
     }
   }
@@ -236,8 +236,8 @@ export class McpManager {
     if (!infos.length) {
       return [
         this.hasServers()
-          ? 'MCP: configured servers are present but not running — use “AI Bridge: MCP Servers”.'
-          : 'MCP: no server is configured (.vscode/mcp.json or aiBridge.mcpServers).'
+          ? 'MCP: configured servers are present but not running — use “Freekit: MCP Servers”.'
+          : 'MCP: no server is configured (.vscode/mcp.json or freekit.mcpServers).'
       ];
     }
     const running = infos.filter((i) => i.state === 'running');
@@ -267,9 +267,9 @@ export class McpManager {
     this.setNotify(notify);
     try {
       const v = require('vscode') as typeof vscode;
-      const cfg = v.workspace.getConfiguration('aiBridge');
+      const cfg = v.workspace.getConfiguration('freekit');
       if (!cfg.get<boolean>('mcpEnabled', true)) {
-        log('MCP dezactivat (aiBridge.mcpEnabled = false)');
+        log('MCP dezactivat (freekit.mcpEnabled = false)');
         return;
       }
       const toolSecs = Number(cfg.get<number>('mcpToolTimeoutSeconds', 60));
@@ -309,9 +309,9 @@ export class McpManager {
       ctx.subscriptions.push(
         v.workspace.onDidChangeConfiguration((e) => {
           if (
-            e.affectsConfiguration('aiBridge.mcpEnabled') ||
-            e.affectsConfiguration('aiBridge.mcpServers') ||
-            e.affectsConfiguration('aiBridge.mcpToolTimeoutSeconds')
+            e.affectsConfiguration('freekit.mcpEnabled') ||
+            e.affectsConfiguration('freekit.mcpServers') ||
+            e.affectsConfiguration('freekit.mcpToolTimeoutSeconds')
           ) {
             this.scheduleReload();
           }
@@ -338,13 +338,13 @@ export class McpManager {
     log('reload: repornesc serverele MCP');
     try {
       const v = require('vscode') as typeof vscode;
-      if (!v.workspace.getConfiguration('aiBridge').get<boolean>('mcpEnabled', true)) {
+      if (!v.workspace.getConfiguration('freekit').get<boolean>('mcpEnabled', true)) {
         await this.stopAll();
         this.notify('🔌 MCP disabled — the servers were stopped.');
         return;
       }
       const toolSecs = Number(
-        v.workspace.getConfiguration('aiBridge').get<number>('mcpToolTimeoutSeconds', 60)
+        v.workspace.getConfiguration('freekit').get<number>('mcpToolTimeoutSeconds', 60)
       );
       if (Number.isFinite(toolSecs)) this.client.setToolTimeoutMs(toolSecs * 1000);
     } catch {
@@ -382,7 +382,7 @@ export class McpManager {
   }
 
   /* ------------------------------------------------------------------ *
-   * UI de gestionare: "AI Bridge: MCP Servers" (QuickPick)
+   * UI de gestionare: "Freekit: MCP Servers" (QuickPick)
    * ------------------------------------------------------------------ */
 
   async showManagerUi(): Promise<void> {
@@ -406,7 +406,7 @@ export class McpManager {
     if (!infos.length) {
       items.push({
         label: '$(info) No MCP server running',
-        description: 'add servers in .vscode/mcp.json or aiBridge.mcpServers',
+        description: 'add servers in .vscode/mcp.json or freekit.mcpServers',
         action: 'noop'
       });
     }
@@ -425,12 +425,12 @@ export class McpManager {
       action: 'config'
     });
     items.push({
-      label: '$(gear) Open aiBridge.mcpServers setting',
+      label: '$(gear) Open freekit.mcpServers setting',
       action: 'settings'
     });
 
     const pick = await v.window.showQuickPick(items, {
-      title: 'AI Bridge — MCP Servers',
+      title: 'Freekit — MCP Servers',
       placeHolder: 'Choose a server or action'
     });
     if (!pick) return;
@@ -438,7 +438,7 @@ export class McpManager {
     switch (pick.action) {
       case 'restart-all':
         await this.restartAll();
-        v.window.showInformationMessage('AI Bridge: the MCP servers were restarted.');
+        v.window.showInformationMessage('Freekit: the MCP servers were restarted.');
         break;
       case 'tools':
         await v.window.showQuickPick(
@@ -456,7 +456,7 @@ export class McpManager {
       case 'settings':
         await v.commands.executeCommand(
           'workbench.action.openSettings',
-          'aiBridge.mcpServers'
+          'freekit.mcpServers'
         );
         break;
       case 'server':
@@ -482,16 +482,16 @@ export class McpManager {
     if (pick.action === 'restart') {
       try {
         await this.client.restartServer(name);
-        v.window.showInformationMessage('AI Bridge: the MCP server “' + name + '” was restarted.');
+        v.window.showInformationMessage('Freekit: the MCP server “' + name + '” was restarted.');
         this.notify('🔌 MCP: “' + name + '” restarted — ' + this.client.getTools().filter((t) => t.serverName === name).length + ' tools.');
       } catch (e: any) {
         v.window.showErrorMessage(
-          'AI Bridge: “' + name + '” did not start — ' + (e?.message ?? String(e))
+          'Freekit: “' + name + '” did not start — ' + (e?.message ?? String(e))
         );
       }
     } else if (pick.action === 'stop') {
       await this.client.stopServer(name);
-      v.window.showInformationMessage('AI Bridge: the MCP server “' + name + '” was stopped.');
+      v.window.showInformationMessage('Freekit: the MCP server “' + name + '” was stopped.');
     } else if (pick.action === 'tools') {
       const tools = this.catalog().filter((t) => t.serverName === name);
       await v.window.showQuickPick(
@@ -512,7 +512,7 @@ export class McpManager {
     if (!folder) {
       await v.commands.executeCommand(
         'workbench.action.openSettings',
-        'aiBridge.mcpServers'
+        'freekit.mcpServers'
       );
       return;
     }
@@ -540,11 +540,11 @@ export class McpManager {
         await v.workspace.fs.createDirectory(v.Uri.joinPath(folder.uri, '.vscode'));
         await v.workspace.fs.writeFile(uri, Buffer.from(template, 'utf8'));
         v.window.showInformationMessage(
-          'AI Bridge: created .vscode/mcp.json with an example server — edit it, then run “AI Bridge: MCP Servers” → Restart.'
+          'Freekit: created .vscode/mcp.json with an example server — edit it, then run “Freekit: MCP Servers” → Restart.'
         );
       } catch (e: any) {
         v.window.showErrorMessage(
-          'AI Bridge: could not create .vscode/mcp.json — ' + (e?.message ?? String(e))
+          'Freekit: could not create .vscode/mcp.json — ' + (e?.message ?? String(e))
         );
         return;
       }

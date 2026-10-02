@@ -3,7 +3,7 @@ import { spawn, ChildProcess } from 'child_process';
 // loadConfig(), ca modulul să poată fi încărcat și în teste Node.
 import type * as vscode from 'vscode';
 
-const log = (msg: string) => console.log('[AI Bridge][mcp]', msg);
+const log = (msg: string) => console.log('[Freekit][mcp]', msg);
 
 /* =========================================================================
  * v1.1.0 — MCP (Model Context Protocol) CLIENT
@@ -15,7 +15,7 @@ const log = (msg: string) => console.log('[AI Bridge][mcp]', msg);
  * cu paginare prin cursor) și le apelează (tools/call).
  *
  * Configurare: `.vscode/mcp.json` (format {"servers": {...}}) sau setarea
- * `aiBridge.mcpServers` (aceeași structură). Ambele formate clasice sunt
+ * `freekit.mcpServers` (aceeași structură). Ambele formate clasice sunt
  * acceptate: `servers` (VS Code) și `mcpServers` (Claude Desktop).
  * ========================================================================= */
 
@@ -293,10 +293,10 @@ export class McpClient {
       ) {
         const settingsConfig =
           v.workspace
-            .getConfiguration('aiBridge')
+            .getConfiguration('freekit')
             .get<any>('mcpServers', {}) || {};
         mcpConfig = { servers: settingsConfig };
-        log('loaded settings aiBridge.mcpServers');
+        log('loaded settings freekit.mcpServers');
       }
     } catch {
       /* fără vscode (teste Node) — rămâne configul injectat manual */
@@ -466,7 +466,7 @@ export class McpClient {
         {
           protocolVersion: '2024-11-05',
           capabilities: {},
-          clientInfo: { name: 'ai-bridge', version: '1.1.0' }
+          clientInfo: { name: 'freekit', version: '1.1.0' }
         },
         this.opts.initializeTimeoutMs
       );
@@ -590,7 +590,7 @@ export class McpClient {
           id: msg.id,
           error: {
             code: -32601,
-            message: 'Not supported by ai-bridge: ' + msg.method
+            message: 'Not supported by freekit: ' + msg.method
           }
         });
         continue;

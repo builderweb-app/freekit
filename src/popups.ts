@@ -12,11 +12,11 @@ import type { Page } from 'playwright';
  *   - orice text care sună a refuz (reject / necessary / later / close…)
  *     este ignorat complet;
  *   - maximum 3 click-uri per apel (un banner nu poate declanșa o buclă).
- * Setarea `aiBridge.autoAcceptPopups` (implicit true) dezactivează totul.
+ * Setarea `freekit.autoAcceptPopups` (implicit true) dezactivează totul.
  * ========================================================================= */
 
 export interface PopupSettings {
-  /** aiBridge.autoAcceptPopups — închide automat popup-urile de consimțământ. */
+  /** freekit.autoAcceptPopups — închide automat popup-urile de consimțământ. */
   enabled: boolean;
 }
 
@@ -26,7 +26,7 @@ const DEFAULT_SETTINGS: PopupSettings = { enabled: true };
 export function popupSettings(): PopupSettings {
   try {
     const v = require('vscode') as typeof import('vscode');
-    const cfg = v.workspace.getConfiguration('aiBridge');
+    const cfg = v.workspace.getConfiguration('freekit');
     return { enabled: cfg.get<boolean>('autoAcceptPopups', true) };
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -152,7 +152,7 @@ const scanPopupsInPage = (args: ScanArgs): ClickOutcome | null => {
   for (const el of els) {
     if ((el as unknown as { disabled?: boolean }).disabled) continue;
     if (el.getAttribute('aria-disabled') === 'true') continue;
-    if (el.getAttribute('data-aibridge-accepted')) continue; // deja apăsat de noi (anti-dublare)
+    if (el.getAttribute('data-freekit-accepted')) continue; // deja apăsat de noi (anti-dublare)
     if (!isVisible(el)) continue;
 
     const texts = [
@@ -185,7 +185,7 @@ const scanPopupsInPage = (args: ScanArgs): ClickOutcome | null => {
   const winner = candidates[0];
   // marcăm elementul ÎNAINTE de click: același buton nu mai e apăsat a doua
   // oară în rundele următoare (bannere care nu dispar din DOM)
-  winner.el.setAttribute('data-aibridge-accepted', '1');
+  winner.el.setAttribute('data-freekit-accepted', '1');
   try {
     winner.el.click();
   } catch {

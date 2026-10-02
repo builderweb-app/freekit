@@ -71,9 +71,9 @@ export interface SemanticConfig {
   extraExclude: string[];
 }
 
-/** Setările `aiBridge.semanticIndex.*` (citite live, la fiecare apel). */
+/** Setările `freekit.semanticIndex.*` (citite live, la fiecare apel). */
 export function semanticConfig(): SemanticConfig {
-  const cfg = vscode.workspace.getConfiguration('aiBridge');
+  const cfg = vscode.workspace.getConfiguration('freekit');
   const rawMax = Number(cfg.get<number>('semanticIndex.maxFileKb', 256));
   const rawTop = Number(cfg.get<number>('semanticIndex.topK', 8));
   const extra = cfg.get<string[]>('semanticIndex.exclude', []) || [];
@@ -521,7 +521,7 @@ export async function searchSemantic(
 ): Promise<{ hits: SearchHit[]; error?: string; model?: string; totalChunks?: number }> {
   const cfg = semanticConfig();
   if (!cfg.enabled) {
-    return { hits: [], error: 'Semantic search is disabled (aiBridge.semanticIndex.enabled).' };
+    return { hits: [], error: 'Semantic search is disabled (freekit.semanticIndex.enabled).' };
   }
   const q = String(query ?? '').trim();
   if (!q) return { hits: [], error: 'Empty query.' };
@@ -531,7 +531,7 @@ export async function searchSemantic(
     return {
       hits: [],
       error:
-        'No semantic index found for this workspace. Run the command "AI Bridge: Index Workspace" first.'
+        'No semantic index found for this workspace. Run the command "Freekit: Index Workspace" first.'
     };
   }
   if (data.model !== cfg.model) {
@@ -540,7 +540,7 @@ export async function searchSemantic(
       error:
         'The index was built with a different embedding model (' +
         data.model +
-        '). Re-run "AI Bridge: Index Workspace".'
+        '). Re-run "Freekit: Index Workspace".'
     };
   }
 
@@ -631,7 +631,7 @@ export async function indexStatusText(root: string): Promise<string> {
       root +
       '\nModel: ' +
       cfg.model +
-      '\nRun "AI Bridge: Index Workspace" to build it.'
+      '\nRun "Freekit: Index Workspace" to build it.'
     );
   }
   const indexedFiles = Object.values(data.files).filter((f) => f.chunks > 0).length;

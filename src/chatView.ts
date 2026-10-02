@@ -71,23 +71,23 @@ const STRUCTURE_EXCLUDE = new Set([
 const STRUCTURE_MAX_ENTRIES = 300;
 
 // FAZA E: persistență — istoricul conversației (max 100 mesaje, în globalState)
-const HISTORY_KEY = 'aiBridge.history';
+const HISTORY_KEY = 'freekit.history';
 const HISTORY_MAX = 100;
 
 // v0.2.1: auto-approve (persistat în globalState)
-const AUTO_APPROVE_KEY = 'aiBridge.autoApprove';
+const AUTO_APPROVE_KEY = 'freekit.autoApprove';
 
 // v0.4.0: ultimul provider web folosit (modul Auto îl încearcă primul)
-const LAST_BROWSER_KEY = 'aiBridge.lastBrowserProvider';
+const LAST_BROWSER_KEY = 'freekit.lastBrowserProvider';
 
 // v0.5.0: fișiere aprobate cu „nu mai întreba" (diff nativ, persistat)
-const NO_ASK_KEY = 'aiBridge.noAskFiles';
+const NO_ASK_KEY = 'freekit.noAskFiles';
 
 // v0.5.0: eticheta butonului „nu mai întreba" din notificarea de diff
 const NO_ASK_LABEL = 'Accept (don\'t ask again)';
 
 // v1.7.1: verbose mode — pașii AI afișați în chat (persistat în globalState)
-const VERBOSE_KEY = 'aiBridge.verboseMode';
+const VERBOSE_KEY = 'freekit.verboseMode';
 
 // v0.5.0: contor pentru nume de fișiere temporare unice
 let reviewSeq = 0;
@@ -109,7 +109,7 @@ const AUTO_VERIFY_TOOLS = new Set(['edit_file', 'write_file', 'write_files']);
 const MAX_VERIFY_REPAIRS = 3;
 
 // v1.4.0: checkpoint-uri git per prompt (persistate în globalState)
-const CHECKPOINTS_KEY = 'aiBridge.checkpoints';
+const CHECKPOINTS_KEY = 'freekit.checkpoints';
 const CHECKPOINTS_MAX = 50;
 
 // v1.9.0: id-uri sigure de mesaj (leagă mesajul de checkpoint / conversație)
@@ -231,7 +231,7 @@ export function buildReviewPreview(changes: FileChangePreview[]): string {
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
-  public static readonly viewType = 'aiBridge.chatView';
+  public static readonly viewType = 'freekit.chatView';
   private view?: vscode.WebviewView;
   private abortRequested = false;
   private abortController?: AbortController;
@@ -343,10 +343,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.post('notice', text);
   }
 
-  /** v1.6.0: limba voice input (butonul 🎤) — din setarea aiBridge.sttLanguage. */
+  /** v1.6.0: limba voice input (butonul 🎤) — din setarea freekit.sttLanguage. */
   private sttLanguage(): string {
     const v = vscode.workspace
-      .getConfiguration('aiBridge')
+      .getConfiguration('freekit')
       .get<string>('sttLanguage', 'ro-RO');
     return v === 'en-US' ? 'en-US' : 'ro-RO';
   }
@@ -476,7 +476,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private whisperTimeoutSeconds(): number {
     const raw = Number(
       vscode.workspace
-        .getConfiguration('aiBridge')
+        .getConfiguration('freekit')
         .get<number>('whisperTimeoutSeconds', 180)
     );
     return Number.isFinite(raw) ? Math.min(1200, Math.max(10, Math.floor(raw))) : 180;
@@ -738,7 +738,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ? String(msg.value)
         : 'deepseek';
       await vscode.workspace
-        .getConfiguration('aiBridge')
+        .getConfiguration('freekit')
         .update('provider', id, vscode.ConfigurationTarget.Global);
       // v0.4.0: reține ultimul provider web — lanțul Auto îl încearcă primul
       if (BROWSER_PROVIDER_IDS.includes(id)) {
@@ -932,7 +932,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!vscode.workspace.isTrusted) {
       this.post(
         'error',
-        'Untrusted workspace: AI Bridge can write files and run commands. ' +
+        'Untrusted workspace: Freekit can write files and run commands. ' +
           'Enable Workspace Trust for this folder ("Manage Workspace Trust"), then try again.'
       );
       return;
@@ -1064,7 +1064,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         1,
         Number(
           vscode.workspace
-            .getConfiguration('aiBridge')
+            .getConfiguration('freekit')
             .get<number>('messageTimeoutMinutes', 20)
         ) || 20
       );
@@ -1454,7 +1454,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private currentProviderId(): string {
     const id = vscode.workspace
-      .getConfiguration('aiBridge')
+      .getConfiguration('freekit')
       .get<string>('provider');
     return id && PROVIDER_IDS.includes(id) ? id : 'deepseek';
   }
@@ -1646,11 +1646,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * sunt anulate automat (rollback la ultima stare verificată OK).
    * ==================================================================== */
 
-  /** Setarea aiBridge.autoVerify (implicit ON). */
+  /** Setarea freekit.autoVerify (implicit ON). */
   private autoVerifyEnabled(): boolean {
     return (
       vscode.workspace
-        .getConfiguration('aiBridge')
+        .getConfiguration('freekit')
         .get<boolean>('autoVerify', true) !== false
     );
   }
@@ -1840,7 +1840,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ' files rolled back. The project is back to the last verified-good state.'
     );
     vscode.window.showWarningMessage(
-      'AI Bridge: verification "' + command + '" failed — ' + reason +
+      'Freekit: verification "' + command + '" failed — ' + reason +
         '; changes were rolled back automatically.'
     );
     this.verifyRepairs = 0;
@@ -1860,25 +1860,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /* ======================================================================
    * v1.4.0 — CHECKPOINT GIT PER PROMPT + RESTORE CU UN CLICK
    * Înainte de fiecare mesaj se creează un commit de checkpoint
-   * („aibridge-prompt:<id>”), persistat în globalState împreună cu id-ul
+   * („freekit-prompt:<id>”), persistat în globalState împreună cu id-ul
    * mesajului; butonul ⟲ din chat cheamă restoreToCheckpoint (git reset
    * --hard), cu backup automat al stării curente înainte de reset.
    * ==================================================================== */
 
-  /** Setarea aiBridge.promptCheckpoints (implicit ON). */
+  /** Setarea freekit.promptCheckpoints (implicit ON). */
   private checkpointsEnabled(): boolean {
     return (
       vscode.workspace
-        .getConfiguration('aiBridge')
+        .getConfiguration('freekit')
         .get<boolean>('promptCheckpoints', true) !== false
     );
   }
 
-  /** v1.5.0: setarea aiBridge.autoInitGit (implicit ON). */
+  /** v1.5.0: setarea freekit.autoInitGit (implicit ON). */
   private autoInitGitEnabled(): boolean {
     return (
       vscode.workspace
-        .getConfiguration('aiBridge')
+        .getConfiguration('freekit')
         .get<boolean>('autoInitGit', true) !== false
     );
   }
@@ -1916,7 +1916,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           'heal',
           '🔧 The folder was not a git repo — it was initialized automatically (git init + a minimal .gitignore), ' +
             'so checkpoints and the ⟲ restore button work. ' +
-            'You can turn this off with the aiBridge.autoInitGit setting.'
+            'You can turn this off with the freekit.autoInitGit setting.'
         );
       }
       this.checkpoints.push(cp);
@@ -1992,7 +1992,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             : '') +
           '.'
       );
-      vscode.window.showInformationMessage('AI Bridge: checkpoint restored.');
+      vscode.window.showInformationMessage('Freekit: checkpoint restored.');
       // v1.10.1: mesajele de după checkpoint nu mai au sens în istoric — le tăiem,
       // apoi reîmprospătăm dropdown-ul și chatul. checkpoint_restored rămâne ULTIMUL
       // (webview-ul îl folosește pentru badge-ul ✓).
@@ -2009,7 +2009,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       log('restore failed: ' + (res.error ?? 'unknown'));
       this.post('heal', '⛔ Restore failed: ' + (res.error ?? 'unknown error'));
       vscode.window.showWarningMessage(
-        'AI Bridge: restore failed — ' + (res.error ?? 'unknown error')
+        'Freekit: restore failed — ' + (res.error ?? 'unknown error')
       );
     }
   }
@@ -2023,7 +2023,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * rămâne intactă) și ⟲ (restore, când există checkpoint).
    * ==================================================================== */
 
-  /** v1.9.0: migrează o singură dată istoricul legacy (aiBridge.history) într-o conversație. */
+  /** v1.9.0: migrează o singură dată istoricul legacy (freekit.history) într-o conversație. */
   private async ensureConversationsMigrated(): Promise<void> {
     try {
       if (this.conversations.list().length > 0) return;
@@ -2262,10 +2262,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const res = await this.browser.show();
     if (res.ok) {
       this.post('notice', '👁 ' + res.message);
-      vscode.window.showInformationMessage('AI Bridge: ' + res.message);
+      vscode.window.showInformationMessage('Freekit: ' + res.message);
     } else {
       this.post('notice', '⚠️ ' + res.message);
-      vscode.window.showWarningMessage('AI Bridge: ' + res.message);
+      vscode.window.showWarningMessage('Freekit: ' + res.message);
     }
     void this.refreshProviderStatus();
   }
@@ -2317,12 +2317,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   async showProviderStatusReport(): Promise<void> {
     const info = await getProviderStatus();
     const selected = this.currentProviderId();
-    const cfg = vscode.workspace.getConfiguration('aiBridge');
+    const cfg = vscode.workspace.getConfiguration('freekit');
     const activeModel = cfg.get<string>('ollamaModel', 'qwen2.5-coder:7b');
 
     const lines: string[] = [];
     lines.push(
-      '===== AI Bridge — Provider Status — ' + new Date().toLocaleString() + ' ====='
+      '===== Freekit — Provider Status — ' + new Date().toLocaleString() + ' ====='
     );
     if (selected === 'auto') {
       const chain = this.autoChainIds();
@@ -2372,7 +2372,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     initLogChannel().show(true);
     this.post('notice', lines.join('\n'));
     vscode.window.showInformationMessage(
-      'AI Bridge: provider status written to Output → AI Bridge (see also the chat).'
+      'Freekit: provider status written to Output → Freekit (see also the chat).'
     );
   }
 
@@ -2476,20 +2476,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.state.update(NO_ASK_KEY, files);
   }
 
-  /** Comanda `aiBridge.clearNoAsk`: golește lista „nu mai întreba". */
+  /** Comanda `freekit.clearNoAsk`: golește lista „nu mai întreba". */
   async clearNoAskFiles(): Promise<void> {
     const files = this.getNoAskFiles();
     await this.state.update(NO_ASK_KEY, []);
     log('no-ask list cleared (' + files.length + ' entries)');
     if (files.length) {
       vscode.window.showInformationMessage(
-        'AI Bridge: the "don\'t ask again" list was cleared (' +
+        'Freekit: the "don\'t ask again" list was cleared (' +
           files.length +
           ' files).'
       );
     } else {
       vscode.window.showInformationMessage(
-        'AI Bridge: the "don\'t ask again" list was already empty.'
+        'Freekit: the "don\'t ask again" list was already empty.'
       );
     }
   }
@@ -2512,7 +2512,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (this.abortRequested) return 'reject';
 
     // 1) scrie conținuturile în fișiere temporare (workspace-ul e intact)
-    const tmpDir = path.join(os.tmpdir(), 'ai-bridge-review');
+    const tmpDir = path.join(os.tmpdir(), 'freekit-review');
     const stamp = Date.now() + '-' + ++reviewSeq;
     const pairs: Array<{
       label: string;
@@ -2564,8 +2564,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const single = changes.length === 1;
     const title = single
-      ? 'AI Bridge: ' + toolName + ' → ' + changes[0].label
-      : 'AI Bridge: ' + toolName + ' → ' + changes.length + ' files';
+      ? 'Freekit: ' + toolName + ' → ' + changes[0].label
+      : 'Freekit: ' + toolName + ' → ' + changes.length + ' files';
     log('diff review: ' + title + ' (' + pairs.length + ' files)');
 
     // 2) deschide diff-ul nativ VS Code
@@ -2616,12 +2616,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     // 3) întreabă utilizatorul (butoane nativ VS Code, în bara de jos)
     const msg = single
-      ? 'AI Bridge: ' +
+      ? 'Freekit: ' +
         toolName +
         ' wants to write ' +
         changes[0].label +
         ' — the diff is open in the editor.'
-      : 'AI Bridge: ' +
+      : 'Freekit: ' +
         toolName +
         ' wants to write ' +
         changes.length +

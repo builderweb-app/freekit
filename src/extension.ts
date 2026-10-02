@@ -25,7 +25,7 @@ import { ollamaBaseUrl } from './providers/ollama';
 
 /** v0.3.0 (P0.1): opțiunile browserului, citite live din setări. */
 function browserOptionsFromConfig(ctx: vscode.ExtensionContext) {
-  const cfg = vscode.workspace.getConfiguration('aiBridge');
+  const cfg = vscode.workspace.getConfiguration('freekit');
   const rawPort = Number(cfg.get<number>('cdpPort', 9222));
   const port =
     Number.isFinite(rawPort) && rawPort >= 1024 && rawPort <= 65535
@@ -40,9 +40,45 @@ function browserOptionsFromConfig(ctx: vscode.ExtensionContext) {
   };
 }
 
+/**
+ * v2.0.0 (rebranding AI Bridge -> Freekit): cheile din globalState au trecut
+ * de la prefixul `aiBridge.` la `freekit.`. Copiem o singură dată valorile
+ * existente, ca istoricul conversațiilor, checkpoint-urile și preferințele
+ * să nu se piardă la upgrade. Cheile vechi NU sunt șterse (rollback sigur).
+ */
+async function migrateLegacyBrandState(state: vscode.Memento): Promise<void> {
+  const NEW_PREFIX = 'freekit.';
+  const LEGACY_PREFIX = 'ai' + 'Bridge.';
+  const keys = [
+    'history',
+    'autoApprove',
+    'lastBrowserProvider',
+    'noAskFiles',
+    'verboseMode',
+    'checkpoints',
+    'conversations',
+    'activeConversationId',
+    'selectorsAutoCheck',
+    'selectorOverrides',
+    'remoteSelectors'
+  ];
+  for (const key of keys) {
+    try {
+      const legacy = state.get(LEGACY_PREFIX + key);
+      if (legacy !== undefined && state.get(NEW_PREFIX + key) === undefined) {
+        await state.update(NEW_PREFIX + key, legacy);
+      }
+    } catch {
+      // fail-open: migrarea nu trebuie să blocheze activarea extensiei
+    }
+  }
+}
+
 export async function activate(ctx: vscode.ExtensionContext) {
   initLogChannel();
-  logLine('extension', 'activated — container: aiBridge, view: aiBridge.chatView');
+  logLine('extension', 'activated — container: freekit, view: freekit.chatView');
+  // v2.0.0: migrează starea din globalState de dinainte de rebranding
+  await migrateLegacyBrandState(ctx.globalState);
   // v1.10.0: indexarea semantică (vector store JSON în globalStorage)
   initIndexer(ctx.globalStorageUri.fsPath);
   const browser = new BrowserManager(() => browserOptionsFromConfig(ctx));
@@ -69,17 +105,17 @@ export async function activate(ctx: vscode.ExtensionContext) {
 
   // v0.7.0: verificare automată a selectorilor remote la pornire (opțional)
   // v0.7.1: rate limiting 24h — cel mult o verificare automată pe zi
-  // (comanda manuală „AI Bridge: Update Selectors” ocolește limita).
+  // (comanda manuală „Freekit: Update Selectors” ocolește limita).
   const selUrl = selectorsUrlFromSettings();
   if (
     selUrl &&
-    vscode.workspace.getConfiguration('aiBridge').get<boolean>('checkSelectorsOnStartup', true)
+    vscode.workspace.getConfiguration('freekit').get<boolean>('checkSelectorsOnStartup', true)
   ) {
     if (shouldAutoCheck(ctx.globalState, selUrl)) {
       void checkAndApplyRemote(selUrl, ctx.globalState).then((r) => {
         if (r.status === 'updated') {
           vscode.window.showInformationMessage(
-            'AI Bridge: the selectors were updated automatically to v' +
+            'Freekit: the selectors were updated automatically to v' +
               r.version +
               '.' +
               (r.changelog ? ' ' + r.changelog : '')
@@ -89,7 +125,7 @@ export async function activate(ctx: vscode.ExtensionContext) {
     } else {
       logLine(
         'extension',
-        'selectors: automatic check skipped (last check < 24h ago) — use “AI Bridge: Update Selectors” for a manual one'
+        'selectors: automatic check skipped (last check < 24h ago) — use “Freekit: Update Selectors” for a manual one'
       );
     }
   }
@@ -112,12 +148,12 @@ export async function activate(ctx: vscode.ExtensionContext) {
   // v1.7.2: setup Whisper local — descarcă binarele whisper.cpp + modelul
   // ggml-base în globalStorage (o singură dată), pentru voice input offline
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('aiBridge.setupWhisper', async () => {
+    vscode.commands.registerCommand('freekit.setupWhisper', async () => {
       const gs = ctx.globalStorageUri.fsPath;
       await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: 'AI Bridge: setup Whisper local (offline STT)',
+          title: 'Freekit: setup Whisper local (offline STT)',
           cancellable: false
         },
         async (prog) => {
@@ -132,11 +168,11 @@ export async function activate(ctx: vscode.ExtensionContext) {
               path.basename(res.cliPath ?? '') +
               ' + ' +
               path.basename(res.modelPath ?? '');
-            vscode.window.showInformationMessage('AI Bridge: ' + msg);
+            vscode.window.showInformationMessage('Freekit: ' + msg);
             chatView.postNotice('🎤 ' + msg);
           } else {
             vscode.window.showErrorMessage(
-              'AI Bridge: local Whisper setup failed — ' + (res.error ?? 'unknown error')
+              'Freekit: local Whisper setup failed — ' + (res.error ?? 'unknown error')
             );
             chatView.postNotice(
               '🎤 ⚠️ Local Whisper setup failed: ' + (res.error ?? 'unknown error')
@@ -148,16 +184,16 @@ export async function activate(ctx: vscode.ExtensionContext) {
   );
 
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('aiBridge.openBrowser', async () => {
+    vscode.commands.registerCommand('freekit.openBrowser', async () => {
       await browser.ensureOpen();
-      vscode.window.showInformationMessage('Connected to Chrome (AI Bridge profile).');
+      vscode.window.showInformationMessage('Connected to Chrome (Freekit profile).');
     })
   );
 
   // v0.3.0 (P0.3): Close Browser chiar închide procesul
   // (CDP Browser.close, cu fallback kill pe PID-ul care ascultă pe port)
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('aiBridge.closeBrowser', async () => {
+    vscode.commands.registerCommand('freekit.closeBrowser', async () => {
       const closed = await browser.close();
       if (closed) {
         vscode.window.showInformationMessage('Chrome closed.');
@@ -171,15 +207,15 @@ export async function activate(ctx: vscode.ExtensionContext) {
 
   // FAZA I: uită selectorii învățați (revin la cei din selectors.json)
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('aiBridge.resetSelectors', async () => {
+    vscode.commands.registerCommand('freekit.resetSelectors', async () => {
       const removed = selectors.reset();
       if (removed === 0) {
         vscode.window.showInformationMessage(
-          'AI Bridge: no saved repaired selectors were found.'
+          'Freekit: no saved repaired selectors were found.'
         );
       } else {
         vscode.window.showInformationMessage(
-          'AI Bridge: removed ' +
+          'Freekit: removed ' +
             removed +
             ' saved repaired selectors. The configured selectors are being used again' +
             ' (bundled or remote, if enabled).'
@@ -190,11 +226,11 @@ export async function activate(ctx: vscode.ExtensionContext) {
 
   // v0.7.0: update manual al selectorilor din Gist-ul configurat
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('aiBridge.updateSelectors', async () => {
+    vscode.commands.registerCommand('freekit.updateSelectors', async () => {
       const url = selectorsUrlFromSettings();
       if (!url) {
         vscode.window.showWarningMessage(
-          'AI Bridge: set the "aiBridge.selectorsUrl" value first (the raw Gist URL for selectors.json).'
+          'Freekit: set the "freekit.selectorsUrl" value first (the raw Gist URL for selectors.json).'
         );
         return;
       }
@@ -203,18 +239,18 @@ export async function activate(ctx: vscode.ExtensionContext) {
       if (r.status === 'updated') {
         const from = r.previousVersion ? ' (v' + r.previousVersion + ' → v' + r.version + ')' : '';
         vscode.window.showInformationMessage(
-          'AI Bridge: the selectors were updated' +
+          'Freekit: the selectors were updated' +
             from +
             '.' +
             (r.changelog ? ' ' + r.changelog : '')
         );
       } else if (r.status === 'up-to-date') {
         vscode.window.showInformationMessage(
-          'AI Bridge: the selectors are already up to date (v' + (r.activeVersion ?? '?') + ').'
+          'Freekit: the selectors are already up to date (v' + (r.activeVersion ?? '?') + ').'
         );
       } else {
         vscode.window.showErrorMessage(
-          'AI Bridge: updating the selectors failed — ' + (r.message ?? 'unknown error')
+          'Freekit: updating the selectors failed — ' + (r.message ?? 'unknown error')
         );
       }
     })
@@ -222,21 +258,21 @@ export async function activate(ctx: vscode.ExtensionContext) {
 
   // v0.3.0 (P0.5): comanda Diagnostics
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('aiBridge.diagnostics', () =>
+    vscode.commands.registerCommand('freekit.diagnostics', () =>
       runDiagnostics(browser, ctx)
     )
   );
 
   // v0.4.0: Show Chrome — aduce fereastra offscreen (-32000,-32000) în față
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('aiBridge.showChrome', () =>
+    vscode.commands.registerCommand('freekit.showChrome', () =>
       chatView.showChrome()
     )
   );
 
   // v0.4.0: raport detaliat al providerilor (browser CDP / DeepSeek / Ollama)
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('aiBridge.showProviderStatus', () =>
+    vscode.commands.registerCommand('freekit.showProviderStatus', () =>
       chatView.showProviderStatusReport()
     )
   );
@@ -244,7 +280,7 @@ export async function activate(ctx: vscode.ExtensionContext) {
   // v0.5.0: golește lista „nu mai întreba" pentru aprobările de fișiere
   // (fișierele aprobate cu „Accept (nu mai întreba)" în diff-ul nativ)
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('aiBridge.clearNoAsk', () =>
+    vscode.commands.registerCommand('freekit.clearNoAsk', () =>
       chatView.clearNoAskFiles()
     )
   );
@@ -253,18 +289,18 @@ export async function activate(ctx: vscode.ExtensionContext) {
   // terminal VS Code (scripturi/comenzi dev, start, serve, watch, preview —
   // ex. „npm run dev”): Ctrl+C grațios, apoi închiderea terminalului
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('aiBridge.stopDevServers', async () => {
+    vscode.commands.registerCommand('freekit.stopDevServers', async () => {
       const report = await stopDevServers();
       const total = report.stopped.length + report.failed.length;
       if (!total) {
         vscode.window.showInformationMessage(
-          'AI Bridge: no development server started by AI Bridge is currently running.'
+          'Freekit: no development server started by Freekit is currently running.'
         );
         return;
       }
       if (report.failed.length) {
         vscode.window.showWarningMessage(
-          'AI Bridge: ' +
+          'Freekit: ' +
             report.stopped.length +
             ' development server(s) stopped, ' +
             report.failed.length +
@@ -276,7 +312,7 @@ export async function activate(ctx: vscode.ExtensionContext) {
         );
       } else {
         vscode.window.showInformationMessage(
-          'AI Bridge: ' +
+          'Freekit: ' +
             report.stopped.length +
             ' development server(s) stopped: ' +
             report.stopped
@@ -309,11 +345,11 @@ export async function activate(ctx: vscode.ExtensionContext) {
    * ===================================================================== */
 
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('aiBridge.indexWorkspace', async () => {
+    vscode.commands.registerCommand('freekit.indexWorkspace', async () => {
       const root = workspaceRoot();
       if (!root) {
         vscode.window.showWarningMessage(
-          'AI Bridge: open a folder (workspace) before indexing.'
+          'Freekit: open a folder (workspace) before indexing.'
         );
         return;
       }
@@ -321,14 +357,14 @@ export async function activate(ctx: vscode.ExtensionContext) {
       if (!(await isOllamaUp())) {
         const msg =
           'Ollama is not reachable at ' + ollamaBaseUrl() + '. Start it with "ollama serve".';
-        vscode.window.showErrorMessage('AI Bridge: ' + msg);
+        vscode.window.showErrorMessage('Freekit: ' + msg);
         chatView.postNotice('🔎 ⚠️ Semantic index: ' + msg);
         return;
       }
       await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: 'AI Bridge: indexing workspace with ' + cfg.model,
+          title: 'Freekit: indexing workspace with ' + cfg.model,
           cancellable: true
         },
         async (prog, token) => {
@@ -356,15 +392,15 @@ export async function activate(ctx: vscode.ExtensionContext) {
               Math.round(stats.durationMs / 1000) +
               's)';
             if (stats.cancelled) {
-              vscode.window.showWarningMessage('AI Bridge: indexing cancelled — ' + summary);
+              vscode.window.showWarningMessage('Freekit: indexing cancelled — ' + summary);
             } else {
-              vscode.window.showInformationMessage('AI Bridge: semantic index ready — ' + summary);
+              vscode.window.showInformationMessage('Freekit: semantic index ready — ' + summary);
             }
             chatView.postNotice('🔎 Semantic index: ' + summary);
           } catch (e: any) {
             const msg = e?.message ?? String(e);
             logLine('indexer', 'index workspace failed: ' + msg);
-            vscode.window.showErrorMessage('AI Bridge: indexing failed — ' + msg);
+            vscode.window.showErrorMessage('Freekit: indexing failed — ' + msg);
             chatView.postNotice('🔎 ⚠️ Indexing failed: ' + msg);
           } finally {
             sub.dispose();
@@ -375,34 +411,34 @@ export async function activate(ctx: vscode.ExtensionContext) {
   );
 
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('aiBridge.indexStatus', async () => {
+    vscode.commands.registerCommand('freekit.indexStatus', async () => {
       const root = workspaceRoot();
       if (!root) {
         vscode.window.showWarningMessage(
-          'AI Bridge: open a folder (workspace) to see the index status.'
+          'Freekit: open a folder (workspace) to see the index status.'
         );
         return;
       }
       const text = await indexStatusText(root);
       logLine('indexer', text.replace(/\n/g, ' | '));
       vscode.window.showInformationMessage(
-        'AI Bridge: ' + text.split('\n').slice(0, 4).join(' · ')
+        'Freekit: ' + text.split('\n').slice(0, 4).join(' · ')
       );
       chatView.postNotice('🔎 ' + text.split('\n').join('\n'));
     })
   );
 
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('aiBridge.clearIndex', async () => {
+    vscode.commands.registerCommand('freekit.clearIndex', async () => {
       const root = workspaceRoot();
       if (!root) {
         vscode.window.showWarningMessage(
-          'AI Bridge: open a folder (workspace) first.'
+          'Freekit: open a folder (workspace) first.'
         );
         return;
       }
       const answer = await vscode.window.showWarningMessage(
-        'AI Bridge: delete the semantic index for "' +
+        'Freekit: delete the semantic index for "' +
           path.basename(root) +
           '"? The vector store is removed from globalStorage; you can rebuild it anytime with "Index Workspace".',
         { modal: true },
@@ -411,17 +447,17 @@ export async function activate(ctx: vscode.ExtensionContext) {
       if (answer !== 'Delete Index') return;
       const removed = await clearIndex(root);
       if (removed) {
-        vscode.window.showInformationMessage('AI Bridge: semantic index deleted.');
+        vscode.window.showInformationMessage('Freekit: semantic index deleted.');
         chatView.postNotice('🔎 Semantic index deleted.');
       } else {
         vscode.window.showInformationMessage(
-          'AI Bridge: there was no semantic index to delete.'
+          'Freekit: there was no semantic index to delete.'
         );
       }
     })
   );
 
-  // v1.10.0: indexare incrementală la salvare (opțional, aiBridge.semanticIndex.onSave)
+  // v1.10.0: indexare incrementală la salvare (opțional, freekit.semanticIndex.onSave)
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   const pendingSaves = new Set<string>();
   ctx.subscriptions.push(
@@ -452,11 +488,11 @@ export async function activate(ctx: vscode.ExtensionContext) {
   );
 
   // v1.1.0 — MCP (Model Context Protocol): pornește serverele configurate în
-  // .vscode/mcp.json sau în aiBridge.mcpServers, descoperă uneltele lor și le
+  // .vscode/mcp.json sau în freekit.mcpServers, descoperă uneltele lor și le
   // expune AI-ului ca „mcp_<server>_<tool>”. Reîncărcare automată la
   // modificarea configului; UI de gestionare în comanda dedicată.
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('aiBridge.mcpManage', () =>
+    vscode.commands.registerCommand('freekit.mcpManage', () =>
       mcp.showManagerUi()
     )
   );

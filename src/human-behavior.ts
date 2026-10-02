@@ -11,8 +11,8 @@ const log = (msg: string) => logLine('human', msg);
  * Tastare caracter-cu-caracter cu întârzieri aleatorii, pauze la punctuație
  * și burst-uri rapide ocazionale + mișcări mici de mouse și scroll înainte
  * de acțiuni. Feature-urile sunt configurabile din setări:
- *   aiBridge.humanTyping   (implicit true) — tastarea "umană"
- *   aiBridge.humanBehavior (implicit true) — mouse/scroll
+ *   freekit.humanTyping   (implicit true) — tastarea "umană"
+ *   freekit.humanBehavior (implicit true) — mouse/scroll
  * ========================================================================= */
 
 export interface HumanTypingOptions {
@@ -134,11 +134,11 @@ export async function humanScroll(page: Page): Promise<void> {
 /* ---------------- setări (require lazy de vscode — teste Node safe) ---------------- */
 
 export interface HumanSettings {
-  /** Tastare "umană" caracter-cu-caracter (aiBridge.humanTyping). */
+  /** Tastare "umană" caracter-cu-caracter (freekit.humanTyping). */
   typing: boolean;
-  /** Mouse/scroll "uman" înainte de acțiuni (aiBridge.humanBehavior). */
+  /** Mouse/scroll "uman" înainte de acțiuni (freekit.humanBehavior). */
   behavior: boolean;
-  /** Final de generare instant via MutationObserver (aiBridge.mutationObserver). */
+  /** Final de generare instant via MutationObserver (freekit.mutationObserver). */
   observer: boolean;
 }
 
@@ -149,7 +149,7 @@ const DEFAULT_SETTINGS: HumanSettings = { typing: true, behavior: true, observer
 export function humanSettings(): HumanSettings {
   try {
     const v = require('vscode') as typeof vscode;
-    const cfg = v.workspace.getConfiguration('aiBridge');
+    const cfg = v.workspace.getConfiguration('freekit');
     return {
       typing: cfg.get<boolean>('humanTyping', true),
       behavior: cfg.get<boolean>('humanBehavior', true),

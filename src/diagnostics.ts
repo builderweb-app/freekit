@@ -7,9 +7,9 @@ import { mcp } from './mcp/manager';
 import { voiceBackendInfo } from './voiceRecorder';
 
 /* =========================================================================
- * v0.3.0 (P0.5) — comanda "AI Bridge: Diagnostics"
+ * v0.3.0 (P0.5) — comanda "Freekit: Diagnostics"
  * Verifică: browser detectat, port CDP, profil, Ollama, selectori reparați,
- * workspace trust. Scrie totul în canalul de log "AI Bridge".
+ * workspace trust. Scrie totul în canalul de log "Freekit".
  * ========================================================================= */
 
 async function fetchJson(url: string, timeoutMs: number): Promise<any | null> {
@@ -34,7 +34,7 @@ export async function runDiagnostics(
   const opts = browser.options();
   const lines: string[] = [];
 
-  lines.push('===== AI Bridge Diagnostics — ' + new Date().toLocaleString() + ' =====');
+  lines.push('===== Freekit Diagnostics — ' + new Date().toLocaleString() + ' =====');
   lines.push(
     'Extension: ' +
       ctx.extension.packageJSON.version +
@@ -58,7 +58,7 @@ export async function runDiagnostics(
   lines.push(
     'Chrome/Edge: ' +
       (chrome ??
-        'NOT FOUND — install Chrome or Edge, or set aiBridge.chromePath')
+        'NOT FOUND — install Chrome or Edge, or set freekit.chromePath')
   );
 
   const running = await browser.isRunning();
@@ -118,6 +118,6 @@ export async function runDiagnostics(
   for (const line of lines) logLine('diagnostics', line);
   channel.show();
   vscode.window.showInformationMessage(
-    'AI Bridge: diagnostics were written to Output → AI Bridge.'
+    'Freekit: diagnostics were written to Output → Freekit.'
   );
 }

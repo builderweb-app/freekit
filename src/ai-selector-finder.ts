@@ -55,7 +55,7 @@ function finderSettings(): FinderSettings {
   try {
     // require lazy — în teste Node modulul 'vscode' poate lipsi
     const v = require('vscode') as typeof import('vscode');
-    const cfg = v.workspace.getConfiguration('aiBridge');
+    const cfg = v.workspace.getConfiguration('freekit');
     const enabled = cfg.get<boolean>('aiSelectorFinder', true);
     const secs = Number(cfg.get<number>('aiFinderTimeoutSeconds', 45));
     const safe = Number.isFinite(secs) ? Math.min(300, Math.max(5, secs)) : 45;
@@ -512,7 +512,7 @@ async function discoverForHealer(
 ): Promise<string | null> {
   const settings = finderSettings();
   if (!settings.enabled) {
-    log('AI finder dezactivat (aiBridge.aiSelectorFinder=false)');
+    log('AI finder dezactivat (freekit.aiSelectorFinder=false)');
     return null;
   }
 

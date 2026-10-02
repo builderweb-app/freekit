@@ -84,8 +84,8 @@ export interface LearnedSelector {
 
 /** Configul "bundled" din selectors.json — baza de comparație + fallback. */
 const BUNDLED_CONFIG = rawConfig as unknown as SelectorConfig;
-const OVERRIDES_KEY = 'aiBridge.selectorOverrides';
-const REMOTE_CACHE_KEY = 'aiBridge.remoteSelectors';
+const OVERRIDES_KEY = 'freekit.selectorOverrides';
+const REMOTE_CACHE_KEY = 'freekit.remoteSelectors';
 const FALLBACK_PROVIDER = 'deepseek';
 
 /* =========================================================================
@@ -143,7 +143,7 @@ export function selectorsUrlFromSettings(): string {
     // require lazy — în teste Node modulul 'vscode' poate lipsi
     const v = require('vscode') as typeof import('vscode');
     return String(
-      v.workspace.getConfiguration('aiBridge').get<string>('selectorsUrl', '') || ''
+      v.workspace.getConfiguration('freekit').get<string>('selectorsUrl', '') || ''
     ).trim();
   } catch {
     return '';
@@ -878,17 +878,17 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
   const verify = (el: Element, sel: string, loose: boolean): boolean => {
     let ok = false;
     try {
-      el.setAttribute('data-ai-bridge-probe', '1');
+      el.setAttribute('data-freekit-probe', '1');
       const nodes = document.querySelectorAll(sel);
       if (nodes.length > 0 && nodes.length <= 40) {
         const last = nodes[nodes.length - 1];
-        ok = last.getAttribute('data-ai-bridge-probe') === '1' && (nodes.length === 1 || loose);
+        ok = last.getAttribute('data-freekit-probe') === '1' && (nodes.length === 1 || loose);
       }
     } catch {
       ok = false;
     }
     try {
-      el.removeAttribute('data-ai-bridge-probe');
+      el.removeAttribute('data-freekit-probe');
     } catch {
       /* ignorăm */
     }

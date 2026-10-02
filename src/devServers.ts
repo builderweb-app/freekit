@@ -15,7 +15,7 @@ import { logLine } from './log';
  *   3. output-ul e capturat live — primele secunde (URL-ul + erorile rapide
  *      de pornire: port ocupat, syntax error) ajung la AI;
  *   4. serverul rămâne pornit după ce AI-ul termină; oprirea se face din
- *      terminal (Ctrl+C) sau cu comanda „AI Bridge: Stop Dev Servers”.
+ *      terminal (Ctrl+C) sau cu comanda „Freekit: Stop Dev Servers”.
  *
  * CAPTURA folosește Shell Integration (API STABIL, VS Code ≥ 1.93):
  * `terminal.shellIntegration.executeCommand()` + `execution.read()`.
@@ -185,7 +185,7 @@ export interface DevServerStartResult {
   durationMs: number;
   /** URL-uri localhost/LAN detectate în output (ex. http://localhost:4321/). */
   urls: string[];
-  /** v1.8.1: numele terminalului VS Code dedicat (ex. „AI Bridge: dev”). */
+  /** v1.8.1: numele terminalului VS Code dedicat (ex. „Freekit: dev”). */
   terminalName: string;
   /** v1.8.1: true = output-ul a fost capturat live (shell integration activă). */
   captured: boolean;
@@ -285,9 +285,9 @@ export function devServerLabel(command: string): string {
   return bin || 'dev';
 }
 
-/** Nume unic de terminal: „AI Bridge: dev”; la conflict → „(dir)” apoi „#n”. */
+/** Nume unic de terminal: „Freekit: dev”; la conflict → „(dir)” apoi „#n”. */
 function uniqueTerminalName(label: string, cwd: string): string {
-  const base = 'AI Bridge: ' + label;
+  const base = 'Freekit: ' + label;
   const taken = new Set([...registry.values()].map((e) => e.terminalName));
   if (!taken.has(base)) return base;
   const dir = path.basename(cwd || '') || 'dir';
@@ -723,7 +723,7 @@ export function formatDevServerStartResult(
     );
   }
   lines.push(
-    'Next: continue with your task or reply with the final answer. The user can stop the server with Ctrl+C in its terminal or with the VS Code command "AI Bridge: Stop Dev Servers".'
+    'Next: continue with your task or reply with the final answer. The user can stop the server with Ctrl+C in its terminal or with the VS Code command "Freekit: Stop Dev Servers".'
   );
   return lines.join('\n').slice(0, 20000);
 }

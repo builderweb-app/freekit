@@ -6,7 +6,7 @@
   "publisher": "builderweb",
   "repository": {
   "type": "git",
-  "url": "https://github.com/builder-web/freekit"
+  "url": "https://github.com/builderweb-app/freekit"
 },
   "homepage": "https://builderweb.app/agent",
   "icon": "media/icon.png",

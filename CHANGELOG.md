@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.4.7 — 2026-10-05
+
+**Block isometric icon** — the trident is replaced by the Block isometric 3D mark, split into a coloured PNG for the Marketplace listing and a flat silhouette for the Activity Bar.
+
+- **`media/icon.svg`** (replaced) — the Activity Bar icon is now the flat **F** silhouette (`viewBox="0 0 128 128"`, `fill="currentColor"`), built from the front face of the Block mark. VS Code masks Activity Bar icons by alpha, so the SVG colours would be thrown away anyway; the old 16x16 trident path is gone.
+- **`media/icon.png`** (replaced) — the coloured Block mark (green top face, violet side faces, red **F** front face), 128x128 on a transparent background, declared by `"icon"` as the Marketplace listing icon.
+- **`package.json` / `package-lock.json`** — version bumped to 2.4.7; the lock file also picks up the `"license": "SEE LICENSE IN LICENSE.txt"` field introduced in 2.4.6.
+- **README** — version badge and the Development snippet now reference 2.4.7.
+
 ## 2.4.6 — 2026-10-04
 
 **Legal protection and donations** — the license is now an explicit proprietary EULA, and the project accepts donations through Buy Me a Coffee.

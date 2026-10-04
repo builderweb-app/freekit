@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.4.1 — 2026-10-04
+
+**Restricted Mode is no longer silent** — the extension now activates in untrusted folders with reduced (read-only) functionality instead of doing nothing, and tells the user exactly what to do. `capabilities.untrustedWorkspaces` changed from `false` to `"limited"`; non-technical users who never noticed the VS Code trust banner now get an unmissable notification with a **Trust Workspace** button, plus a persistent card in the chat.
+
+### Trust UX (`src/trust.ts`, new)
+
+- **Activation notification** — on startup in an untrusted folder, a warning notification appears with **Trust Workspace** (opens VS Code's *Manage Workspace Trust* page via the stable `workbench.trust.manage` command — one click on **Trust** there grants trust) and **Learn More** (VS Code Workspace Trust docs). It is shown once per session, and re-shown (max once every 20 s) when the AI actually tries a blocked action.
+- **Persistent chat card** — opening the Freekit view in Restricted Mode posts the same guidance into the chat, so it survives dismissing the notification.
+- **`Freekit: Trust This Workspace`** — new Command Palette command (also the target of the notification button).
+
+### Graceful degradation
+
+- **Read-only tools keep working** — `read_file`, `list_files`, `search_files`, `read_files`, `project_info`, `search_semantic` and `git status/diff/log` remain available, so the chat can still answer questions about the code.
+- **Blocked without Trust** — `write_file`, `edit_file`, `write_files`, `run_command`, `run_npm`, git actions that change state (`commit` / `branch` / `revert` / `restore`), all MCP tools and file checkpoints/restore return a clear error instead of failing silently or half-running.
+- **No more total block** — the chat no longer refuses every message in Restricted Mode (it previously returned an error and stopped); the agent runs, reports the restriction to the model, the model relays it to the user, and the Trust notification is surfaced at that moment.
+- **Reporting and MCP are deferred** — the reporting server integration and MCP server processes do not start until the folder is trusted; `onDidGrantWorkspaceTrust` enables them live and confirms it in the chat (no reload needed when VS Code grants trust in place).
+- **Diagnostics** — the workspace-trust line now reads `RESTRICTED (read-only: file writes, commands and MCP tools are disabled)`.
+
 ## 2.4.0 — 2026-10-03
 
 **The selectors now maintain themselves** — beyond the local healer and the Gist, the extension talks to the Freekit reporting server: it reports a selector that it could not repair locally, and it receives the repairs other clients reported. A site redesign found on one machine becomes a fix for everyone, without an extension release.

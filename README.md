@@ -48,6 +48,7 @@ Connect web AI chats (**DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen, Kimi**
 
 | Command | What it does |
 | --- | --- |
+| `Freekit: Trust This Workspace` | Grant Workspace Trust to the current folder (opens the native dialog) — unlocks file writes, shell commands, git changes and MCP tools |
 | `Freekit: Open Browser` | Launch / connect the dedicated Chrome |
 | `Freekit: Close Browser` | Really close it (graceful CDP close + PID fallback) |
 | `Freekit: Show Chrome` | Bring the hidden Chrome window back on screen and focus it |
@@ -168,8 +169,7 @@ Every MCP call shows an **approval card** (server, tool and arguments) before it
 ## Safety
 
 - Writes open a **native VS Code diff** for review — decide via the **Accept / Reject buttons in the chat** or from the VS Code notification; shell commands and git operations require approval via chat cards unless auto-approve is enabled.
-- The extension refuses to run in **untrusted workspaces**.
-- Anti-spam limits: max 3 writes per file and 15 write operations per message.
+- In **Restricted Mode** (untrusted folder) the extension still activates, but **read-only**: reading and searching files works, while file writes, shell commands, git changes, MCP tools and the selector health check are blocked. An unmissable notification — plus a card in the chat — offers **Trust Workspace** (or run `Freekit: Trust This Workspace` from the Command Palette) to unlock everything. The reporting integration and MCP servers only start once the folder is trusted.- Anti-spam limits: max 3 writes per file and 15 write operations per message.
 - The webview runs with a strict Content Security Policy.
 
 ## Development

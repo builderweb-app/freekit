@@ -17,6 +17,7 @@ import {
   startDevServer
 } from './devServers';
 import { formatSearchResults, isSemanticEnabled } from './indexer';
+import { RESTRICTED_TOOL_ERROR } from './trust';
 
 // Pending approvals: id -> resolver
 export const pendingApprovals = new Map<string, (ok: boolean) => void>();
@@ -547,6 +548,35 @@ export function computeDiffStats(
   return { added: b.length - lcs, removed: a.length - lcs };
 }
 
+/* =========================================================================
+ * v2.4.1 — Restricted Mode (Workspace Trust)
+ * Uneltele care scriu în workspace sau rulează cod sunt blocate când folderul
+ * nu e de încredere; cele read-only rămân disponibile (graceful degradation).
+ * ========================================================================= */
+
+/** Unelte care necesită Workspace Trust (scriu fișiere / rulează comenzi). */
+const TRUST_REQUIRED_TOOLS = new Set([
+  'write_file',
+  'edit_file',
+  'write_files',
+  'run_command',
+  'run_npm'
+]);
+
+/** Acțiuni git care modifică starea — status/diff/log rămân permise. */
+const TRUST_REQUIRED_GIT_ACTIONS = new Set(['commit', 'branch', 'revert', 'restore']);
+
+/** True dacă unealta scrie în workspace, rulează cod sau apelează un server MCP. */
+export function isToolTrustRequired(tool: string, args?: Record<string, any>): boolean {
+  const name = String(tool ?? '').toLowerCase();
+  if (TRUST_REQUIRED_TOOLS.has(name)) return true;
+  // MCP: serverele sunt procese externe care pot face orice
+  if (name.startsWith('mcp_') || name === 'mcp_call') return true;
+  if (name.startsWith('git_')) return TRUST_REQUIRED_GIT_ACTIONS.has(name.slice(4));
+  if (name === 'git') return TRUST_REQUIRED_GIT_ACTIONS.has(String(args?.action ?? '').toLowerCase());
+  return false;
+}
+
 export async function executeTool(
   call: ToolCall,
   workspaceRoot: string,
@@ -554,6 +584,10 @@ export async function executeTool(
   approve: ApprovalFn
 ): Promise<ToolResult> {
   log('executing tool: ' + call.tool);
+  if (!vscode.workspace.isTrusted && isToolTrustRequired(call.tool, call.args)) {
+    log('blocked by Restricted Mode: ' + call.tool);
+    return { ok: false, error: RESTRICTED_TOOL_ERROR };
+  }
   try {
     // FIX v0.1.1: acceptă și numele compuse "git_status" / "git_diff" / ...
     // (parserul le produce din formatul scurt {"tool":"git","action":"status"})

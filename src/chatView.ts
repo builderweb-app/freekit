@@ -28,6 +28,7 @@ import { configInfo, selectors } from './selectors';
 import { BrowserManager } from './browser';
 import {
   executeTool,
+  isToolTrustRequired,
   SYSTEM_PROMPT,
   SYSTEM_PROMPT_LOCAL,
   ToolCall,
@@ -50,6 +51,12 @@ import { detectCaptcha, isLoginRequiredError, isLoginUrl, sleep } from './provid
 import { runVerification, createPromptCheckpoint, restoreToCheckpoint, Checkpoint } from './verifier';
 import { ConversationStore, ConversationMessage } from './conversations';
 import { EditRollback } from './rollback';
+import {
+  RESTRICTED_BLOCKED_NOTICE,
+  RESTRICTED_NOTICE,
+  RESTRICTED_TOOL_ERROR,
+  showRestrictedNotification
+} from './trust';
 import { transcribeAudioFile } from './stt';
 import {
   startVoiceCapture,
@@ -379,6 +386,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     };
     view.webview.html = this.getHtml(view.webview);
     view.webview.onDidReceiveMessage((msg) => this.handleMessage(msg));
+    // v2.4.1: în Restricted Mode cardul rămâne vizibil în chat — notificarea
+    // VS Code poate fi închisă, dar aici utilizatorul vede mereu ce are de făcut.
+    if (!vscode.workspace.isTrusted) {
+      this.post('notice', '🔒 ' + RESTRICTED_NOTICE);
+    }
     // v1.7.3: oprește captarea audio dacă view-ul e distrus (fără finalizare)
     view.onDidDispose(() => {
       const cap = this.voiceCapture;
@@ -1150,15 +1162,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         : 'auto' + Date.now().toString(36);
     log((isRetry ? 'retry message: ' : 'user message: ') + userText.slice(0, 60));
 
-    // v0.3.0 (P0.4): refuză execuția în workspace-uri neîncrezute
-    // (extensia scrie fișiere și rulează comenzi — nu e sigur în modul restrict)
+    // v2.4.1: Restricted Mode nu mai blochează tot chat-ul — modelul poate citi
+    // și răspunde; doar uneltele care scriu/rulează sunt refuzate la execuție
+    // (vezi executeTool + blocarea MCP din bucla de mai jos). Utilizatorul e
+    // îndrumat clar către Trust, prin notificare + cardul din chat.
     if (!vscode.workspace.isTrusted) {
-      this.post(
-        'error',
-        'Untrusted workspace: Freekit can write files and run commands. ' +
-          'Enable Workspace Trust for this folder ("Manage Workspace Trust"), then try again.'
-      );
-      return;
+      log('message sent in Restricted Mode — tools that write or run will be blocked');
+      showRestrictedNotification();
     }
 
     // v1.9.0: prima conversație din sesiune se creează automat (titlul = promptul)
@@ -1550,9 +1560,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         // v1.1.0: apelurile MCP (mcp_<server>_<tool>) trec prin același flux
         // de aprobare; restul uneltelor merg pe executeTool clasic.
-        const mcpResult = await mcp.executeToolCall(toolCall, approve, log);
-        const result: ToolResult =
-          mcpResult ?? (await executeTool(toolCall, root, log, approve));
+        // v2.4.1: în Restricted Mode uneltele care scriu/rulează (inclusiv MCP)
+        // nu se execută — întoarcem o eroare clară și re-afișăm notificarea Trust.
+        const blockedByTrust =
+          !vscode.workspace.isTrusted && isToolTrustRequired(toolCall.tool, toolCall.args);
+        let result: ToolResult;
+        if (blockedByTrust) {
+          log('tool blocked by Restricted Mode: ' + toolCall.tool);
+          result = { ok: false, error: RESTRICTED_TOOL_ERROR };
+          showRestrictedNotification(true);
+          this.post('notice', '🔒 ' + RESTRICTED_BLOCKED_NOTICE);
+        } else {
+          const mcpResult = await mcp.executeToolCall(toolCall, approve, log);
+          result = mcpResult ?? (await executeTool(toolCall, root, log, approve));
+        }
         log('tool result ok=' + result.ok);
 
         // v1.7.1: verbose — execuția s-a încheiat + rezultatul (cap 4000)
@@ -2186,6 +2207,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     promptText: string
   ): Promise<void> {
     if (!this.checkpointsEnabled()) return;
+    // v2.4.1: un checkpoint înseamnă scrieri git (commit) — doar cu Trust
+    if (!vscode.workspace.isTrusted) return;
     try {
       const cp = await createPromptCheckpoint(root, messageId, promptText, {
         // v1.5.0: folder fără git → `git init` automat, ca butonul de
@@ -2240,6 +2263,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   /** Butonul ⟲: confirmare modală → git reset --hard la checkpoint. */
   private async handleRestoreCheckpoint(messageId: string): Promise<void> {
+    // v2.4.1: restore = git reset --hard (scriere) — blocat fără Trust
+    if (!vscode.workspace.isTrusted) {
+      this.post('notice', '🔒 ' + RESTRICTED_BLOCKED_NOTICE);
+      showRestrictedNotification(true);
+      return;
+    }
     const cp = this.checkpoints.find((c) => c.messageId === messageId);
     if (!cp) {
       this.post(

@@ -24,6 +24,7 @@ import {
 import { ollamaBaseUrl, OLLAMA_DOWNLOAD_URL } from './providers/ollama';
 import { getProviderStatus, ollamaInstallState } from './providers';
 import { ReportingService } from './reporting';
+import { isRestricted, promptForTrust, showRestrictedNotification } from './trust';
 
 /** v0.3.0 (P0.1): opțiunile browserului, citite live din setări. */
 function browserOptionsFromConfig(ctx: vscode.ExtensionContext) {
@@ -79,6 +80,15 @@ async function migrateLegacyBrandState(state: vscode.Memento): Promise<void> {
 export async function activate(ctx: vscode.ExtensionContext) {
   initLogChannel();
   logLine('extension', 'activated — container: freekit, view: freekit.chatView');
+  // v2.4.1 — Restricted Mode (fără Workspace Trust): extensia se activează
+  // LIMITAT (doar citire) și îi spune explicit utilizatorului ce are de făcut.
+  if (isRestricted()) {
+    logLine('trust', 'Restricted Mode: read-only features only until the folder is trusted');
+  }
+  // v2.4.1: „Trust This Workspace” — comanda din Command Palette + butonul din notificare
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand('freekit.trustWorkspace', () => promptForTrust())
+  );
   // v2.0.0: migrează starea din globalState de dinainte de rebranding
   await migrateLegacyBrandState(ctx.globalState);
   // v1.10.0: indexarea semantică (vector store JSON în globalStorage)
@@ -150,8 +160,15 @@ export async function activate(ctx: vscode.ExtensionContext) {
     browser,
     notify: (text) => chatView.postNotice(text)
   });
-  reporting.start();
   ctx.subscriptions.push(reporting);
+
+  // v2.4.1: serviciile care scriu în globalState, vorbesc cu serverul de
+  // raportare sau pornesc procese MCP nu pornesc în Restricted Mode; ele sunt
+  // activate automat în momentul în care Trust-ul e acordat.
+  const startTrustedFeatures = () => {
+    reporting.start();
+    void mcp.init(ctx, (text) => chatView.postNotice(text));
+  };
 
   // v2.4.0: starea integrării + acțiuni de control
   ctx.subscriptions.push(
@@ -173,6 +190,11 @@ export async function activate(ctx: vscode.ExtensionContext) {
 
   ctx.subscriptions.push(
     vscode.commands.registerCommand('freekit.reportingCheckNow', async () => {
+      // v2.4.1: verificarea deschide tab-uri și trimite rapoarte — doar cu Trust
+      if (isRestricted()) {
+        showRestrictedNotification(true);
+        return;
+      }
       const client = reporting.client;
       if (!client.enabled) {
         vscode.window.showWarningMessage(
@@ -599,11 +621,38 @@ export async function activate(ctx: vscode.ExtensionContext) {
   // expune AI-ului ca „mcp_<server>_<tool>”. Reîncărcare automată la
   // modificarea configului; UI de gestionare în comanda dedicată.
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('freekit.mcpManage', () =>
-      mcp.showManagerUi()
-    )
+    vscode.commands.registerCommand('freekit.mcpManage', () => {
+      // v2.4.1: MCP pornește procese externe — doar cu Workspace Trust
+      if (isRestricted()) {
+        showRestrictedNotification(true);
+        return;
+      }
+      return mcp.showManagerUi();
+    })
   );
-  void mcp.init(ctx, (text) => chatView.postNotice(text));
+
+  // v2.4.1: activarea completă (reporting + MCP) cere Workspace Trust. În
+  // Restricted Mode rămân doar funcțiile de citire, iar utilizatorul primește
+  // notificarea-imposibil-de-ratat cu butonul „Trust Workspace”.
+  if (isRestricted()) {
+    showRestrictedNotification();
+    logLine('trust', 'deferred features until trust: reporting, MCP');
+  } else {
+    startTrustedFeatures();
+  }
+
+  // Trust acordat fără reload (ex. din dialogul nativ): pornim serviciile
+  // amânate și confirmăm în chat că modul complet e activ.
+  ctx.subscriptions.push(
+    vscode.workspace.onDidGrantWorkspaceTrust(() => {
+      if (isRestricted()) return;
+      logLine('trust', 'workspace trust granted — enabling reporting + MCP');
+      startTrustedFeatures();
+      chatView.postNotice(
+        '✅ Workspace trusted — Freekit full mode enabled (file writes, commands and MCP tools unlocked).'
+      );
+    })
+  );
 
   // v1.8.1: serverele de dezvoltare pornite în terminale VS Code (run_npm /
   // run_command cu scripturi dev/serve/watch) sunt oprite best-effort la

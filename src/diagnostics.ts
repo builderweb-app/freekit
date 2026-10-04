@@ -49,7 +49,9 @@ export async function runDiagnostics(
   );
   lines.push(
     'Workspace trust: ' +
-      (vscode.workspace.isTrusted ? 'TRUSTED' : 'RESTRICTED (the extension will not run tools)') +
+      (vscode.workspace.isTrusted
+        ? 'TRUSTED'
+        : 'RESTRICTED (read-only: file writes, commands and MCP tools are disabled)') +
       ' | folder: ' +
       (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '(none open)')
   );

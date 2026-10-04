@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.4.2 — 2026-10-04
+
+**The Kimi provider is removed** — Kimi migrated from `kimi.com` (China mainland) to `kimi.ai` (international), and the bundled selectors written for `kimi.com` no longer work on the new site. With no `kimi.ai` account available to re-verify and repair them, the provider is dropped until it can be tested against the live site. The other providers are untouched.
+
+- **Provider lists** — `kimi` removed from `PROVIDER_IDS`, `PROVIDER_LABELS` and `BROWSER_PROVIDER_IDS`, and the `createProvider()` switch (`src/providers/index.ts`).
+- **Model selection** — Kimi removed from the curated model catalog and the model-menu selectors (`src/modelSelector.ts`), and from the per-provider thinking selectors (`src/providers/base.ts`).
+- **Provider file** — `src/providers/kimi.ts` deleted.
+- **Bundled selectors** — the `kimi` entry removed from `src/selectors.json`; the config version is bumped (1.4.0 → 1.5.0) so a cached/remote config that still carries Kimi is ignored.
+- **Manifest & docs** — `kimi` removed from the `freekit.provider` enum and the keywords, and Kimi dropped from the README provider lists.
+
 ## 2.4.1 — 2026-10-04
 
 **Restricted Mode is no longer silent** — the extension now activates in untrusted folders with reduced (read-only) functionality instead of doing nothing, and tells the user exactly what to do. `capabilities.untrustedWorkspaces` changed from `false` to `"limited"`; non-technical users who never noticed the VS Code trust banner now get an unmissable notification with a **Trust Workspace** button, plus a persistent card in the chat.

@@ -394,7 +394,6 @@ const THINKING_SELECTORS: Record<string, string[]> = {
   claude: ['div[class*="thinking"]', '[data-testid*="thinking"]'],
   gemini: ['div[class*="thought"]', '[class*="thinking"]'],
   qwen: ['div[class*="think"]'],
-  kimi: ['div.toolcall-content-text', '[class*="toolcall-content"]'],
   chatgpt: ['div[class*="think"]', '[class*="reasoning"]'],
   mistral: ['div[class*="think"]']
 };

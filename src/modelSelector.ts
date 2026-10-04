@@ -79,11 +79,6 @@ const MODELS: Record<string, ModelSpec[]> = {
     { id: 'qwen3-max', label: 'Qwen3-Max', badge: 'smart', match: ['qwen3-max', 'qwen3 max', 'max'] },
     { id: 'qwen3-coder', label: 'Qwen3 Coder', badge: 'fast', match: ['qwen3-coder', 'qwen3 coder', 'coder'] },
     { id: 'qwen-turbo', label: 'Qwen Turbo', badge: 'fast', match: ['turbo'] }
-  ],
-  kimi: [
-    { id: 'kimi-k2', label: 'Kimi K2', badge: 'smart', match: ['k2'] },
-    { id: 'kimi-k2-thinking', label: 'Kimi K2 Thinking', badge: 'reasoning', match: ['k2 thinking', 'thinking'] },
-    { id: 'kimi-latest', label: 'Kimi Latest', badge: 'fast', match: ['latest'] }
   ]
 };
 
@@ -178,20 +173,6 @@ const SELECTORS: Record<string, ProviderModelSelectors> = {
       '[class*="ant-select-item-option"]',
       '[role="menuitemradio"]',
       '[role="menuitem"]'
-    ]
-  },
-  kimi: {
-    button: [
-      'button:has-text("Kimi")',
-      '[class*="model-select"] button',
-      '[aria-haspopup="listbox"]',
-      '[class*="model"]'
-    ],
-    option: [
-      '[role="option"]',
-      '[role="menuitemradio"]',
-      '[role="menuitem"]',
-      '[class*="model-option"]'
     ]
   }
 };

@@ -1,7 +1,7 @@
 {
-  "version": "1.4.0",
-  "updated": "2026-10-01",
-  "changelog": "v0.9.3: Kimi response rescris pentru DOM-ul real (www.kimi.ai): doar mesajele AI (chat-content-item-assistant + markdown-container, fără blocul de thinking toolcall-content-text). Selectorii vechi ([class*='segment'], [class*='markdown']) prindeau și bula utilizatorului → reader-ul returna mesajul trimis de user în loc de răspuns.",
+  "version": "1.5.0",
+  "updated": "2026-10-04",
+  "changelog": "v1.5.0: providerul Kimi eliminat — site-ul a migrat la kimi.ai, iar selectorii pentru kimi.com nu mai funcționează (fără cont de testare pe kimi.ai).",
   "providers": {
     "deepseek": {
       "url": "https://chat.deepseek.com/",
@@ -340,60 +340,6 @@
         "fingerprint": {
           "tags": ["button", "a"],
           "nearbyText": ["New chat", "New", "Chat nou"]
-        }
-      },
-      "stopButton": {
-        "primary": "button[aria-label*='stop' i]",
-        "alternatives": ["[class*='stop']"],
-        "fingerprint": {
-          "tags": ["button"],
-          "nearbyText": ["Stop"]
-        }
-      }
-    },
-
-    "kimi": {
-      "url": "https://www.kimi.ai/",
-      "input": {
-        "primary": "div[contenteditable='true'][role='textbox'], textarea",
-        "alternatives": [
-          "textarea[placeholder]",
-          "div[contenteditable='true']"
-        ],
-        "fingerprint": {
-          "tags": ["div", "textarea"],
-          "attributes": ["contenteditable", "placeholder", "role"],
-          "nearbyText": ["Send", "Ask", "Message"],
-          "position": "bottom"
-        },
-        "preferredKeywords": ["message", "chat", "input"]
-      },
-      "response": {
-        "primary": ".chat-content-item-assistant .markdown-container:not(.toolcall-content-text) .markdown",
-        "alternatives": [
-          ".chat-content-item-assistant .markdown-container:not(.toolcall-content-text)",
-          ".chat-content-item-assistant .markdown",
-          ".chat-content-item-assistant .segment-assistant",
-          ".chat-content-item-assistant"
-        ],
-        "fingerprint": {
-          "tags": ["div"],
-          "hasChildren": ["p", "pre", "code"],
-          "role": "assistant",
-          "position": "bottom",
-          "minTextLength": 20
-        },
-        "preferredKeywords": ["assistant", "markdown"]
-      },
-      "newChat": {
-        "primary": "button[aria-label*='new' i], [class*='new-chat']",
-        "alternatives": [
-          "button[class*='plus']",
-          "a[href='/']"
-        ],
-        "fingerprint": {
-          "tags": ["button", "a"],
-          "nearbyText": ["New chat", "New conversation"]
         }
       },
       "stopButton": {

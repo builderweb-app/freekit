@@ -7,7 +7,6 @@ import { ClaudeProvider } from './claude';
 import { OllamaProvider, ollamaBaseUrl, detectOllamaCli, listOllamaModelsDetailed } from './ollama';
 import { MistralProvider } from './mistral';
 import { QwenProvider } from './qwen';
-import { KimiProvider } from './kimi';
 
 export const PROVIDER_IDS: string[] = [
   'auto',
@@ -17,7 +16,6 @@ export const PROVIDER_IDS: string[] = [
   'claude',
   'mistral',
   'qwen',
-  'kimi',
   'ollama'
 ];
 
@@ -29,7 +27,6 @@ export const PROVIDER_LABELS: Record<string, string> = {
   claude: 'Claude',
   mistral: 'Mistral (Vibe)',
   qwen: 'Qwen',
-  kimi: 'Kimi',
   ollama: 'Ollama (local)'
 };
 
@@ -40,8 +37,7 @@ export const BROWSER_PROVIDER_IDS: string[] = [
   'gemini',
   'claude',
   'mistral',
-  'qwen',
-  'kimi'
+  'qwen'
 ];
 
 /** Creează adaptorul pentru providerul dat (fallback: DeepSeek). */
@@ -57,8 +53,6 @@ export function createProvider(id: string): AIProvider {
       return new MistralProvider();
     case 'qwen':
       return new QwenProvider();
-    case 'kimi':
-      return new KimiProvider();
     case 'ollama':
       return new OllamaProvider();
     default:

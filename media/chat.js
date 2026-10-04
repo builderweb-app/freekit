@@ -27,6 +27,7 @@ const ICON_STOP =
 // v2.0.1: layout nou (mockup) — #chat + composer
 const messages = document.getElementById('chat');
 const input = document.getElementById('in');
+const boxEl = document.querySelector('.box'); // v2.4.3: border animat cât timp AI-ul generează
 const sendBtn = document.getElementById('send');
 const stopBtn = document.getElementById('stop');
 const jumpBtn = document.getElementById('jump');
@@ -338,6 +339,7 @@ function add(role, text, ts, atts, msgId) {
 
 function setBusy(value) {
   busy = value;
+  if (boxEl) boxEl.classList.toggle('busy', !!value);
   stopBtn.hidden = !value;
   if (attachFileBtn) attachFileBtn.disabled = value;
   if (attachFolderBtn) attachFolderBtn.disabled = value;

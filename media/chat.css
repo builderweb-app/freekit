@@ -850,6 +850,56 @@ pre.code code {
   border-color: var(--vscode-focusBorder);
 }
 
+/* v2.4.3: animație border cât timp AI-ul generează */
+.box.busy {
+  position: relative;
+  border-color: transparent !important;
+}
+
+/* Gradient animat pe border (conic) */
+.box.busy::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: 8px;
+  padding: 1px;
+  background: conic-gradient(
+    from var(--angle, 0deg),
+    transparent 0%,
+    var(--vscode-focusBorder, #007fd4) 25%,
+    transparent 50%
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  animation: rotate 2s linear infinite;
+  pointer-events: none;
+  z-index: 1;
+}
+
+@property --angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes rotate {
+  to { --angle: 360deg; }
+}
+
+/* Fallback pentru browsere fără @property (pulse simplu) */
+@supports not (background: conic-gradient(from var(--angle), red, blue)) {
+  .box.busy {
+    animation: pulseBorder 1.5s ease-in-out infinite;
+  }
+  @keyframes pulseBorder {
+    0%, 100% { border-color: var(--vscode-input-border, #3c3c3c); }
+    50%      { border-color: var(--vscode-focusBorder, #007fd4); }
+  }
+}
+
 .box textarea {
   display: block;
   width: 100%;

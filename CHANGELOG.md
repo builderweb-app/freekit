@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.4.3 — 2026-10-04
+
+**The input box shows it is working** — while the AI is generating, the composer border runs an animated conic gradient, so a long answer no longer feels like the chat is frozen.
+
+- **Animated border** — `.box.busy` hides the normal border and paints a rotating conic gradient ring with a masked `::before` overlay, driven by a registered `@property --angle` (2 s linear loop) in `media/chat.css`.
+- **Fallback** — browsers without `conic-gradient(from var(--angle), …)` support get a simple border pulse instead.
+- **Wiring** — `setBusy()` in `media/chat.js` toggles the `busy` class on `.box`, so every path that enters/leaves the generating state (send, stop, `busy` message from the extension, errors) drives the effect consistently.
+
 ## 2.4.2 — 2026-10-04
 
 **The Kimi provider is removed** — Kimi migrated from `kimi.com` (China mainland) to `kimi.ai` (international), and the bundled selectors written for `kimi.com` no longer work on the new site. With no `kimi.ai` account available to re-verify and repair them, the provider is dropped until it can be tested against the live site. The other providers are untouched.

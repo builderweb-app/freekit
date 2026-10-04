@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.4.4 — 2026-10-04
+
+**Marketplace-ready README** — the README is rewritten for the VS Code Marketplace listing, with screenshots first, a comparison table, and a structure built for first-time visitors. No source code changes.
+
+- **New structure** — header + tagline + two badges → screenshots → *Why Freekit?* → organized features → quick start → supported providers → how it works → privacy → trust / Restricted Mode → commands → settings → advanced deep-dives → troubleshooting → requirements → license.
+- **Screenshots up front** — all six `media/screenshots/*.jpg` images (chat, model selector, hardware tiers, native diff, sessions menu, reporting dashboard) are embedded at the top of the listing.
+- **Why Freekit? table** — side-by-side comparison against Cline, Cursor and Copilot on provider support, cost, local Ollama, free-account support, self-maintenance and native diff.
+- **Providers corrected** — six web providers (DeepSeek, ChatGPT, Claude, Gemini, Mistral, Qwen) plus local Ollama; Kimi is no longer mentioned anywhere (removed in 2.4.2).
+- **Features consolidated** — the long feature dump is replaced by scannable bullets that also surface auto-verify/rollback, dev servers in a visible terminal and verbose mode.
+- **Preserved verbatim** — the full **Commands** (19) and **Settings** (36) tables are unchanged; the semantic-search, remote-selector, reporting-server and MCP write-ups move into an **Advanced** section.
+- **New sections** — *Trust / Restricted Mode* spells out what still works in an untrusted folder, and *Troubleshooting* covers the four most common failures.
+- **License & footer** — proprietary license now linked to the real `LICENSE` file, with a `builderweb` footer; the Development snippet points at `freekit-2.4.4.vsix`.
+
 ## 2.4.3 — 2026-10-04
 
 **The input box shows it is working** — while the AI is generating, the composer border runs an animated conic gradient, so a long answer no longer feels like the chat is frozen.

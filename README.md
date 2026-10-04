@@ -1,48 +1,121 @@
 # Freekit
 
-Connect web AI chats (**DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen**) — or a local **Ollama** model — directly to VS Code. Freekit drives a dedicated, hidden Chrome instance, lets the AI read and edit your workspace through an approval-based tool loop, and shows everything in a chat sidebar.
+> **Free AI coding agent for VS Code.** Use your existing web AI accounts (DeepSeek, ChatGPT, Claude, Gemini, Mistral, Qwen) or a local Ollama model. No API keys, no subscriptions, no costs.
+
+[![Version](https://img.shields.io/badge/version-2.4.4-blue)](https://marketplace.visualstudio.com/items?itemName=builderweb.freekit)
+[![VS Code](https://img.shields.io/badge/VS%20Code-%3E%3D1.90-blue)](https://code.visualstudio.com)
+
+## Screenshots
+
+![Chat with code generation](media/screenshots/1-chat.jpg)
+![Model selector with all providers](media/screenshots/2-model-selector.jpg)
+![Hardware-aware Ollama recommendations](media/screenshots/3-hardware-tiers.jpg)
+![Native VS Code diff for file changes](media/screenshots/4-native-diff.jpg)
+![Sessions and conversation menu](media/screenshots/5-menu.jpg)
+![Reporting dashboard](media/screenshots/6-dashboard.jpg)
+
+## Why Freekit?
+
+Unlike other AI coding agents, Freekit works with your existing web AI accounts:
+
+| Feature | Freekit | Cline | Cursor | Copilot |
+|---|---|---|---|---|
+| Web AI providers (no API keys) | ✅ 6 | ❌ | ❌ | ❌ |
+| Cost | **$0** | API costs | $20/mo | $10-19/mo |
+| Local Ollama (hardware-aware) | ✅ | ✅ | ⚠️ | ❌ |
+| Works with free accounts | ✅ | ❌ | ❌ | ❌ |
+| Self-maintaining | ✅ | ❌ | ❌ | ❌ |
+| Native VS Code diff | ✅ | ✅ | ✅ | ❌ |
+
+**Perfect for:**
+
+- Students and hobbyists without API budgets
+- Developers in emerging markets (cost-sensitive)
+- Anyone who already has a ChatGPT Plus / Claude Pro subscription
+- Privacy-conscious users (local Ollama option)
 
 ## Features
 
-- 💬 **Chat sidebar** with provider switcher (Auto / DeepSeek / ChatGPT / Gemini / Claude / Mistral (Vibe) / Qwen / Ollama local)
-- 🎛️ **Real model selection** — the composer's model chip switches the **actual model in the web UI**, not just the label: pick ChatGPT's GPT-4o / GPT-4.1 / o3, Claude's Sonnet / Opus / Haiku, Gemini 2.5 Pro / 2.5 Flash, DeepSeek's DeepThink (R1) / Chat (V3), or the Mistral / Qwen options — Freekit drives the site's own dropdown before sending, per provider (choice kept across sessions; **Site default** reverts). Clicks are human-like, the switch is verified against the button label, and a redesign only costs you a friendly notice + the site's current model
-- 🔀 **Auto fallback** — try the last web provider through Chrome; if it fails, continue on local Ollama automatically
-- 🟢 **Status badge** — live 🟢🟡🔴 indicator for Chrome/Ollama next to the provider picker (click for a report)
-- 🤖 **Agentic loop** — the AI calls tools step by step: read, write, edit, search, run commands, git
-- 🖥️ **Dev servers in a visible terminal** — `dev` / `start` / `serve` / `watch` / `preview` commands (`npm run dev`, `npm start`, `vite`, `nodemon`, …) are detected automatically and start in a dedicated **VS Code terminal** (`Freekit: dev`): you watch the live output in the bottom panel and stop the server with **Ctrl+C** in that terminal; the AI gets the live URL and the first seconds of output immediately (captured via the stable Shell Integration API) instead of waiting for a command that never exits — fast startup errors (port already in use, syntax errors) still come back for self-correction. Stop everything with `Freekit: Stop Dev Servers` (Ctrl+C to every server terminal)
-- 🔌 **MCP client** — connect any external [Model Context Protocol](https://modelcontextprotocol.io/) server (`.vscode/mcp.json` or `freekit.mcpServers`); its tools are discovered automatically and exposed to the AI as `mcp_<server>_<tool>`, with the same approval flow as built-in tools
-- 🧭 **Semantic code search (local index)** — index the workspace once and the AI can find code by **meaning**, not just exact text: `Freekit: Index Workspace` embeds every chunk with a local Ollama embedding model (`nomic-embed-text`, 768-dim) and stores it as a plain JSON vector store in globalStorage (**zero new npm dependencies**, nothing leaves your machine). The AI gets a `search_semantic(query)` tool (e.g. *"where do we validate the login token?"*) that returns the best-matching snippets with file paths, line ranges and scores; `Freekit: Index Status` shows what's indexed and `Freekit: Clear Index` wipes it. Indexing is **incremental** (only changed files are re-embedded, matched by content hash) and can also run **on save** (`freekit.semanticIndex.onSave`). Smart exclusions keep it fast: `node_modules`, `.git`, `out`, `dist`, `build`, caches, lockfiles, minified files and binaries are skipped, files over `freekit.semanticIndex.maxFileKb` are ignored, and large files are split into overlapping chunks
-- 🔍 **Native diff review** — file writes open a real VS Code diff (old vs. new content) with **Accept / Reject** buttons **inline in the chat** (reliable fallback) and in the VS Code notification — whichever you click first decides — plus a per-file "don't ask again" option; the file is only touched after you accept
-- 🧪 **Auto-verify & auto-repair** — after every file write the project is checked automatically (`astro check` / `tsc --noEmit` / `build`); the full error goes back to the AI for repair (max 3 attempts) and, if it still fails, the changes are **rolled back automatically** to the last verified state
-- ⟲ **Git checkpoints & one-click restore** — before every prompt the project is snapshotted with a temporary git commit (`freekit-prompt:<id>`); each user message gets a ⟲ button in the chat that brings the project back to that exact state (`git reset --hard`, with an automatic backup commit of the current state first). Folders that aren't git repos yet are initialized automatically (`git init` + a minimal `.gitignore`; `freekit.autoInitGit`), and a one-time chat notice explains it when git itself is unavailable; toggle with `freekit.promptCheckpoints`
-- 🗂 **Conversations, edit & fork** — every chat is a persisted conversation: the **⋯** menu lists them (➕ New chat; **right-click a row → Delete conversation**; titles come from the first prompt; the old single history migrates automatically). Hover any of your messages for three actions: **✐ edit** (rewind the git checkpoint, drop everything after that message and re-send the edited prompt), **ᛉ fork** (branch a new conversation from that message — the original stays in the list) and **⟲ restore**
-- 🔊 **Text-to-speech** — every AI reply has a 🔊 button (next to Copy) that reads it aloud (Web Speech API; Romanian voice when installed), split into sentence-sized chunks for long answers; click again to stop
-- 🎤 **Voice input (local Whisper, offline)** — the 🎤 button captures audio **in the Extension Host** (the VS Code webview sandbox has no microphone access, so recording runs in the extension's own process — no SoX, nothing to install: on Windows a native C# `winmm` recorder driven by PowerShell; on macOS/Linux, SoX via `node-audiorecorder` when available) and transcribes it with **whisper.cpp on your machine** (no cloud, no Google services): click to record (live timer + pulsing button), click again to stop — the text is appended to the message box; Romanian + English via `freekit.sttLanguage`; the one-time `Freekit: Setup Local Whisper` command downloads the engine + `ggml-base` model (~160 MB) into global storage
-- 🔎 **Verbose mode (diagnostic transparency)** — a 🔍 toggle in the **⋯** menu (persisted across sessions; the ⋯ button gets a dot while it is on) that shows every AI step in the chat as collapsible cards: **🧠 Thinking** (the model's reasoning — DeepSeek-R1 / Claude extended thinking / Gemini / Ollama `message.thinking`) shown live while the model reasons, then collapsed Cline-style with a ▼/▶ arrow and the total duration (e.g. *🧠 Thinking (2.3s)*); click the header to expand it again, **⚙️ Executing** (tool + exact command/target), **📄 Result** (tool output, capped at 4 000 chars) and **🔀 Decision** (tool choice, auto-retry, auto-repair, rollback). Off by default = only the final answers, exactly as before.
-- ✅ **Approval cards** for commands/git; optional ⚡ auto-approve (with an explicit warning)
-- 📎 **Attachments** — files, folders, images & binaries (text is embedded, binaries are uploaded to the web chat)
-- 🧠 **Auto-context** — project structure, language, package manager and frameworks are sent with every message
-- 🛠️ **Self-healing selectors** — when a provider changes its UI, Freekit repairs its CSS selectors automatically
-- 🧑 **Human-like input & anti-detect** — messages are typed with human timing (random delays, punctuation pauses, bursts), a MutationObserver detects the exact moment generation finishes (no fixed polling), and small mouse moves/scrolls precede clicks; each feature can be toggled (`freekit.humanTyping`, `freekit.mutationObserver`, `freekit.humanBehavior`)
-- 🍪 **Consent popups closed automatically** — cookie banners and terms/OK dialogs are accepted for you (safe exact-match on 3 confidence tiers; “Reject / Only necessary / Customize” are never clicked); scans include iframes and run after page loads, before New Chat and right before typing — toggle with `freekit.autoAcceptPopups`
-- ☁️ **Remote selector fixes** — publish repaired selectors to a public GitHub Gist (`freekit.selectorsUrl`); every client picks them up without an extension update (bundled selectors stay as fallback)
-- 🧠 **AI-powered selector discovery** — when the classic healer fails on a redesigned site, a cleaned DOM snapshot goes to the local Ollama model; the proposed selectors are validated in the live page, applied immediately and saved to `selectors-user.json` (global storage)
-- ☁️ **Self-maintaining selectors (reporting server)** — the extension registers once with `api.builderweb.app`, checks every 6 h that the providers you have open still work, repairs a broken selector **locally first** (fingerprint healer → AI finder) and only reports it if that fails, so a fix can be published to everyone; every 24 h it pulls the repairs other clients reported and applies them without an extension update. Fully optional: no code, files or messages are ever sent — see `freekit.reporting.enabled` and `freekit.reporting.shareDomSnapshot`
-- 🦙 **Ollama mode** — fully local, no browser required; the model chip's **Local · Ollama** section shows your installed models (with their disk size) **and what your machine can actually run**: Freekit detects RAM and VRAM (`nvidia-smi`, the Windows registry, `system_profiler` or Linux sysfs), recommends the best-fitting models (with the GPU/CPU split spelled out), lets you **download** a missing recommendation with one click (`ollama pull`, live progress, cancellable) and hides an **Install Ollama** row that opens the official download page when nothing is installed yet (`Freekit: Install Ollama`) — the same hardware summary is printed by `Freekit: Show Provider Status`
-- 🌙 **Hidden Chrome** — runs completely in the background (minimized; on Windows with **no taskbar button** and absent from Alt+Tab), never steals focus; it automatically comes on screen when a provider asks for **login or a CAPTCHA** (and hides again when you're done), or bring it back anytime with 👁 Show Chrome
+- 🎯 **Six web AI providers + Ollama** — DeepSeek, ChatGPT, Claude, Gemini, Mistral, Qwen + local Ollama
+- 🔒 **Stealth mode** — human-like typing (real keydown/keyup), anti-detection
+- 🤖 **Agentic loop** — up to 40 iterations, 12 tools (read/write/edit/search/run/git)
+- 📝 **Native diff review** — Accept/Reject each file change in VS Code's diff viewer
+- ⟲ **Git checkpoints** — restore any prompt with one click
+- ✂️ **Fork & edit conversations** — ChatGPT-style conversation branching
+- 🔊 **TTS + 🎤 voice input** — offline Whisper transcription
+- 📚 **Semantic code search** — find code by meaning, not just text
+- 🔌 **MCP servers** — Model Context Protocol support
+- 🛡️ **Hardware-aware Ollama** — 51-model catalog, tiers T0-T6, auto-recommendation
+- 🧪 **Auto-verify & auto-repair** — every file write is checked (`tsc --noEmit` / `astro check` / `build`); failures go back to the AI (up to 3 attempts) and are rolled back if they can't be fixed
+- 🖥️ **Dev servers in a visible terminal** — `npm run dev`, `vite`, `nodemon`, … start in a dedicated VS Code terminal, and the AI gets the live URL immediately
+- 🔍 **Verbose mode** — collapsible Thinking / Executing / Result / Decision cards for full transparency
+- 📎 **Attachments & auto-context** — files, folders, images and binaries, plus project structure sent with every message
 
-## Requirements
+## Quick start
 
-- VS Code 1.90+
-- Google Chrome or Microsoft Edge installed (auto-detected; override with `freekit.chromePath`)
-- A logged-in session for each web provider (first time only — log in inside the Freekit Chrome profile)
+1. Install Freekit from the VS Code Marketplace
+2. Open the sidebar → click the **F** icon
+3. Click the **model chip** at the bottom → select a provider (e.g., DeepSeek)
+4. A Chrome window opens → log in once (your session is saved)
+5. Start chatting — try: `Write a Python function for factorial`
 
-## Getting started
+**First time?** VS Code may show a blue "Restricted Mode" banner. Click **Trust** to enable full functionality (Freekit writes files and runs commands — this is required).
 
-1. Install the extension, open the **Freekit** view in the activity bar.
-2. Pick a provider. On first use a hidden Chrome launches with a dedicated profile stored in VS Code's global storage (not in your project).
-3. Log into the provider once — if a login page is detected, Freekit brings Chrome on screen, waits for you to sign in, then hides the window again and continues automatically. CAPTCHA challenges (reCAPTCHA / hCaptcha / Cloudflare “Just a moment”) get the same treatment.
-4. Type a message. File writes open a native diff in the editor (Accept / Reject from the in-chat card or the VS Code notification); command approvals appear as cards in the chat. Or enable ⚡ auto-approve at your own risk.
+## Supported providers
+
+### Web (browser automation — no API key needed)
+
+- **DeepSeek** (Chat V3 / DeepThink R1)
+- **ChatGPT** (GPT-4o / GPT-4.1 / o3)
+- **Claude** (Sonnet / Opus / Haiku)
+- **Gemini** (2.5 Pro / 2.5 Flash)
+- **Mistral** (Vibe)
+- **Qwen**
+
+### Local
+
+- **Ollama** — 51-model catalog, hardware tiers T0-T6, auto-recommendation based on your VRAM and RAM
+
+## How it works
+
+Freekit connects to your **existing web AI sessions** via browser automation:
+
+1. Launches an **isolated Chrome profile** (separate from your personal Chrome)
+2. You log in **once** to each provider (session is saved)
+3. Freekit types messages with **human-like keystrokes** (real keydown/keyup, random delays)
+4. It reads the AI response and renders it in the VS Code sidebar
+5. File changes appear as **native VS Code diffs** — you Accept or Reject each one
+
+Everything is local. No middle server. No data sent to third parties.
+
+## Privacy
+
+- ✅ **Zero telemetry** — no analytics, no tracking
+- ✅ **Isolated browser** — separate Chrome profile, doesn't touch your personal browser
+- ✅ **Local by default** — Chrome profile, history and settings stay on your disk
+- ⚠️ **Browser automation** — messages go through the web AI (same as if you typed them manually)
+- ⚙️ **Self-reporting** (opt-in, on by default) — anonymous selector break reports to help fix issues. No code, files or messages sent. Disable: `freekit.reporting.enabled`
+- 🔒 **Ollama option** — fully offline, nothing leaves your machine
+
+## Trust / Restricted Mode
+
+Freekit writes files, runs terminal commands and controls a browser — it needs a **trusted workspace**.
+
+On first launch, VS Code shows a blue **"Restricted Mode"** banner. Click **Trust** to enable full functionality.
+
+**In Restricted Mode (no trust):**
+
+- ✅ Chat UI works
+- ✅ Read-only tools (`read_file`, `search_files`, etc.)
+- ❌ File writes, terminal commands, git mutations, MCP tools
+
+You can also run `Freekit: Trust This Workspace` from the Command Palette.
+
+Additional safeguards:
+
+- Writes open a **native VS Code diff** for review — accept or reject from the in-chat card or the VS Code notification; shell commands and git operations require approval cards unless ⚡ auto-approve is enabled.
+- Anti-spam limits: max 3 writes per file and 15 write operations per message.
+- The webview runs with a strict Content Security Policy.
 
 ## Commands
 
@@ -109,7 +182,9 @@ Connect web AI chats (**DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen**) — 
 | `freekit.reporting.healthCheckIntervalHours` | `6` | Hours between two automatic selector health checks |
 | `freekit.reporting.selectorsIntervalHours` | `24` | Hours between two automatic fetches of repaired selectors from the server |
 
-## Semantic code search
+## Advanced
+
+### Semantic code search
 
 Freekit can find code **by meaning** instead of exact text — useful for questions like *"where do we retry a failed upload?"* when you don't know the identifier to grep for.
 
@@ -124,7 +199,7 @@ How it works:
 - **Chunking with overlap** — files are split into 60-line windows with a 12-line overlap so a function that straddles a boundary is still found; oversized/minified files are skipped and recorded in the status.
 - **Graceful in the agent loop** — if there is no index yet, `search_semantic` returns a clear message telling the AI to fall back to `search_files` (or you to run the index command), so nothing breaks.
 
-## Remote selector updates
+### Remote selector updates
 
 Selector repairs can reach every client without shipping a new extension version:
 
@@ -134,7 +209,7 @@ Selector repairs can reach every client without shipping a new extension version
 
 Freekit then checks on startup — rate-limited to once every 24 h — and on demand via `Freekit: Update Selectors`, applying the config only when its `version` is newer than the active one. The update is validated, merged over the bundled config, cached locally, and local auto-repairs for the slots it touches are replaced by the curated fix. Any failure (invalid JSON, HTTP error, timeout) leaves the current config in place.
 
-## Reporting server (self-maintaining)
+### Reporting server (self-maintaining)
 
 Freekit can feed a central reporting server (`https://api.builderweb.app` by default) so a site redesign discovered on one machine turns into a fix for everybody — without waiting for an extension release.
 
@@ -145,7 +220,7 @@ Freekit can feed a central reporting server (`https://api.builderweb.app` by def
 
 Use `Freekit: Reporting Status` for the current state (registration, revision, last check), `Freekit: Run Selector Health Check` to run a check immediately (e.g. right after a site redesign) and `Freekit: Reset Reporting Registration` to start over with a new identity.
 
-## MCP servers
+### MCP servers
 
 Freekit ships a **Model Context Protocol** client: MCP servers give the agent extra tools (databases, browsers, APIs, file systems, …) beyond the built-in ones. Configure them once — they are launched with VS Code and their tools are exposed to the AI as `mcp_<server>_<tool>`.
 
@@ -166,11 +241,30 @@ Freekit ships a **Model Context Protocol** client: MCP servers give the agent ex
 
 Every MCP call shows an **approval card** (server, tool and arguments) before it runs — ⚡ auto-approve skips it like any other tool. Only the **stdio** transport is supported. A crashed or missing server is reported in the chat and in `Freekit: Diagnostics`.
 
-## Safety
+## Troubleshooting
 
-- Writes open a **native VS Code diff** for review — decide via the **Accept / Reject buttons in the chat** or from the VS Code notification; shell commands and git operations require approval via chat cards unless auto-approve is enabled.
-- In **Restricted Mode** (untrusted folder) the extension still activates, but **read-only**: reading and searching files works, while file writes, shell commands, git changes, MCP tools and the selector health check are blocked. An unmissable notification — plus a card in the chat — offers **Trust Workspace** (or run `Freekit: Trust This Workspace` from the Command Palette) to unlock everything. The reporting integration and MCP servers only start once the folder is trusted.- Anti-spam limits: max 3 writes per file and 15 write operations per message.
-- The webview runs with a strict Content Security Policy.
+**"Could not find the input box"**
+
+→ Log in to the provider. Click **Show Chrome** in the ⋯ menu, sign in, then retry.
+
+**"Restricted Mode — some features disabled"**
+
+→ Click **Trust** in the blue banner at the top of VS Code.
+
+**"Ollama not running"**
+
+→ Install Ollama from [ollama.com](https://ollama.com/download) and run `ollama serve`.
+
+**Browser automation issues**
+
+→ Click **Freekit: Reset Repaired Selectors** and try again.
+
+## Requirements
+
+- VS Code **1.90+**
+- **Chrome or Edge** (installed)
+- **Ollama** (optional, for local models)
+- **Windows / macOS / Linux**
 
 ## Development
 
@@ -178,7 +272,15 @@ Every MCP call shows an **approval card** (server, tool and arguments) before it
 npm install
 npm run compile        # tsc → out/
 npx @vscode/vsce package --allow-missing-repository
-code --install-extension freekit-2.0.0.vsix --force
+code --install-extension freekit-2.4.4.vsix --force
 ```
 
 Press <kbd>F5</kbd> for an Extension Development Host.
+
+## License
+
+Proprietary. See [LICENSE](./LICENSE).
+
+---
+
+**Made by [builderweb](https://builderweb.app)**

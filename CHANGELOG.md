@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.4.5 — 2026-10-04
+
+**Packaging fixed** — vsce refused to build with *"Couldn't detect the repository"*, because `package.json` declared no `repository`; with no repository it cannot resolve the relative screenshot paths in the README into absolute URLs, so `freekit-2.4.4.vsix` was never produced. The manifest now declares the Git repository and the package builds again.
+
+- **`repository` added** — `package.json` declares `{"type": "git", "url": "https://github.com/builderweb/freekit"}`, placed right after `publisher`, so vsce can detect the repo and rewrite relative README links.
+- **README encoding verified** — `README.md` is UTF-8 **without BOM** (20193 bytes, strict-UTF-8 valid); emoji are intact (✅ ❌ ⚠️) and no mojibake (`âœ…` / `âŒ` / `âš`) remains.
+- **Docs** — the README version badge and the Development snippet now reference 2.4.5.
+
 ## 2.4.4 — 2026-10-04
 
 **Marketplace-ready README** — the README is rewritten for the VS Code Marketplace listing, with screenshots first, a comparison table, and a structure built for first-time visitors. No source code changes.

@@ -2,7 +2,7 @@
 
 > **Free AI coding agent for VS Code.** Use your existing web AI accounts (DeepSeek, ChatGPT, Claude, Gemini, Mistral, Qwen) or a local Ollama model. No API keys, no subscriptions, no costs.
 
-[![Version](https://img.shields.io/badge/version-2.4.4-blue)](https://marketplace.visualstudio.com/items?itemName=builderweb.freekit)
+[![Version](https://img.shields.io/badge/version-2.4.5-blue)](https://marketplace.visualstudio.com/items?itemName=builderweb.freekit)
 [![VS Code](https://img.shields.io/badge/VS%20Code-%3E%3D1.90-blue)](https://code.visualstudio.com)
 
 ## Screenshots
@@ -272,7 +272,7 @@ Every MCP call shows an **approval card** (server, tool and arguments) before it
 npm install
 npm run compile        # tsc → out/
 npx @vscode/vsce package --allow-missing-repository
-code --install-extension freekit-2.4.4.vsix --force
+code --install-extension freekit-2.4.5.vsix --force
 ```
 
 Press <kbd>F5</kbd> for an Extension Development Host.

@@ -1,0 +1,80 @@
+Freekit - Proprietary Software License
+Copyright (c) 2026 Laurentiu Pelin / Builderweb. All rights reserved.
+
+This software, including its source code, object code, documentation, assets
+and any accompanying files (the "Software"), is proprietary and is protected
+by copyright and other intellectual property laws.
+
+1. OWNERSHIP
+
+The Software is licensed, not sold. Laurentiu Pelin / Builderweb ("the Author")
+retains all right, title and interest in and to the Software, including all
+intellectual property rights. No rights are granted except as expressly stated
+in this license.
+
+2. PERMITTED USE
+
+Subject to the terms of this license, the Author grants you a limited,
+non-exclusive, non-transferable, non-sublicensable, revocable license to
+install and use the Software, as distributed by the Author or through the
+official Visual Studio Code Marketplace listing, for personal or internal
+business purposes.
+
+3. RESTRICTIONS
+
+You may not:
+
+  a) copy, distribute, publish, sublicense, sell, rent, lease or otherwise
+     make the Software available to any third party;
+  b) modify, adapt, translate or create derivative works based on the
+     Software;
+  c) reverse engineer, decompile or disassemble the Software, except to the
+     extent that such activity is expressly permitted by applicable law;
+  d) remove, alter or obscure any copyright, trademark or other proprietary
+     notices contained in the Software;
+  e) use the Software to develop or promote a competing product or service.
+
+4. THIRD-PARTY SERVICES
+
+The Software can interact with third-party AI services and websites. Your use
+of those services is governed solely by their own terms of service and privacy
+policies. The Author is not affiliated with, endorsed by, or responsible for
+any third-party service.
+
+5. SUPPORT AND DONATIONS
+
+The Software is provided free of charge. Optional donations are appreciated and
+do not grant any additional rights, warranty, support or priority:
+
+  https://buymeacoffee.com/builderweb
+
+6. TERMINATION
+
+This license is effective until terminated. Your rights under this license
+terminate automatically and without notice if you breach any of its terms.
+Upon termination you must stop using the Software and delete all copies in
+your possession.
+
+7. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, TITLE AND NONINFRINGEMENT. THE AUTHOR DOES
+NOT WARRANT THAT THE SOFTWARE WILL BE ERROR-FREE OR UNINTERRUPTED, OR THAT IT
+WILL WORK WITH ANY PARTICULAR THIRD-PARTY SERVICE.
+
+8. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE
+AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE, INCLUDING BUT
+NOT LIMITED TO LOSS OF DATA, LOSS OF PROFITS, OR BUSINESS INTERRUPTION.
+
+9. GOVERNING LAW
+
+This license is governed by the laws applicable at the Author's principal
+place of business, without regard to its conflict of law provisions.
+
+For permissions beyond the scope of this license, please get in touch:
+https://builderweb.app

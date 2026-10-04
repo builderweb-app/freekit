@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.4.6 — 2026-10-04
+
+**Legal protection and donations** — the license is now an explicit proprietary EULA, and the project accepts donations through Buy Me a Coffee.
+
+- **`LICENSE.txt`** (new) — proprietary license replacing `LICENSE`: ownership, permitted use, restrictions (no copying, modification, redistribution or reverse engineering), a third-party-services disclaimer, termination, no-warranty and limitation-of-liability clauses. The copyright holder is now **Laurentiu Pelin / Builderweb** (previously "Lanon").
+- **`package.json`** — added `"license": "SEE LICENSE IN LICENSE.txt"` and a `"sponsor"` entry pointing at <https://buymeacoffee.com/builderweb> (renders a Sponsor link on the Marketplace page); the `repository` block is re-indented to valid two-space JSON.
+- **README** — new **Support** section with a Buy Me a Coffee badge, the footer links the donation page, the license link points at `LICENSE.txt`, and the Development snippet drops the now-unneeded `--allow-missing-repository` flag.
+
 ## 2.4.5 — 2026-10-04
 
 **Packaging fixed** — vsce refused to build with *"Couldn't detect the repository"*, because `package.json` declared no `repository`; with no repository it cannot resolve the relative screenshot paths in the README into absolute URLs, so `freekit-2.4.4.vsix` was never produced. The manifest now declares the Git repository and the package builds again.

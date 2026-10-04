@@ -2,7 +2,7 @@
 
 > **Free AI coding agent for VS Code.** Use your existing web AI accounts (DeepSeek, ChatGPT, Claude, Gemini, Mistral, Qwen) or a local Ollama model. No API keys, no subscriptions, no costs.
 
-[![Version](https://img.shields.io/badge/version-2.4.5-blue)](https://marketplace.visualstudio.com/items?itemName=builderweb.freekit)
+[![Version](https://img.shields.io/badge/version-2.4.6-blue)](https://marketplace.visualstudio.com/items?itemName=builderweb.freekit)
 [![VS Code](https://img.shields.io/badge/VS%20Code-%3E%3D1.90-blue)](https://code.visualstudio.com)
 
 ## Screenshots
@@ -271,16 +271,22 @@ Every MCP call shows an **approval card** (server, tool and arguments) before it
 ```bash
 npm install
 npm run compile        # tsc → out/
-npx @vscode/vsce package --allow-missing-repository
-code --install-extension freekit-2.4.5.vsix --force
+npx @vscode/vsce package
+code --install-extension freekit-2.4.6.vsix --force
 ```
 
 Press <kbd>F5</kbd> for an Extension Development Host.
 
+## Support
+
+Freekit is free — no API keys, no subscriptions. If it saves you time, you can buy me a coffee:
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow?logo=buymeacoffee)](https://buymeacoffee.com/builderweb)
+
 ## License
 
-Proprietary. See [LICENSE](./LICENSE).
+Proprietary. See [LICENSE.txt](./LICENSE.txt).
 
 ---
 
-**Made by [builderweb](https://builderweb.app)**
+**Made by [builderweb](https://builderweb.app)** · [Buy me a coffee](https://buymeacoffee.com/builderweb)

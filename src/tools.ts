@@ -39,6 +39,10 @@ export interface ToolResult {
   error?: string;
   /** v0.6.0: informații de auto-reparare pentru run_command / run_npm. */
   commandRun?: CommandRunInfo;
+  /** v2.5.6: mesaj afișat utilizatorului în chat (ex: fișier trunchiat). */
+  userNotice?: string;
+  /** v2.5.6 (bug #10): cel puțin un fișier pare scris „din imaginație". */
+  divergent?: boolean;
 }
 
 /* =========================================================================
@@ -250,6 +254,8 @@ export interface FileChangePreview {
   newContent: string;
   /** true = fișier nou (nu există pe disc). */
   isNew: boolean;
+  /** v2.5.6 (bug #10): conținutul pare scris „din imaginație" față de prompt. */
+  divergent?: boolean;
 }
 
 export type ApprovalFn = (
@@ -277,6 +283,7 @@ let writeOpsTotal = 0;
 export function resetWriteLimits(): void {
   fileWriteCounts = new Map();
   writeOpsTotal = 0;
+  resetTruncationRetries();
 }
 
 function writeKey(rel: string): string {
@@ -313,10 +320,261 @@ function checkWriteLimit(rel: string): string | null {
 function recordWrite(rel: string): void {
   const key = writeKey(rel);
   fileWriteCounts.set(key, (fileWriteCounts.get(key) ?? 0) + 1);
+  // v2.5.6: o scriere reușită resetează retry-urile de trunchiere ale fișierului
+  truncationRetries.delete(key);
 }
 
 function recordWriteCall(): void {
   writeOpsTotal++;
+}
+
+/* =========================================================================
+ * v2.5.6 — Truncation Guard (Bug #11)
+ * Modelul poate încheia scrierea la jumătate (ex: DeepSeek scrie un layout
+ * Astro fără <header> / <footer> și fără </html>), iar utilizatorul rămâne cu
+ * un fișier incomplet fără să știe. Verificăm conținutul ÎNAINTE de a-l scrie:
+ * dacă pare trunchiat, fișierul NU se scrie — modelul primește un nudge să-l
+ * rescrie COMPLET (max MAX_TRUNCATION_RETRIES), apoi utilizatorul e anunțat în
+ * chat că modelul s-a oprit la jumătate.
+ * ========================================================================= */
+
+export const MAX_TRUNCATION_RETRIES = 2;
+
+/** Câte scrieri trunchiate a primit fiecare fișier în mesajul curent. */
+const truncationRetries = new Map<string, number>();
+
+function resetTruncationRetries(): void {
+  truncationRetries.clear();
+}
+
+/** true când `content` pare scris doar parțial (lipsesc închideri). */
+export function isLikelyTruncated(path: string, content: string): boolean {
+  const ext = path.split('.').pop()?.toLowerCase();
+  const trimmed = content.trimEnd();
+
+  switch (ext) {
+    case 'astro':
+    case 'html': {
+      // Doar documentele complete se încheie cu </html>. Paginile care folosesc
+      // un layout (<BaseLayout>...</BaseLayout>) și componentele NU conțin
+      // <html> — sunt valide fără el, deci pentru ele verificăm acoladele.
+      const isFullDocument =
+        /<html[\s>]/i.test(content) || /<!doctype\s+html/i.test(content);
+      if (!isFullDocument) {
+        const docOpens = (content.match(/\{/g) || []).length;
+        const docCloses = (content.match(/\}/g) || []).length;
+        return docOpens !== docCloses;
+      }
+      return !trimmed.toLowerCase().endsWith('</html>');
+    }
+    case 'json':
+      return !trimmed.endsWith('}') && !trimmed.endsWith(']');
+    case 'ts':
+    case 'tsx':
+    case 'js':
+    case 'jsx': {
+      // Verifică balanța acoladelor
+      const opens = (content.match(/\{/g) || []).length;
+      const closes = (content.match(/\}/g) || []).length;
+      return opens !== closes;
+    }
+    case 'css': {
+      const cssOpens = (content.match(/\{/g) || []).length;
+      const cssCloses = (content.match(/\}/g) || []).length;
+      return cssOpens !== cssCloses;
+    }
+    case 'mjs': {
+      // La fel ca js
+      const mo = (content.match(/\{/g) || []).length;
+      const mc = (content.match(/\}/g) || []).length;
+      return mo !== mc;
+    }
+    default:
+      return false;
+  }
+}
+
+/**
+ * Verifică un conținut înainte de scriere. Când întoarce ceva, fișierul NU se
+ * scrie: `error` merge la model (nudge de rescriere completă), iar
+ * `userNotice` — doar după epuizarea retry-urilor — e afișat în chat.
+ */
+function checkTruncation(
+  toolName: string,
+  rel: string,
+  content: string
+): { error: string; userNotice?: string } | null {
+  if (!isLikelyTruncated(rel, content)) return null;
+
+  const key = writeKey(rel);
+  const attempts = (truncationRetries.get(key) ?? 0) + 1;
+  truncationRetries.set(key, attempts);
+
+  if (attempts > MAX_TRUNCATION_RETRIES) {
+    return {
+      error:
+        'TRUNCATION LIMIT REACHED for "' +
+        rel +
+        '" (' +
+        toolName +
+        '): the content was still incomplete after ' +
+        MAX_TRUNCATION_RETRIES +
+        ' retries, so the file was NOT written. Do not try again — reply with ' +
+        'plain text and let the user decide how to continue.',
+      userNotice:
+        '⚠️ File ' +
+        rel +
+        ' appears truncated after ' +
+        MAX_TRUNCATION_RETRIES +
+        ' attempts. The AI may have hit a length limit. Try: (a) smaller file, ' +
+        '(b) different provider, (c) split into multiple files.'
+    };
+  }
+
+  return {
+    error:
+      'Your previous ' +
+      toolName +
+      ' for ' +
+      rel +
+      ' appears TRUNCATED. ' +
+      'You must write the COMPLETE file. Do not stop in the middle. ' +
+      'Write the entire content, including the closing tags/braces. ' +
+      'Try again with the FULL content.'
+  };
+}
+
+/* =========================================================================
+ * v2.5.6 — Divergence Guard (Bug #10)
+ * Modelul poate scrie cu totul altceva decât i s-a cerut (ex: i se dă
+ * brand.coral = '#ff564a' și scrie configul Tailwind default, albastru), iar
+ * utilizatorul aprobă un fișier greșit fără să știe. Comparăm conținutul scris
+ * cu fragmentul de cod din ultimul mesaj al utilizatorului; dacă seamănă prea
+ * puțin, marcăm fișierul ca divergent. WARNING ONLY — fără retry (retry-ul
+ * poate produce tot un răspuns improvizat) și fără blocarea acceptării.
+ * ========================================================================= */
+
+export const DIVERGENCE_THRESHOLD = 0.5;
+
+/**
+ * Linie normalizată pentru comparație: fără spații la capete, lowercase și
+ * fără virgula/punct-virgula finală (modelul scrie des `brand: x,` iar
+ * promptul `brand: x` — nu e o diferență de conținut).
+ */
+function normalizeLine(line: string): string {
+  return line
+    .trim()
+    .toLowerCase()
+    .replace(/[,;]+$/, '')
+    .trim();
+}
+
+/** Liniile „semnificative" ale unui text (normalizate, fără liniile triviale). */
+function significantLines(text: string): Set<string> {
+  return new Set(
+    String(text ?? '')
+      .split('\n')
+      .map(normalizeLine)
+      .filter((l) => l.length > 3)
+  );
+}
+
+/** Blocurile de cod (```) din text, cu poziția lor în text. */
+function matchCodeFences(text: string): Array<{ content: string; index: number }> {
+  const out: Array<{ content: string; index: number }> = [];
+  const regex = /```[\w]*\r?\n([\s\S]*?)```/g;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(text)) !== null) {
+    out.push({ content: m[1].trim(), index: m.index });
+  }
+  return out;
+}
+
+/** Conținutul fiecărui bloc de cod (```) din text. */
+export function extractCodeFences(text: string): string[] {
+  return matchCodeFences(String(text ?? '')).map((f) => f.content);
+}
+
+/** Similaritate Jaccard pe linii normalizate (trim + lowercase). */
+export function contentSimilarity(a: string, b: string): number {
+  const linesA = significantLines(a);
+  const linesB = significantLines(b);
+  if (linesA.size === 0 && linesB.size === 0) return 1;
+  const intersection = new Set([...linesA].filter((l) => linesB.has(l)));
+  const union = new Set([...linesA, ...linesB]);
+  return intersection.size / union.size;
+}
+
+/**
+ * Cât din referință (liniile cerute) apare efectiv în conținutul scris,
+ * ponderat cu lungimea liniei: liniile lungi și specifice (ex:
+ * `brand: { coral: '#ff564a' }`) cântăresc mai mult decât scheletul comun
+ * (`theme: {`, `colors: {`) — altfel un config Tailwind default ar „conține"
+ * aparent aproape tot ce s-a cerut, doar pentru că are aceeași structură.
+ */
+function fenceContainment(reference: string, content: string): number {
+  const wanted = significantLines(reference);
+  if (!wanted.size) return 1;
+  const written = significantLines(content);
+  let total = 0;
+  let found = 0;
+  for (const line of wanted) {
+    total += line.length;
+    if (written.has(line)) found += line.length;
+  }
+  return total ? found / total : 1;
+}
+
+/** Token care arată ca un nume de fișier (ex: `tailwind.config.mjs`). */
+const FILE_TOKEN_RE =
+  /(?:^|[\s"'`([{<])[\w.\-/]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|astro|html|htm|css|scss|sass|less|md|mdx|ya?ml|py|go|rs|java|rb|php|sh|ps1|sql|txt|env)\b/i;
+
+/**
+ * true când `content` pare scris „din imaginație": seamănă prea puțin cu
+ * fragmentul relevant din prompt (Jaccard < DIVERGENCE_THRESHOLD) ȘI lipsește
+ * o parte semnificativă din liniile cerute (containment ponderat < prag).
+ * Al doilea test evită avertismentele false când modelul scrie fișierul
+ * COMPLET pornind de la un fragment din prompt (toate liniile cerute apar).
+ */
+export function isDivergentFromPrompt(
+  userText: string | undefined,
+  filePath: string,
+  content: string
+): boolean {
+  const text = String(userText ?? '');
+  if (!text.trim() || !String(content ?? '').trim()) return false;
+
+  const fences = matchCodeFences(text);
+  if (!fences.length) return false;
+
+  const base = path.basename(filePath).toLowerCase();
+  const lowerText = text.toLowerCase();
+
+  // 1) un bloc care numește fișierul (ex: „// tailwind.config.mjs")
+  let reference = fences.find((f) => f.content.toLowerCase().includes(base));
+
+  // 2) blocul care urmează menționării numelui fișierului în prompt
+  //    („fă-mi tailwind.config.mjs:\n```…```")
+  if (!reference) {
+    const at = lowerText.indexOf(base);
+    if (at !== -1) reference = fences.find((f) => f.index > at);
+  }
+
+  // 3) promptul nu numește NICIUN fișier și are un singur bloc → blocul e
+  //    referința („creează fișierul:\n```…```"). Dacă promptul vorbește despre
+  //    alte fișiere, blocul nu e al acestui fișier — compararea ar da
+  //    avertismente false pe fiecare fișier scris.
+  if (!reference && fences.length === 1 && !FILE_TOKEN_RE.test(text)) {
+    reference = fences[0];
+  }
+
+  // nu putem ști la ce se referă promptul → nu avertizăm (anti false-positive)
+  if (!reference) return false;
+
+  if (contentSimilarity(reference.content, content) >= DIVERGENCE_THRESHOLD) {
+    return false;
+  }
+  return fenceContainment(reference.content, content) < DIVERGENCE_THRESHOLD;
 }
 
 /* =========================================================================
@@ -668,7 +926,10 @@ export async function executeTool(
   call: ToolCall,
   workspaceRoot: string,
   log: (msg: string) => void,
-  approve: ApprovalFn
+  approve: ApprovalFn,
+  /** v2.5.6 (bug #10): ultimul mesaj al utilizatorului — referința față de care
+   *  detectăm conținutul scris „din imaginație" (opțional). */
+  userText?: string
 ): Promise<ToolResult> {
   log('executing tool: ' + call.tool);
   if (!vscode.workspace.isTrusted && isToolTrustRequired(call.tool, call.args)) {
@@ -695,27 +956,45 @@ export async function executeTool(
         // v0.2.1: anti-spam — verificăm ÎNAINTE de cardul de aprobare
         const limitErr = checkWriteLimit(call.args.path);
         if (limitErr) return { ok: false, error: limitErr };
+        const newContent = call.args.content as string;
+        // v2.5.6: truncation guard — nu scriem (și nu cerem aprobare pentru)
+        // un fișier scris doar parțial; cerem modelului conținutul COMPLET
+        const truncErr = checkTruncation('write_file', call.args.path, newContent);
+        if (truncErr) {
+          return {
+            ok: false,
+            error: truncErr.error,
+            userNotice: truncErr.userNotice
+          };
+        }
         // v0.5.0: preview pentru diff-ul nativ (conținut vechi + nou)
         const oldInfo = await tryReadInfo(call.args.path, workspaceRoot);
-        const newContent = call.args.content as string;
         const diff = makeDiff(call.args.path, oldInfo.content, newContent);
+        // v2.5.6 (bug #10): WARNING ONLY — semnalăm că modelul a scris altceva
+        // decât fragmentele din prompt, dar NU blocăm și NU reîncercăm
+        const divergent = isDivergentFromPrompt(
+          userText,
+          call.args.path,
+          newContent
+        );
         const changes: FileChangePreview[] = [
           {
             label: call.args.path,
             oldContent: oldInfo.content,
             newContent,
-            isNew: !oldInfo.exists
+            isNew: !oldInfo.exists,
+            divergent
           }
         ];
         if (!(await approve('write_file', call.args.path, diff, changes))) {
-          return { ok: false, error: 'User rejected' };
+          return { ok: false, error: 'User rejected', divergent };
         }
         const res = await writeFile(call.args.path, newContent, workspaceRoot);
         if (res.ok) {
           recordWrite(call.args.path);
           recordWriteCall();
         }
-        return res;
+        return divergent ? { ...res, divergent: true } : res;
       }
 
       case 'edit_file': {
@@ -799,7 +1078,7 @@ export async function executeTool(
         return await readFilesBatch(call.args, workspaceRoot);
 
       case 'write_files':
-        return await writeFilesBatch(call.args, workspaceRoot, approve);
+        return await writeFilesBatch(call.args, workspaceRoot, approve, userText);
 
       case 'project_info':
         return await projectInfoTool(workspaceRoot);
@@ -1337,7 +1616,9 @@ async function readFilesBatch(
 async function writeFilesBatch(
   args: Record<string, any>,
   root: string,
-  approve: ApprovalFn
+  approve: ApprovalFn,
+  /** v2.5.6 (bug #10): referința pentru detectarea conținutului improvizat. */
+  userText?: string
 ): Promise<ToolResult> {
   const raw = Array.isArray(args.files) ? args.files : [];
   const files = raw.filter(
@@ -1368,6 +1649,20 @@ async function writeFilesBatch(
     safePath(f.path, root);
   }
 
+  // v2.5.6: truncation guard — un singur fișier incomplet respinge TOT batch-ul
+  // (înainte de aprobare); modelul trebuie să rescrie conținutul COMPLET
+  for (const f of files) {
+    const truncErr = checkTruncation('write_files', f.path, f.content);
+    if (truncErr) {
+      return {
+        ok: false,
+        error:
+          'write_files REJECTED (no file was written): ' + truncErr.error,
+        userNotice: truncErr.userNotice
+      };
+    }
+  }
+
   // un singur diff combinat (text, pentru fallback-ul din chat) + preview
   // structurat per fișier (pentru diff-ul nativ multi-fișier, v0.5.0)
   const diffParts: string[] = [];
@@ -1379,7 +1674,9 @@ async function writeFilesBatch(
       label: f.path,
       oldContent: oldInfo.content,
       newContent: f.content,
-      isNew: !oldInfo.exists
+      isNew: !oldInfo.exists,
+      // v2.5.6 (bug #10): WARNING ONLY — conținut impropriat față de prompt
+      divergent: isDivergentFromPrompt(userText, f.path, f.content)
     });
     const d = makeDiff(f.path, oldInfo.content, f.content);
     const piece =
@@ -1404,8 +1701,11 @@ async function writeFilesBatch(
     diffParts.join('\n\n')
   ).slice(0, 10000);
 
+  // v2.5.6 (bug #10): cel puțin un fișier pare scris „din imaginație"
+  const divergent = changes.some((c) => c.divergent);
+
   if (!(await approve('write_files', summary, diff, changes))) {
-    return { ok: false, error: 'User rejected' };
+    return { ok: false, error: 'User rejected', divergent };
   }
 
   const written: string[] = [];
@@ -1464,6 +1764,7 @@ async function writeFilesBatch(
   recordWriteCall();
   return {
     ok: true,
+    divergent,
     result:
       'Written ' +
       written.length +

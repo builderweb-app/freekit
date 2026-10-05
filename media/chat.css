@@ -615,6 +615,26 @@ pre.code code {
   font-weight: 600;
 }
 
+/* ===== v2.5.6 (bug #10): avertisment „AI-ul a improvizat" (galben, mic) ===== */
+.divergence-warning {
+  margin: 0 0 12px 0;
+  padding: 6px 8px;
+  border-left: 3px solid var(--vscode-editorWarning-foreground, #d29922);
+  border-radius: 4px;
+  background: var(
+    --vscode-inputValidation-warningBackground,
+    rgba(210, 153, 34, 0.12)
+  );
+  color: var(--vscode-editorWarning-foreground, #d29922);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+/* în rândul de „file change" avertismentul stă lipit sub rândul `.change` */
+.change-wrap .divergence-warning {
+  margin: 4px 0 0 0;
+}
+
 /* ===== v2.0.1: rând inline de „file change" ===== */
 .change {
   display: flex;
@@ -627,6 +647,12 @@ pre.code code {
   background: var(--vscode-editor-background);
   font-size: 12px;
   animation: fadeIn 0.15s ease-out;
+}
+
+/* v2.5.6 (bug #10): rândul + avertismentul de divergență, unul sub altul */
+.change-wrap {
+  display: flex;
+  flex-direction: column;
 }
 
 .change .fname {

@@ -1129,7 +1129,20 @@ function autoResize() {
   syncSendState();
 }
 
-function addApprovalCard(toolName, path, diff, onApprove, onReject) {
+// ===== v2.5.6 (bug #10): avertisment „AI-ul a improvizat" =====
+// WARNING ONLY — nu blochează nimic; utilizatorul decide dacă acceptă.
+const DIVERGENCE_WARNING_TEXT =
+  '⚠️ The AI wrote substantially different content than your prompt ' +
+  'provided. It may have improvised. Check carefully before accepting.';
+
+function divergenceWarning() {
+  const el = document.createElement('div');
+  el.className = 'divergence-warning';
+  el.textContent = DIVERGENCE_WARNING_TEXT;
+  return el;
+}
+
+function addApprovalCard(toolName, path, diff, divergent, onApprove, onReject) {
   const card = document.createElement('div');
   card.className = 'msg approval';
 
@@ -1142,6 +1155,9 @@ function addApprovalCard(toolName, path, diff, onApprove, onReject) {
   pre.className = 'approval-diff';
   pre.textContent = diff;
   card.appendChild(pre);
+
+  // v2.5.6 (bug #10): conținutul diferă substantial de promptul utilizatorului
+  if (divergent) card.appendChild(divergenceWarning());
 
   const btnRow = document.createElement('div');
   btnRow.className = 'approval-buttons';
@@ -1213,6 +1229,9 @@ function addDiffReviewCard(payload) {
   pre.className = 'approval-diff';
   pre.textContent = payload.preview || '(no changes)';
   card.appendChild(pre);
+
+  // v2.5.6 (bug #10): cardul-fallback (review fără rânduri inline)
+  if (payload.divergent) card.appendChild(divergenceWarning());
 
   const btnRow = document.createElement('div');
   btnRow.className = 'approval-buttons';
@@ -1860,6 +1879,10 @@ const fileRows = new Map(); // rowId -> element
 
 function addFileChangeRow(row) {
   if (!row || !row.rowId || fileRows.has(row.rowId)) return;
+  // v2.5.6 (bug #10): avertismentul stă SUB rând — wrapper ca să nu strice
+  // layout-ul flex al rândului `.change`
+  const wrap = document.createElement('div');
+  wrap.className = 'change-wrap';
   const el = document.createElement('div');
   el.className = 'change';
   el.dataset.rowId = row.rowId;
@@ -1901,7 +1924,11 @@ function addFileChangeRow(row) {
     });
   });
 
-  messages.appendChild(el);
+  // v2.5.6 (bug #10): avertisment „AI a improvizat" sub rândul de fișier
+  wrap.appendChild(el);
+  if (row.divergent) wrap.appendChild(divergenceWarning());
+
+  messages.appendChild(wrap);
   fileRows.set(row.rowId, el);
   stick = true;
   scrollAfterAppend();
@@ -2084,6 +2111,7 @@ window.addEventListener('message', (event) => {
       msg.tool,
       msg.path,
       msg.diff,
+      msg.divergent,
       () => {
         vscode.postMessage({ type: 'approval_response', id: msg.id, ok: true });
         pendingEl = add('assistant', '', Date.now());

@@ -281,6 +281,8 @@ export interface FileChangeRow {
   added: number;
   removed: number;
   isNew: boolean;
+  /** v2.5.6 (bug #10): conținutul scris diferă substantial de prompt. */
+  divergent?: boolean;
 }
 
 /** Preview combinat pentru toate fișierele unui review (cap 8000 de caractere). */
@@ -1483,6 +1485,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // v0.2.1: auto-approve activ → fără card, aprobat imediat
         if (this.autoApprove) {
           log('auto-approved: ' + tool + ' → ' + target);
+          // v2.5.6 (bug #10): fără card, utilizatorul nu vede avertismentul de
+          // divergență — îl anunțăm aici, ca să nu rămână cu un fișier greșit
+          const diverged = (changes ?? []).filter((c) => c.divergent);
+          if (diverged.length) {
+            this.post(
+              'notice',
+              '⚠️ Auto-approved, but the content differs substantially from ' +
+                'your prompt for: ' +
+                diverged.map((c) => c.label).join(', ') +
+                ' — the AI may have improvised. Check the file.'
+            );
+          }
           this.post('notice', 'Auto-approved (no card): ' + tool + ' → ' + target);
           return true;
         }
@@ -1539,7 +1553,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             id,
             tool,
             path: target,
-            diff
+            diff,
+            // v2.5.6 (bug #10): cardul clasic arată avertismentul de divergență
+            divergent: (changes ?? []).some((c) => c.divergent)
           });
         });
       };
@@ -1731,9 +1747,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.post('notice', '🔒 ' + RESTRICTED_BLOCKED_NOTICE);
         } else {
           const mcpResult = await mcp.executeToolCall(toolCall, approve, log);
-          result = mcpResult ?? (await executeTool(toolCall, root, log, approve));
+          result = mcpResult ?? (await executeTool(toolCall, root, log, approve, this.lastUserText));
         }
         log('tool result ok=' + result.ok);
+
+        // v2.5.6: unealta cere atenția utilizatorului (ex: fișier trunchiat după
+        // ce retry-urile s-au epuizat) — mesaj clar în chat
+        if (result.userNotice) {
+          this.post('notice', result.userNotice);
+        }
 
         // v1.7.1: verbose — execuția s-a încheiat + rezultatul (cap 4000)
         this.postVerboseStep({
@@ -3436,7 +3458,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           filename: c.label,
           added: stats.added,
           removed: stats.removed,
-          isNew: !!c.isNew
+          isNew: !!c.isNew,
+          // v2.5.6 (bug #10): rândul arată avertismentul de divergență
+          divergent: !!c.divergent
         };
       });
       const payload = {
@@ -3444,7 +3468,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         tool: toolName,
         target,
         preview: buildReviewPreview(changes),
-        rows
+        rows,
+        // v2.5.6 (bug #10): cardul-fallback (fără rânduri) avertizează și el
+        divergent: changes.some((c) => c.divergent)
       };
       this.pendingInlineReview = { id: reviewId, resolve: resolveInline };
       this.pendingInlineReviewPayload = payload;

@@ -29,6 +29,7 @@ import { BrowserManager } from './browser';
 import {
   executeTool,
   isToolTrustRequired,
+  ApprovalFn,
   SYSTEM_PROMPT,
   SYSTEM_PROMPT_LOCAL,
   ToolCall,
@@ -58,6 +59,7 @@ import { detectCaptcha, isLoginRequiredError, isLoginUrl, sleep } from './provid
 import { DetectedProviderError } from './providerErrors';
 import { runVerification, createPromptCheckpoint, restoreToCheckpoint, Checkpoint } from './verifier';
 import { ConversationStore, ConversationMessage } from './conversations';
+import { detectDirectWrite } from './directWrite';
 import { EditRollback } from './rollback';
 import {
   RESTRICTED_BLOCKED_NOTICE,
@@ -1293,6 +1295,38 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
       if (!root) throw new Error('You have no folder open in VS Code.');
 
+      // v2.5.7 (bug #13): direct write mode — dacă promptul cere explicit
+      // „fișierul X cu EXACT acest conținut: ```…```”, scriem fișierul direct
+      // din prompt și NU mai apelăm providerul (AI-ul poate improviza, ignora
+      // sau trunchia conținutul cerut).
+      const directWrite = detectDirectWrite(userText);
+      if (directWrite) {
+        log('direct write mode: ' + directWrite.path);
+        this.post(
+          'notice',
+          '📝 Direct write mode — writing file exactly as provided (no AI).'
+        );
+        const result = await executeTool(
+          {
+            tool: 'write_file',
+            args: { path: directWrite.path, content: directWrite.content }
+          },
+          root,
+          log,
+          this.makeApproveCallback(),
+          userText
+        );
+        const summary = result.ok
+          ? '✅ Direct write: ' +
+            directWrite.path +
+            ' written exactly as provided.'
+          : 'Direct write failed: ' + (result.error || 'unknown error');
+        log('direct write result ok=' + result.ok);
+        this.post(result.ok ? 'notice' : 'error', summary);
+        await this.appendHistory('assistant', summary);
+        return;
+      }
+
       // v2.0.5: fereastra adusă în față pentru login se întoarce în fundal la
       // reluarea mesajului — randarea nu mai are nevoie de ea vizibilă. Dacă
       // login-ul încă nu a reușit, asistentul de login o readuce imediat în față.
@@ -1476,89 +1510,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       if (!provider) throw new Error('No provider available.');
 
-      const approve = async (
-        tool: string,
-        target: string,
-        diff: string,
-        changes?: FileChangePreview[]
-      ): Promise<boolean> => {
-        // v0.2.1: auto-approve activ → fără card, aprobat imediat
-        if (this.autoApprove) {
-          log('auto-approved: ' + tool + ' → ' + target);
-          // v2.5.6 (bug #10): fără card, utilizatorul nu vede avertismentul de
-          // divergență — îl anunțăm aici, ca să nu rămână cu un fișier greșit
-          const diverged = (changes ?? []).filter((c) => c.divergent);
-          if (diverged.length) {
-            this.post(
-              'notice',
-              '⚠️ Auto-approved, but the content differs substantially from ' +
-                'your prompt for: ' +
-                diverged.map((c) => c.label).join(', ') +
-                ' — the AI may have improvised. Check the file.'
-            );
-          }
-          this.post('notice', 'Auto-approved (no card): ' + tool + ' → ' + target);
-          return true;
-        }
-
-        // v0.5.0: scrierile de fișiere → diff NATIV VS Code, nu card text
-        if (changes && changes.length) {
-          const skip =
-            tool === 'write_files'
-              ? changes.every((c) => this.isNoAskFile(c.label))
-              : this.isNoAskFile(target);
-          if (skip) {
-            log('no-ask auto-approved: ' + tool + ' → ' + target);
-            this.post(
-              'notice',
-              '✅ Auto-approved ("don\'t ask again"): ' + tool + ' → ' + target
-            );
-            return true;
-          }
-
-          this.post(
-            'notice',
-            '📝 Native diff opened for review: ' + target +
-              ' — choose Accept / Reject from the card below or from the VS Code notification.'
-          );
-          const decision = await this.showDiffReview(tool, changes);
-          if (decision === 'accept') {
-            log('diff review accepted: ' + tool + ' → ' + target);
-            this.post('notice', '✅ Accepted from diff: ' + target);
-            return true;
-          }
-          if (decision === 'accept_no_ask') {
-            await this.addNoAskFile(target);
-            log('diff review accepted (no-ask): ' + tool + ' → ' + target);
-            this.post(
-              'notice',
-              '✅ Accepted from diff (don\'t ask again): ' + target
-            );
-            return true;
-          }
-          if (decision === 'reject') {
-            log('diff review rejected: ' + tool + ' → ' + target);
-            this.post('notice', '❌ Rejected from diff: ' + target);
-            return false;
-          }
-          // 'fallback' — diff-ul nu s-a putut afișa / fără webview → cardul clasic din chat
-          log('diff review fallback to chat card: ' + tool + ' → ' + target);
-        }
-
-        return new Promise((resolve) => {
-          const id = newApprovalId();
-          pendingApprovals.set(id, resolve);
-          this.view?.webview.postMessage({
-            type: 'approval_request',
-            id,
-            tool,
-            path: target,
-            diff,
-            // v2.5.6 (bug #10): cardul clasic arată avertismentul de divergență
-            divergent: (changes ?? []).some((c) => c.divergent)
-          });
-        });
-      };
+      const approve: ApprovalFn = this.makeApproveCallback();
 
       let iterations = 0;
       let timedOut = false;
@@ -1921,6 +1873,97 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // v0.4.0: badge-ul de status reflectă realitatea după fiecare mesaj
       void this.refreshProviderStatus();
     }
+  }
+
+  /**
+   * v2.5.7 (bug #13): callback-ul de aprobare al fluxului normal de unelte —
+   * extras într-o metodă ca să fie refolosit și de „direct write mode”
+   * (respectă auto-approve ON/OFF și cardurile de diff).
+   */
+  private makeApproveCallback(): ApprovalFn {
+    return async (
+      tool: string,
+      target: string,
+      diff: string,
+      changes?: FileChangePreview[]
+    ): Promise<boolean> => {
+      // v0.2.1: auto-approve activ → fără card, aprobat imediat
+      if (this.autoApprove) {
+        log('auto-approved: ' + tool + ' → ' + target);
+        // v2.5.6 (bug #10): fără card, utilizatorul nu vede avertismentul de
+        // divergență — îl anunțăm aici, ca să nu rămână cu un fișier greșit
+        const diverged = (changes ?? []).filter((c) => c.divergent);
+        if (diverged.length) {
+          this.post(
+            'notice',
+            '⚠️ Auto-approved, but the content differs substantially from ' +
+              'your prompt for: ' +
+              diverged.map((c) => c.label).join(', ') +
+              ' — the AI may have improvised. Check the file.'
+          );
+        }
+        this.post('notice', 'Auto-approved (no card): ' + tool + ' → ' + target);
+        return true;
+      }
+
+      // v0.5.0: scrierile de fișiere → diff NATIV VS Code, nu card text
+      if (changes && changes.length) {
+        const skip =
+          tool === 'write_files'
+            ? changes.every((c) => this.isNoAskFile(c.label))
+            : this.isNoAskFile(target);
+        if (skip) {
+          log('no-ask auto-approved: ' + tool + ' → ' + target);
+          this.post(
+            'notice',
+            '✅ Auto-approved ("don\'t ask again"): ' + tool + ' → ' + target
+          );
+          return true;
+        }
+
+        this.post(
+          'notice',
+          '📝 Native diff opened for review: ' + target +
+            ' — choose Accept / Reject from the card below or from the VS Code notification.'
+        );
+        const decision = await this.showDiffReview(tool, changes);
+        if (decision === 'accept') {
+          log('diff review accepted: ' + tool + ' → ' + target);
+          this.post('notice', '✅ Accepted from diff: ' + target);
+          return true;
+        }
+        if (decision === 'accept_no_ask') {
+          await this.addNoAskFile(target);
+          log('diff review accepted (no-ask): ' + tool + ' → ' + target);
+          this.post(
+            'notice',
+            '✅ Accepted from diff (don\'t ask again): ' + target
+          );
+          return true;
+        }
+        if (decision === 'reject') {
+          log('diff review rejected: ' + tool + ' → ' + target);
+          this.post('notice', '❌ Rejected from diff: ' + target);
+          return false;
+        }
+        // 'fallback' — diff-ul nu s-a putut afișa / fără webview → cardul clasic din chat
+        log('diff review fallback to chat card: ' + tool + ' → ' + target);
+      }
+
+      return new Promise((resolve) => {
+        const id = newApprovalId();
+        pendingApprovals.set(id, resolve);
+        this.view?.webview.postMessage({
+          type: 'approval_request',
+          id,
+          tool,
+          path: target,
+          diff,
+          // v2.5.6 (bug #10): cardul clasic arată avertismentul de divergență
+          divergent: (changes ?? []).some((c) => c.divergent)
+        });
+      });
+    };
   }
 
   private currentProviderId(): string {

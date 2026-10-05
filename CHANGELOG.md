@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.5.7
+
+- MAJOR: Direct write mode. When the user provides exact content via code fence with "EXACT"/"cu exact acest conținut", Freekit writes the file DIRECTLY from the prompt, bypassing the AI. Zero improvisation, zero truncation, zero UI artifacts. Fixes the root cause of bugs #8, #10, #11 for prompts with exact content.
+
 ## v2.5.6
 
 - FIX (bug #11): **truncation guard**. Content that arrives incomplete — an Astro/HTML document without its `</html>`, unbalanced braces in `.ts`/`.tsx`/`.js`/`.jsx`/`.mjs`/`.css`, or an unterminated JSON object/array — is no longer written silently. The write is refused, the model gets a nudge to rewrite the COMPLETE file (max 2 retries), and once the retries are exhausted the chat shows a clear warning (the AI may have hit a length limit: try a smaller file, a different provider, or split it into multiple files). Applies to `write_file` and to `write_files` (one incomplete file rejects the whole batch); the check runs before the approval card, so no diff is proposed for a file that will not be written. Astro pages/components that use a layout do not contain `<html>` and are still treated as valid.

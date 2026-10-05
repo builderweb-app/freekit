@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.5.0
+
+- **CRITICAL FIX**: auto-verify no longer blocks new project scaffolding. Skips when `node_modules` missing, `src/` empty, or no verified-good state. Runs once per AI response, not per file write.
+- **Safe rollback**: only rolls back if verified-good state ever existed.
+- **UI**: clear leftover verbose steps after rollback.
+- **UX**: clearer error message when auto-verify fails definitively.
+
 ## 2.4.9 — 2026-10-05
 
 **CRITICAL FIX: marker-based format for `write_file` / `edit_file` / `write_files`** — a `content` holding *unescaped* quotes is ambiguous JSON by definition (`{"tool":"write_file","args":{"content":"{"name":"x"}"}}` — nothing can tell where the string ends), so no parser can repair it; every model that produced it (DeepSeek, Claude, ChatGPT) ended in "malformed tool call". The three tools that carry free-form content no longer use JSON: the model writes the content **raw** between markers, and the parser reads it verbatim. All the other tools keep the JSON format.

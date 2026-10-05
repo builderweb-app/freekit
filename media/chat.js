@@ -1908,6 +1908,12 @@ window.addEventListener('message', (event) => {
     addVerboseStep(msg.step);
   } else if (msg.type === 'verbose_mode') {
     setVerboseUi(msg.enabled === true);
+  } else if (msg.type === 'clear_verbose_steps') {
+    // v2.5.0 — FIX 4: după rollback / skip-rollback, containerele verbose
+    // rămân goale pe ecran — le eliminăm ca să nu lase spațiu gol în chat.
+    document
+      .querySelectorAll('.vstep, .verbose-step, .step-container')
+      .forEach((el) => el.remove());
   } else if (msg.type === 'auto_approve') {
     setAutoApproveUi(msg.enabled === true);
     if (msg.enabled === true) resolveStaleApprovals();

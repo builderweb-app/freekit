@@ -341,6 +341,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private edits = new EditRollback();
   /** v1.3.0: câte auto-repair-uri am cerut pentru seria curentă de verificări eșuate. */
   private verifyRepairs = 0;
+  /**
+   * v2.5.0: a trecut vreodată verificarea? Fără o verificare verde nu există
+   * un „verified-good state" real, iar rollback-ul ar readuce proiectul la
+   * starea goală (ștergând fișierele noi, valide) — vezi doRollback().
+   * Persistă peste mesaje (NU se reseta în resetVerifyState).
+   */
+  private hasEverVerifiedGreen = false;
   /** v1.3.0: ultima verificare eșuată (pentru mesajul de rollback). */
   private lastVerifyFailure?: {
     command: string;
@@ -1491,6 +1498,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       let textRetries = 0;
       // v1.3.0: mesajul final de rollback (auto-repair eșuat definitiv)
       let verifyRollbackText = '';
+      // v2.5.0 — FIX 3: verificarea rulează o SINGURĂ dată per răspuns complet
+      // al AI (nu după fiecare fișier); flag = s-a modificat vreun fișier în tura asta
+      let filesWereModifiedThisTurn = false;
       while (iterations < MAX_ITERATIONS && !this.abortRequested) {
         // v0.3.0 (P0.6): verificăm bugetul de timp înainte de fiecare pas
         if (Date.now() > deadline) {
@@ -1552,6 +1562,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             this.post('error', MALFORMED_TOOL_CALL_ERROR);
             await this.appendHistory('assistant', MALFORMED_TOOL_CALL_ERROR);
             break;
+          }
+
+          // v2.5.0 — FIX 3: AI-ul a terminat răspunsul complet (fără tool
+          // calls). Abia acum rulăm verificarea — o singură dată per răspuns —
+          // dacă s-a modificat vreun fișier. La eșec, eroarea completă merge
+          // înapoi la AI pentru auto-repair (max MAX_VERIFY_REPAIRS); dacă nici
+          // așa nu trece → rollback automat (vezi autoVerify / doRollback).
+          if (filesWereModifiedThisTurn && this.autoVerifyEnabled(root)) {
+            filesWereModifiedThisTurn = false;
+            const repairsBefore = this.verifyRepairs;
+            const v = await this.autoVerify(root);
+            if (v.rollbackText) {
+              verifyRollbackText = v.rollbackText;
+              break;
+            }
+            if (this.verifyRepairs > repairsBefore) {
+              aiReply = await provider.send(page, v.suffix, signal, { onProgress });
+              log('auto-repair reply length: ' + aiReply.length);
+              continue;
+            }
           }
 
           // v1.7.1: verbose — răspuns final, fără acțiuni
@@ -1629,21 +1659,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         });
         if (this.abortRequested) break;
 
-        // v1.3.0 — AUTO-VERIFY + AUTO-REPAIR după fiecare scriere de fișiere:
-        // proiectul e verificat pe loc (astro check / tsc / build); la eșec,
-        // eroarea completă merge înapoi la AI (max MAX_VERIFY_REPAIRS
-        // auto-repair-uri); dacă nici așa nu trece → rollback automat.
-        let verifySuffix = '';
+        // v2.5.0 — FIX 3: NU mai verificăm după fiecare fișier. Marcăm doar că
+        // s-a modificat ceva în tura curentă; verificarea (astro check / tsc /
+        // build) rulează o singură dată, când AI-ul termină răspunsul complet.
         if (
           AUTO_VERIFY_TOOLS.has(toolCall.tool) &&
-          !this.abortRequested &&
           (result.ok || (result.error ?? '').startsWith('Written '))
         ) {
-          const v = await this.autoVerify(root);
-          verifySuffix = v.suffix;
-          if (v.rollbackText) verifyRollbackText = v.rollbackText;
+          filesWereModifiedThisTurn = true;
         }
-        if (verifyRollbackText || this.abortRequested) break;
+        if (this.abortRequested) break;
 
         // v0.6.0 — Terminal Self-Correction: status vizibil în chat pentru
         // comenzile eșuate (eroarea completă e deja în TOOL_ERROR, din tools.ts)
@@ -1688,7 +1713,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         aiReply = await provider.send(
           page,
-          resultMessage + selfFix + verifySuffix,
+          resultMessage + selfFix,
           signal,
           { onProgress }
         );
@@ -1724,7 +1749,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // v1.3.0: AI-ul s-a oprit cu text final, dar ultima verificare e încă
         // pe roșu — nu lăsăm proiectul stricat: rollback automat + mesaj
         const lvf = this.getLastVerifyFailure();
-        if (this.autoVerifyEnabled() && this.verifyRepairs > 0 && lvf) {
+        if (this.autoVerifyEnabled(root) && this.verifyRepairs > 0 && lvf) {
           log('auto-verify: final response while verification is red — rollback');
           const text = this.doRollback(
             root,
@@ -1992,21 +2017,55 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /* ======================================================================
-   * v1.3.0 — AUTO-VERIFY + AUTO-REPAIR (după fiecare edit de fișiere)
-   * Proiectul e verificat automat după fiecare write_file / edit_file /
-   * write_files (astro check / tsc --noEmit / build — vezi verifier.ts).
-   * La eșec, eroarea completă merge înapoi la AI pentru auto-repair (max
-   * MAX_VERIFY_REPAIRS încercări); dacă verificarea tot cade, modificările
-   * sunt anulate automat (rollback la ultima stare verificată OK).
+   * v1.3.0 / v2.5.0 — AUTO-VERIFY + AUTO-REPAIR
+   * Proiectul e verificat automat O SINGURĂ DATĂ per răspuns complet al AI
+   * (la finalul buclei agentice, când AI-ul nu mai cere tool-uri — v2.5.0,
+   * FIX 3), dacă s-a modificat vreun fișier (astro check / tsc --noEmit /
+   * build — vezi verifier.ts). La eșec, eroarea completă merge înapoi la AI
+   * pentru auto-repair (max MAX_VERIFY_REPAIRS încercări); dacă verificarea
+   * tot cade, modificările sunt anulate automat (rollback la ultima stare
+   * verificată OK) — dar numai dacă există un verified-good state real
+   * (v2.5.0, FIX 2).
    * ==================================================================== */
 
-  /** Setarea freekit.autoVerify (implicit ON). */
-  private autoVerifyEnabled(): boolean {
-    return (
-      vscode.workspace
-        .getConfiguration('freekit')
-        .get<boolean>('autoVerify', true) !== false
-    );
+  /**
+   * Setarea freekit.autoVerify (implicit ON) + gardă anti-rollback pe
+   * proiectele noi: cât timp proiectul nu e instalat/început, verificarea
+   * (npm run build) nu are ce valida și nu trebuie să anuleze fișierele
+   * scrise de AI în faza de scaffolding.
+   */
+  private autoVerifyEnabled(root: string): boolean {
+    // 1. Setare explicită OFF
+    const setting = vscode.workspace
+      .getConfiguration('freekit')
+      .get<boolean>('autoVerify', true);
+    if (setting === false) {
+      log('auto-verify: disabled by setting');
+      return false;
+    }
+
+    // 2. node_modules lipsește → proiectul nu e instalat
+    const nodeModules = path.join(root, 'node_modules');
+    if (!fs.existsSync(nodeModules)) {
+      log('auto-verify: skip — node_modules missing (npm install not run yet)');
+      return false;
+    }
+
+    // 3. package.json lipsește → nimic de verificat
+    const pkg = path.join(root, 'package.json');
+    if (!fs.existsSync(pkg)) {
+      log('auto-verify: skip — package.json missing');
+      return false;
+    }
+
+    // 4. src/ lipsește SAU e gol → proiect nou, nu verificăm încă
+    const src = path.join(root, 'src');
+    if (!fs.existsSync(src) || fs.readdirSync(src).length === 0) {
+      log('auto-verify: skip — src/ empty (project scaffolding phase)');
+      return false;
+    }
+
+    return true;
   }
 
   /** Resetează starea de auto-verify/rollback (la începutul fiecărui mesaj). */
@@ -2054,7 +2113,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async autoVerify(
     root: string
   ): Promise<{ suffix: string; rollbackText: string }> {
-    if (!this.autoVerifyEnabled()) return { suffix: '', rollbackText: '' };
+    if (!this.autoVerifyEnabled(root)) return { suffix: '', rollbackText: '' };
 
     const vres = await runVerification(root);
     if (!vres.command) {
@@ -2066,6 +2125,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (vres.ok) {
       // checkpoint: starea actuală = ultima stare verificată OK (ținta rollback)
       this.edits.markGood();
+      // v2.5.0: există acum un baseline real pentru un eventual rollback
+      this.hasEverVerifiedGreen = true;
       if (this.verifyRepairs > 0) {
         this.post(
           'heal',
@@ -2153,9 +2214,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Anulează modificările (rollback la ultima stare verificată OK sau la
-   * starea de dinainte de mesaj) + notifică utilizatorul; întoarce mesajul
-   * final afișat în chat.
+   * Anulează modificările (rollback la ultima stare verificată OK) + notifică
+   * utilizatorul; întoarce mesajul final afișat în chat.
+   *
+   * v2.5.0 — FIX 2: dacă proiectul nu a trecut NICIODATĂ verificarea, „ultima
+   * stare bună" e starea goală de la început → rollback-ul ar șterge exact
+   * fișierele noi, valide, scrise de AI. În acest caz NU anulăm nimic.
    */
   private doRollback(
     root: string,
@@ -2164,24 +2228,39 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     output: string,
     seconds: string
   ): string {
+    // NU face rollback fără un verified-good state real (altfel șterge tot)
+    if (!this.hasEverVerifiedGreen) {
+      log('automatic rollback SKIPPED — no verified-good state yet');
+      this.edits.reset();
+      this.verifyRepairs = 0;
+      this.lastVerifyFailure = undefined;
+      // v2.5.0 — FIX 4: golim containerele verbose rămase după skip-rollback
+      this.post('clear_verbose_steps', '');
+      this.post(
+        'heal',
+        '⚠️ Automatic ROLLBACK skipped (' + reason + '): the project has never ' +
+          'passed verification yet — there is no verified-good state to go back ' +
+          'to, so the new files were kept.'
+      );
+      vscode.window.showWarningMessage(
+        'Freekit: verification "' + command + '" failed — rollback skipped ' +
+          '(the project has never passed verification yet); the new files were kept.'
+      );
+      return (
+        '⛔ Auto-verify failed after ' + MAX_VERIFY_REPAIRS +
+        ' repair attempts. The AI could not fix the error.\n' +
+        'Options:\n' +
+        '- Try a smaller step (one file at a time)\n' +
+        '- Disable auto-verify: Settings → freekit.autoVerify\n' +
+        '- Check the error above and fix manually\n' +
+        '\n' +
+        'No rollback performed (project has no verified-good state yet).'
+      );
+    }
+
     const rb = this.edits.rollback();
-    const rel = (p: string) => {
-      const r = path.relative(root, p);
-      return r && !r.startsWith('..') ? r : p;
-    };
-    const lines: string[] = [];
-    for (const p of rb.restored) {
-      lines.push('- ↩ `' + rel(p) + '` — restored to the verified version');
-    }
-    for (const p of rb.deleted) {
-      lines.push('- 🗑 `' + rel(p) + '` — new file, deleted');
-    }
-    for (const f of rb.failed) {
-      lines.push('- ⚠️ `' + rel(f.abs) + '` — rollback failed: ' + f.error);
-    }
-    const list = lines.length
-      ? lines.join('\n')
-      : '- (nothing to roll back — the files were already in a good state)';
+    // v2.5.0 — FIX 4: golim containerele verbose rămase după rollback
+    this.post('clear_verbose_steps', '');
     const changed = rb.restored.length + rb.deleted.length;
 
     log(
@@ -2200,15 +2279,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.verifyRepairs = 0;
     this.lastVerifyFailure = undefined;
 
-    return (
-      '⛔ **Auto-verify: "' + command + '" failed — ' + reason +
-      '; an automatic rollback was performed.**\n\n' +
-      'What was rolled back:\n' + list + '\n\n' +
-      'The project is back to the last state that passed verification. Last error (' +
-      seconds + 's):\n\n' +
-      '```\n' + output.trim().slice(0, 1500) + '\n```\n\n' +
-      'You can try again, possibly with smaller steps or more specific instructions.'
-    );
+    return '⛔ Auto-verify failed. Rolled back to last verified-good state.';
   }
 
   /* ======================================================================

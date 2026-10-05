@@ -924,6 +924,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    // v2.5.1 — FIX A: butonul „Switch provider" din cardul de eroare de
+    // provider nu mai forțează DeepSeek — deschide meniul de modele (chip-ul
+    // din composer), iar utilizatorul alege providerul dorit.
+    if (msg.type === 'open_model_menu') {
+      this.post('open_model_menu', '');
+      return;
+    }
+
     // Linkurile din răspunsuri se deschid în browserul extern
     if (msg.type === 'open_link') {
       vscode.env.openExternal(vscode.Uri.parse(msg.url));

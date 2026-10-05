@@ -458,9 +458,7 @@ function addProviderErrorCard(msg) {
 
   actions.appendChild(makeBtn('Show Chrome', 'show_chrome'));
   actions.appendChild(makeBtn('Retry', 'retry_message'));
-  actions.appendChild(
-    makeBtn('Switch to DeepSeek', 'switch_provider', { providerId: 'deepseek' })
-  );
+  actions.appendChild(makeBtn('Switch provider', 'open_model_menu'));
   if (msg.upgradeUrl) {
     const a = document.createElement('a');
     a.textContent = 'Upgrade';
@@ -1586,17 +1584,33 @@ document.addEventListener('focusin', (e) => {
   if (host) syncOverflowTitles(host);
 });
 
+/**
+ * v2.5.1 — FIX A: deschide/închide meniul unui chip cu exact aceeași logică pe
+ * care o rulează click-ul pe trigger — refolosit și de „Switch provider" din
+ * cardul de eroare de provider.
+ */
+function setMenuOpen(trigger, menu, open) {
+  closeAllMenus(open ? menu : null);
+  menu.classList.toggle('open', open);
+  trigger.setAttribute('aria-expanded', String(open));
+  // v2.3.1: abia acum meniul e vizibil, deci putem măsura ce text e trunchiat
+  if (open) syncOverflowTitles(menu);
+}
+
+/** v2.5.1 — FIX A: deschide meniul chip-ului de model din composer. */
+function openModelMenu() {
+  const trigger = document.getElementById('modelChip');
+  const menu = document.getElementById('menuModel');
+  if (trigger && menu) setMenuOpen(trigger, menu, true);
+}
+
 document.addEventListener('click', (e) => {
   const trigger = e.target.closest('[data-menu]');
   if (trigger) {
     const menu = document.getElementById(trigger.dataset.menu);
     if (!menu) return;
     const open = !menu.classList.contains('open');
-    closeAllMenus(open ? menu : null);
-    menu.classList.toggle('open', open);
-    trigger.setAttribute('aria-expanded', String(open));
-    // v2.3.1: abia acum meniul e vizibil, deci putem măsura ce text e trunchiat
-    if (open) syncOverflowTitles(menu);
+    setMenuOpen(trigger, menu, open);
     return; // click pe trigger nu închide meniul abia deschis
   }
   if (!e.target.closest('.menu')) closeAllMenus();
@@ -1974,6 +1988,9 @@ window.addEventListener('message', (event) => {
     addLoginRequiredCard(msg.text || '');
     setBusy(false);
     if (!stick) jumpBtn.hidden = false;
+  } else if (msg.type === 'open_model_menu') {
+    // v2.5.1 — FIX A: „Switch provider" din cardul de eroare → meniul de modele
+    openModelMenu();
   } else if (msg.type === 'cleared') {
     // v2.0.2: confirmarea din host a trecut — abia acum golim UI-ul
     resetChatUi();

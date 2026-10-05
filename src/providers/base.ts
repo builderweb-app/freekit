@@ -433,6 +433,9 @@ export async function openProvider(page: Page, providerId: string, label: string
 export async function newChatVia(page: Page, providerId: string, label: string) {
   // v1.8.0: popup-uri de consimțământ care pot acoperi butonul de chat nou
   await autoAcceptPopups(page, { log }).catch(() => []);
+  // v2.5.10 (bug #20): URL-ul dinainte de click — dacă se schimbă, chatul nou
+  // a fost creat și nu mai insistăm cu alți candidați.
+  const beforeUrl = page.url();
   for (const sel of selectors.candidates(providerId, 'newChat')) {
     const btn = page.locator(sel).first();
     try {
@@ -445,7 +448,23 @@ export async function newChatVia(page: Page, providerId: string, label: string) 
         log(label + ': new chat via ' + sel);
         return;
       }
-    } catch {
+      // v2.5.10 (bug #20): dacă URL-ul s-a schimbat, click-ul chiar a produs
+      // chatul nou — NU mai apăsăm și alți candidați (altfel rămâneau
+      // conversații goale în sidebar-ul site-ului).
+      if (page.url() !== beforeUrl) {
+        try {
+          await autoAcceptPopups(page, { log }).catch(() => []);
+          await findInput(page, providerId, label, 15000);
+          selectors.note(providerId, 'newChat', sel);
+          log(label + ': new chat via ' + sel + ' (URL changed)');
+          return;
+        } catch (e) {
+          if (isLoginRequiredError(e)) throw e;
+          /* altfel: următorul candidat / navigarea de fallback */
+        }
+      }
+    } catch (e) {
+      if (isLoginRequiredError(e)) throw e;
       /* încearcă următorul selector */
     }
   }
@@ -482,6 +501,49 @@ export async function newChatVia(page: Page, providerId: string, label: string) 
   // v0.9.1: sesiunea poate expira între open() și newChat() — același răspuns
   // ca la openProvider (chatView aduce Chrome în față și așteaptă login-ul).
   if (isLoginUrl(page.url())) throw loginError(providerId, page.url());
+  await findInput(page, providerId, label, 30000);
+}
+
+/**
+ * v2.5.10 (bug #20): normalizare tolerantă de URL (fără query/hash, fără „/" final).
+ */
+const normalizeNavUrl = (u: string): string =>
+  String(u || '')
+    .replace(/[?#].*$/, '')
+    .replace(/\/+$/, '')
+    .toLowerCase();
+
+/** true dacă URL-ul e chiar pagina de start a providerului (nu o conversație). */
+export function isProviderRootUrl(url: string, providerId: string): boolean {
+  const u = normalizeNavUrl(url);
+  if (!u) return true;
+  try {
+    return u === normalizeNavUrl(selectors.url(providerId));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * v2.5.10 (bug #20): reia conversația deja începută în browser (URL-ul salvat
+ * pentru conversația activă din VS Code) — NU se mai deschide un chat nou la
+ * fiecare mesaj. Aruncă dacă URL-ul nu poate fi folosit (chat șters de pe site,
+ * sesiune expirată): apelantul pornește atunci un chat nou.
+ */
+export async function resumeConversation(
+  page: Page,
+  providerId: string,
+  url: string,
+  label: string
+): Promise<void> {
+  await autoAcceptPopups(page, { log }).catch(() => []);
+  if (normalizeNavUrl(page.url()) !== normalizeNavUrl(url)) {
+    log(label + ': resuming the browser conversation at ' + url);
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
+    await autoAcceptPopups(page, { log }).catch(() => []);
+    // v0.9.1: sesiunea poate expira între mesaje — același flux de login ca la open()
+    if (isLoginUrl(page.url())) throw loginError(providerId, page.url());
+  }
   await findInput(page, providerId, label, 30000);
 }
 

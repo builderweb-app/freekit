@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.5.10
+
+- FIX (bug #20): **a new web chat was opened for EVERY message**, at all providers (DeepSeek, Claude, Gemini, ChatGPT, Mistral, Qwen) — the AI lost the whole context and the site's sidebar filled up with conversations. The root cause: `chatView.handleMessage` called `open()` + `newChat()` unconditionally before each message, and the conversation URL was never remembered. Now the browser conversation is stored per VS Code conversation (globalState, `Conversation.browser = { providerId, url }`): the first message still opens a new chat, but every following message resumes the saved URL (`resumeConversation`), and the chat is re-opened only when the conversation is new, the saved chat can no longer be loaded, or the user runs Clear / Edit prompt / Restore checkpoint (the VS Code history was cut, so the browser must start fresh too). Retry and provider Switch reuse the same chat instead of creating another one.
+- `newChatVia` no longer clicks several "New chat" candidates in one run: once the URL changes, the click is treated as successful (no more empty conversations left in the site's sidebar).
+
 ## v2.5.9
 
 - Fix: busy indicator (3 animated dots) remained visible after direct write. The webview 'busy' handler now clears the pending element when busy turns off, so the indicator disappears immediately after 'Direct write' completes.

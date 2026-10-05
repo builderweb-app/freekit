@@ -23,6 +23,15 @@ export interface ConversationMessage {
   checkpointId?: string;
 }
 
+/**
+ * v2.5.10 (bug #20): referința către chatul din browser în care se continuă
+ * conversația activă (nu se mai deschide un chat nou la fiecare mesaj).
+ */
+export interface BrowserChatRef {
+  providerId: string;
+  url: string;
+}
+
 export interface Conversation {
   id: string;
   title: string;           // primele 40 chars din primul prompt
@@ -31,6 +40,8 @@ export interface Conversation {
   parentId?: string;       // pentru fork-uri
   forkedFromMessageId?: string;
   messages: ConversationMessage[];
+  /** v2.5.10 (bug #20): URL-ul chatului din browser al acestei conversații. */
+  browser?: BrowserChatRef;
 }
 
 const STORAGE_KEY = 'freekit.conversations';
@@ -77,6 +88,31 @@ export class ConversationStore {
 
   getActiveId(): string | null {
     return this.activeId;
+  }
+
+  /** v2.5.10 (bug #20): chatul din browser al conversației active (dacă există). */
+  getBrowserChat(): BrowserChatRef | null {
+    return this.getActive()?.browser ?? null;
+  }
+
+  /** v2.5.10 (bug #20): reține chatul din browser pentru mesajele următoare. */
+  async setBrowserChat(providerId: string, url: string): Promise<void> {
+    const conv = this.getActive();
+    if (!conv || !providerId || !url) return;
+    conv.browser = { providerId, url };
+    conv.updatedAt = Date.now();
+    await this.save();
+    log('browser chat: ' + providerId + ' → ' + url);
+  }
+
+  /** v2.5.10 (bug #20): uită chatul din browser (Clear / edit prompt / restore). */
+  async clearBrowserChat(): Promise<void> {
+    const conv = this.getActive();
+    if (!conv || !conv.browser) return;
+    delete conv.browser;
+    conv.updatedAt = Date.now();
+    await this.save();
+    log('browser chat cleared: ' + conv.id);
   }
 
   list(): Conversation[] {

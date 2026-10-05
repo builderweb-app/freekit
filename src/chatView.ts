@@ -55,7 +55,14 @@ import { mcp } from './mcp/manager';
 import { Attachment, describePath, prepareAttachments } from './attachments';
 import { detectProject, formatProjectInfo } from './project';
 import { initLogChannel, logLine } from './log';
-import { detectCaptcha, isLoginRequiredError, isLoginUrl, sleep } from './providers/base';
+import {
+  detectCaptcha,
+  isLoginRequiredError,
+  isLoginUrl,
+  isProviderRootUrl,
+  resumeConversation,
+  sleep
+} from './providers/base';
 import { DetectedProviderError } from './providerErrors';
 import { runVerification, createPromptCheckpoint, restoreToCheckpoint, Checkpoint } from './verifier';
 import { ConversationStore, ConversationMessage } from './conversations';
@@ -1458,17 +1465,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             provider = prep.provider;
             page = prep.page;
             const prov = prep.provider;
-            // v0.9.1: dacă providerul cere login, Chrome e adus în față
-            // automat, așteptăm autentificarea, apoi reluăm de la sine.
-            await this.runWithLoginAssist(label, prep.page, signal, () => prov.open(prep.page));
-            await this.runWithLoginAssist(label, prep.page, signal, () => prov.newChat(prep.page));
+            // v0.9.1 + v2.5.10 (bug #20): login assist peste „deschide chatul
+            // conversației active" — chat nou doar la primul mesaj al acesteia.
+            await this.openOrResumeChat(prov, prep.page, label, signal);
             // v1.8.0: dacă pagina cere CAPTCHA, Chrome e adus în față până e rezolvat
             await this.runWithCaptchaAssist(label, prep.page, signal);
             // v2.2.0: aplică modelul web ales în chip (best-effort)
             await this.applySelectedModel(id, prep.page, label);
             this.active = { provider, page };
             if (this.abortRequested) throw new Error('__ABORTED__');
+            const urlBeforeSend = page?.url();
             aiReply = await provider.send(page, messageFor(provider), signal, sendOpts);
+            await this.rememberBrowserChat(provider, page, urlBeforeSend);
             if (i > 0) {
               this.post('notice', '🔄 Auto: response served by ' + label + ' (fallback).');
             }
@@ -1496,9 +1504,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         page = prep.page;
         const prov = prep.provider;
         const label = PROVIDER_LABELS[selectedId] ?? selectedId;
-        // v0.9.1: login assist pentru providerul ales direct
-        await this.runWithLoginAssist(label, prep.page, signal, () => prov.open(prep.page));
-        await this.runWithLoginAssist(label, prep.page, signal, () => prov.newChat(prep.page));
+        // v0.9.1 + v2.5.10 (bug #20): login assist peste „deschide chatul
+        // conversației active" (chat nou doar la primul mesaj al acesteia).
+        await this.openOrResumeChat(prov, prep.page, label, signal);
         // v1.8.0: CAPTCHA assist (reCAPTCHA / hCaptcha / Cloudflare „Just a moment”)
         await this.runWithCaptchaAssist(label, prep.page, signal);
         // v2.2.0: aplică modelul web ales în chip (best-effort)
@@ -1510,7 +1518,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           return;
         }
 
+        const urlBeforeSend = page?.url();
         aiReply = await provider.send(page, messageFor(provider), signal, sendOpts);
+        await this.rememberBrowserChat(provider, page, urlBeforeSend);
         log('first AI reply length: ' + aiReply.length);
       }
       if (!provider) throw new Error('No provider available.');
@@ -2023,6 +2033,73 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const browserId =
       last && BROWSER_PROVIDER_IDS.includes(last) ? last : 'deepseek';
     return [browserId, 'ollama'];
+  }
+
+  /* ======================================================================
+   * v2.5.10 (bug #20) — CONVERSAȚIA DIN BROWSER
+   * Înainte, fiecare mesaj chema necondiționat open() + newChat(): la toți
+   * providerii web însemna un chat NOU per mesaj (AI-ul pierdea contextul).
+   * Acum chatul nou se deschide doar la primul mesaj al unei conversații din
+   * VS Code; mesajele următoare reiau URL-ul salvat în globalState.
+   * ==================================================================== */
+
+  /**
+   * Deschide providerul și continuă conversația din browser a conversației
+   * active (dacă există una salvată pentru providerul curent). Dacă URL-ul
+   * salvat nu mai poate fi folosit, se pornește un chat nou.
+   */
+  private async openOrResumeChat(
+    provider: AIProvider,
+    page: Page | undefined,
+    label: string,
+    signal: AbortSignal
+  ): Promise<void> {
+    const saved = this.conversations.getBrowserChat();
+    if (page && saved && saved.providerId === provider.name) {
+      try {
+        await this.runWithLoginAssist(label, page, signal, () =>
+          resumeConversation(page, provider.name, saved.url, label)
+        );
+        log(label + ': continuing the browser conversation (' + saved.url + ')');
+        return;
+      } catch (e: any) {
+        if (isLoginRequiredError(e) || this.abortRequested) throw e;
+        log(
+          label + ': could not resume the saved conversation — ' +
+            (e?.message ?? String(e))
+        );
+        await this.conversations.clearBrowserChat();
+      }
+    }
+    // v0.9.1: dacă providerul cere login, Chrome e adus în față automat,
+    // așteptăm autentificarea, apoi reluăm de la sine.
+    await this.runWithLoginAssist(label, page, signal, () => provider.open(page));
+    await this.runWithLoginAssist(label, page, signal, () => provider.newChat(page));
+  }
+
+  /**
+   * Reține URL-ul chatului din browser, ca mesajele următoare ale conversației
+   * active să continue în el, nu să deschidă altul.
+   */
+  private async rememberBrowserChat(
+    provider: AIProvider,
+    page: Page | undefined,
+    urlBeforeSend: string | undefined
+  ): Promise<void> {
+    if (!page || provider.local) return;
+    try {
+      const url = page.url();
+      if (!url || isLoginUrl(url)) return;
+      // provider cu SPA care nu schimbă URL-ul: dacă am rămas chiar pe pagina
+      // de start, nu există o conversație de reluat (ca înainte de fix)
+      if (url === urlBeforeSend && isProviderRootUrl(url, provider.name)) {
+        log(provider.name + ': chat URL unchanged (start page) — nothing saved');
+        return;
+      }
+      await this.conversations.setBrowserChat(provider.name, url);
+    } catch (e: any) {
+      log('remember browser chat failed: ' + (e?.message ?? String(e)));
+    }
   }
 
   /**
@@ -2605,6 +2682,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // apoi reîmprospătăm dropdown-ul și chatul. checkpoint_restored rămâne ULTIMUL
       // (webview-ul îl folosește pentru badge-ul ✓).
       await this.conversations.truncateAfter(messageId);
+      // v2.5.10 (bug #20): istoricul a fost tăiat ⇒ și browserul pornește un
+      // chat nou (altfel AI-ul ar vedea în continuare mesajele „șterse”).
+      await this.conversations.clearBrowserChat();
       this.postConversations();
       this.rerenderActive();
       this.view?.webview.postMessage({
@@ -2709,6 +2789,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async clearActiveChat(): Promise<void> {
     await this.state.update(HISTORY_KEY, []);
     await this.conversations.clearActive();
+    // v2.5.10 (bug #20): Clear ⇒ următorul mesaj începe un chat NOU în browser
+    await this.conversations.clearBrowserChat();
     this.attachments = [];
     this.postAttachments();
     this.postConversations();
@@ -2877,6 +2959,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     // 2) șterge mesajul editat + tot ce a urmat din conversația activă
     await this.conversations.truncateBefore(messageId);
+    // v2.5.10 (bug #20): prompt editat ⇒ context nou și în browser
+    await this.conversations.clearBrowserChat();
     log('edit prompt ' + messageId + ' → „' + text.slice(0, 60) + '”');
     this.postConversations();
 

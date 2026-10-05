@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.5.9
+
+- Fix: busy indicator (3 animated dots) remained visible after direct write. The webview 'busy' handler now clears the pending element when busy turns off, so the indicator disappears immediately after 'Direct write' completes.
+
 ## v2.5.7.1
 
 - FIX (bug #13b): **direct write detection never fired** when the code block in the prompt has no closing fence — the final fence is forgotten or gets lost when the prompt is pasted. The prompt that reproduced it (`Creează fișierul src/layouts/BaseLayout.astro cu EXACT acest conținut:`, followed by an open Astro block) arrived exactly like that, so v2.5.7 always fell back to the AI. Direct write mode now also accepts a single **open** fence: everything after it is the file content.

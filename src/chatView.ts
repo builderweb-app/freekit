@@ -1324,6 +1324,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         log('direct write result ok=' + result.ok);
         this.post(result.ok ? 'notice' : 'error', summary);
         await this.appendHistory('assistant', summary);
+        // v2.5.8.1 (bug #14): direct write postează doar 'notice'/'error' și iese
+        // din try, așa că webview-ul nu primea niciodată semnalul de „gata" —
+        // indicatorul busy (cele 3 puncte) rămânea sub mesaj. Trimitem același
+        // reset ca fluxul normal (vezi finally / postState).
+        this.post('busy', '0');
         return;
       }
 

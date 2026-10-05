@@ -2087,6 +2087,13 @@ window.addEventListener('message', (event) => {
     // pentru butonul Stop (vizibil doar cât timp rulează un răspuns).
     const on = msg.text === '1';
     if (on !== busy) setBusy(on);
+    // v2.5.8.1 (bug #14): „gata" trebuie să curețe și indicatorul de typing.
+    // Fluxurile normale îl curăță ele (reply/stopped/error), dar direct write
+    // postează doar 'notice'/'error' → cele 3 puncte rămâneau pe ecran.
+    if (!on && pendingEl) {
+      pendingEl.remove();
+      pendingEl = null;
+    }
   } else if (msg.type === 'history') {
     renderHistory(msg.items);
   } else if (msg.type === 'provider') {

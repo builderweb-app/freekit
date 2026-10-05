@@ -13,7 +13,6 @@ const ICONS = {
   copy: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M6 5h8v10H6zM7 6v8h6V6zM2 1h8v3H9V2H3v9h3v1H2z"/></svg>`,
   send: `<svg viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 1.8L14.7 8 1.5 14.2l1.7-5.4L9 8 3.2 7.2z"/></svg>`,
   clear: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M6 1h4v2H6zM2 3h12v1H2zM3 5h10v10H3zM4 6v8h8V6zM6 8h1v4H6zM9 8h1v4H9z"/></svg>`,
-  showChrome: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M8 3C4.5 3 2 6 1 8c1 2 3.5 5 7 5s6-3 7-5c-1-2-3.5-5-7-5zM8 4c2.8 0 4.8 2.3 5.8 4-1 1.7-3 4-5.8 4-2.8 0-4.8-2.3-5.8-4 1-1.7 3-4 5.8-4zM8 6a2 2 0 1 0 0 4 2 2 0 1 0 0-4z"/></svg>`,
   newConversation: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M2 2h12v9H8l-3 3v-3H2zM3 3v7h3v1.6L7.6 10H13V3zM7.5 4h1v2h2v1h-2v2h-1V7h-2V6h2z"/></svg>`,
   conversationsList: `<svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 3h2v2H2zM6 3.5h8v1H6zM2 7h2v2H2zM6 7.5h8v1H6zM2 11h2v2H2zM6 11.5h8v1H6z"/></svg>`,
   verboseMode: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M1 2h14v12H1zM2 3v10h12V3zM3.7 5.4l.7-.7L7.7 8l-3.3 3.3-.7-.7L6.3 8zM8.5 10h3v1h-3z"/></svg>`,
@@ -41,7 +40,6 @@ const diagBtn = document.getElementById('mDiagnostics');
 const mcpBtn = document.getElementById('mMcp');
 const settingsBtn = document.getElementById('mSettings');
 // v2.0.2: meniul „⋯" grupat pe secțiuni — acțiuni noi (Context / Session / Debug)
-const openBrowserBtn = document.getElementById('mOpenBrowser');
 const stopDevBtn = document.getElementById('mStopDev');
 const resetSelBtn = document.getElementById('mResetSelectors');
 const newChatBtn = document.getElementById('mNew');
@@ -52,6 +50,8 @@ const modelBrowserEl = document.getElementById('model-browser');
 const modelLocalEl = document.getElementById('model-local');
 // v2.0.2: hardware detectat (VRAM/RAM) afișat sub lista de modele locale
 const modelHwEl = document.getElementById('model-hw');
+// v2.5.11 (bug #29): avertisment vizibil pe mașinile fără GPU (CPU/RAM intens)
+const modelAdviceEl = document.getElementById('model-advice');
 // v2.0.2: „Install Ollama" din meniul „⋯" (vizibil doar când Ollama lipsește)
 const installOllamaBtn = document.getElementById('mInstallOllama');
 // v2.0.1: chip-ul de „thinking level"
@@ -362,10 +362,28 @@ function setPendingText(text) {
 }
 
 // FAZA I: notificare discretă când un selector a fost reparat automat
-function addNotice(text) {
+// v2.5.11 (bug #28/#29): cu `action` devine un card cu buton
+// („Pick bigger model" / „Switch to web provider" → meniul de modele).
+function addNotice(text, action, actionLabel) {
   const el = document.createElement('div');
-  el.className = 'notice';
-  el.textContent = '🛠️ ' + text;
+  el.className = 'notice' + (action ? ' notice-actionable' : '');
+  const body = document.createElement('div');
+  body.className = 'notice-text';
+  body.textContent = action ? text : '🛠️ ' + text;
+  el.appendChild(body);
+  if (action) {
+    const row = document.createElement('div');
+    row.className = 'notice-actions';
+    const btn = document.createElement('button');
+    btn.className = 'retry-btn';
+    btn.textContent = actionLabel || 'Open';
+    btn.addEventListener('click', () => {
+      row.remove();
+      if (action === 'open_model_menu') openModelMenu();
+    });
+    row.appendChild(btn);
+    el.appendChild(row);
+  }
   messages.appendChild(el);
   scrollAfterAppend();
 }
@@ -405,7 +423,7 @@ function addLoginRequiredCard(text) {
 
   const show = document.createElement('button');
   show.className = 'show-chrome-btn';
-  show.textContent = '👁 Show Chrome';
+  show.textContent = '🌐 Show Browser';
   show.onclick = () => vscode.postMessage({ type: 'show_chrome' });
 
   row.appendChild(retry);
@@ -434,13 +452,25 @@ function addProviderErrorCard(msg) {
   const card = document.createElement('div');
   card.className = 'provider-error-card';
 
+  // v2.5.11 (bug #24/#25): model Ollama neinstalat → card dedicat, cu buton
+  // de descărcare, în locul textului brut „Ollama error: 404 …".
+  const isModelMissing = msg.kind === 'model_missing';
+  const modelId = typeof msg.model === 'string' ? msg.model : '';
+  const available = Array.isArray(msg.availableModels) ? msg.availableModels : [];
+
   const title = document.createElement('b');
-  title.textContent =
-    '⚠️ ' + (PROVIDER_NAMES[msg.providerId] || msg.providerId || 'Provider') + ' unavailable';
+  title.textContent = isModelMissing
+    ? '⚠️ Ollama — model not installed'
+    : '⚠️ ' +
+      (PROVIDER_NAMES[msg.providerId] || msg.providerId || 'Provider') +
+      ' unavailable';
 
   const text = document.createElement('div');
   text.className = 'pe-msg';
-  text.textContent = msg.message || '';
+  text.textContent = isModelMissing
+    ? (modelId ? 'Model "' + modelId + '" is not installed.' : 'The selected model is not installed.') +
+      (available.length ? ' Available: ' + available.join(', ') + '.' : '')
+    : msg.message || '';
 
   const actions = document.createElement('div');
   actions.className = 'pe-actions';
@@ -456,9 +486,19 @@ function addProviderErrorCard(msg) {
     return b;
   };
 
-  actions.appendChild(makeBtn('Show Chrome', 'show_chrome'));
-  actions.appendChild(makeBtn('Retry', 'retry_message'));
-  actions.appendChild(makeBtn('Switch provider', 'open_model_menu'));
+  if (isModelMissing) {
+    // v2.5.11 (bug #24): descarcă exact modelul care lipsește (fluxul existent)
+    if (modelId) {
+      actions.appendChild(
+        makeBtn('📥 Download ' + modelId, 'pull_model', { modelId: modelId })
+      );
+    }
+    actions.appendChild(makeBtn('Switch to another model', 'open_model_menu'));
+  } else {
+    actions.appendChild(makeBtn('Show Browser', 'show_chrome'));
+    actions.appendChild(makeBtn('Retry', 'retry_message'));
+    actions.appendChild(makeBtn('Switch provider', 'open_model_menu'));
+  }
   if (msg.upgradeUrl) {
     const a = document.createElement('a');
     a.textContent = 'Upgrade';
@@ -1190,9 +1230,9 @@ function addApprovalCard(toolName, path, diff, divergent, onApprove, onReject) {
 }
 
 // ===== FIX v1.2.1: card inline de review diff (Accept/Reject în chat) =====
-// Fallback pentru notificarea VS Code (poate fi ascunsă / expirată /
-// nerandată): butoanele din chat decid ACELAȘI review ca notificarea —
-// prima decizie câștigă, ambele căi ajung la aceeași promisiune din extensie.
+// v2.5.11 (bug #27): cardul din chat e SINGURA suprafață de decizie.
+// Notificarea VS Code (Accept/Reject) apare doar ca fallback, când cardul nu
+// poate fi livrat webview-ului — nu mai rulează în paralel cu acest card.
 function findDiffReviewCard(id) {
   return messages.querySelector(
     '.msg.approval.diff-review[data-review-id="' + id + '"]'
@@ -1260,11 +1300,6 @@ function addDiffReviewCard(payload) {
   btnRow.appendChild(accept);
   btnRow.appendChild(reject);
   card.appendChild(btnRow);
-
-  const hint = document.createElement('div');
-  hint.className = 'approval-hint';
-  hint.textContent = 'You can also decide from the VS Code notification — the decision is the same.';
-  card.appendChild(hint);
 
   messages.appendChild(card);
   messages.scrollTop = messages.scrollHeight;
@@ -1375,10 +1410,6 @@ settingsBtn?.addEventListener('click', () => {
 });
 
 // v2.0.2: acțiunile noi din meniul „⋯" grupat pe secțiuni
-openBrowserBtn?.addEventListener('click', () => {
-  vscode.postMessage({ type: 'open_browser' });
-});
-
 stopDevBtn?.addEventListener('click', () => {
   vscode.postMessage({ type: 'stop_dev_servers' });
 });
@@ -1730,6 +1761,11 @@ function renderProviderMenu(providers, payload) {
     modelLocalEl.appendChild(
       ollamaNote('Installed, but the server is not running — start it with "ollama serve".')
     );
+  } else if (ollama.emptyModels) {
+    // v2.5.11 (bug #24): serverul rulează, dar nu are niciun model instalat
+    modelLocalEl.appendChild(
+      ollamaNote('No local models installed — download one below.')
+    );
   }
 
   for (const p of providers || []) {
@@ -1818,6 +1854,15 @@ function renderProviderMenu(providers, payload) {
     } else {
       modelHwEl.hidden = true;
     }
+  }
+
+  // v2.5.11 (bug #29): avertisment vizibil (nu doar în tooltip) pe mașinile
+  // fără GPU — inferența locală încarcă CPU/RAM, iar providerii web sunt
+  // alternativa gratuită care nu consumă resursele laptopului.
+  if (modelAdviceEl) {
+    const advice = (payload && payload.hardware && payload.hardware.advice) || '';
+    modelAdviceEl.textContent = advice;
+    modelAdviceEl.hidden = !advice;
   }
 
   if (activeLabel && modelLabel) modelLabel.textContent = activeLabel;
@@ -2025,7 +2070,7 @@ window.addEventListener('message', (event) => {
     if (pendingEl) setPendingText(msg.text);
     keepBottom();
   } else if (msg.type === 'notice') {
-    addNotice(msg.text || '');
+    addNotice(msg.text || '', msg.action, msg.actionLabel);
   } else if (msg.type === 'heal') {
     addHeal(msg.text || '');
   } else if (msg.type === 'verbose') {
@@ -2133,7 +2178,8 @@ window.addEventListener('message', (event) => {
     setBusy(true);
   } else if (msg.type === 'diff_review') {
     // v1.2.1: cardul de review cu butoane Accept/Reject, în paralel cu
-    // notificarea VS Code (care poate să nu apară deloc).
+    // v2.5.11 (bug #27): acest card e suprafața principală de decizie;
+    // notificarea VS Code rămâne doar fallback (webview indisponibil).
     // v2.0.1: când review-ul are rânduri inline de „file change", acelea sunt
     // UI-ul principal (diff-ul nativ rămâne deschis) — cardul mare cu preview
     // rămâne doar ca fallback pentru review-urile fără rânduri.

@@ -5,6 +5,20 @@ import { logLine } from './log';
 import { BrowserManager } from './browser';
 import { SLOTS, SlotName, anySelectorPresent, healSlot, selectors } from './selectors';
 import { captureCleanDom } from './ai-selector-finder';
+// v2.5.11 (bug #34): logica pură (URL + clasificare rapoarte) trăiește în
+// selectorHealth.ts, fără `vscode`/Playwright, ca să poată fi testată izolat.
+import {
+  HealthSlot,
+  ReportPayload,
+  SlotProbe,
+  buildProbeReports,
+  isAppPage,
+  normalizeHost,
+  waitForAny
+} from './selectorHealth';
+
+export type { FailureType, ReportPayload } from './selectorHealth';
+export { normalizeHost };
 
 const log = (msg: string) => logLine('reporting', msg);
 
@@ -38,28 +52,12 @@ const DEFAULT_SELECTORS_HOURS = 24;
 const MAX_DOM_SNAPSHOT_CHARS = 12_000;
 /** Sloturile verificate de health check (response e dependent de conținut,
  *  stopButton există doar în timpul generării → nu au sens aici). */
-const HEALTH_SLOTS: SlotName[] = ['input', 'newChat'];
+const HEALTH_SLOTS: HealthSlot[] = ['input', 'newChat'];
 
-export type FailureType =
-  | 'not_found'
-  | 'ambiguous'
-  | 'hidden'
-  | 'stale'
-  | 'detached'
-  | 'timeout'
-  | 'other';
-
-export interface ReportPayload {
-  /** Domeniul providerului, ex: 'chat.deepseek.com'. */
-  domain: string;
-  /** Selectorul care a eșuat. */
-  selector: string;
-  failureType: FailureType;
-  message?: string;
-  url?: string;
-  /** Snapshot DOM curățat — inclus doar cu `freekit.reporting.shareDomSnapshot`. */
-  domSnapshot?: string;
-}
+/** v2.5.11 (bug #34): cât așteptăm SPA-ul să randeze input-ul înainte de raport. */
+const HEALTH_WAIT_MS = 5000;
+/** v2.5.11 (bug #34): timeout pentru navigarea la pagina aplicației. */
+const APP_NAV_TIMEOUT_MS = 10_000;
 
 export interface AppliedSelector {
   provider: string;
@@ -93,23 +91,20 @@ async function request(
   }
 }
 
-/** Host normalizat (fără protocol/port/path, fără „www.”) — pentru mapare. */
-export function normalizeHost(value: string): string {
-  return String(value || '')
-    .trim()
-    .toLowerCase()
-    .replace(/^https?:\/\//, '')
-    .replace(/^\/\//, '')
-    .replace(/[\/?#].*$/, '')
-    .replace(/:\d+$/, '')
-    .replace(/^www\./, '');
-}
-
 function hostOfUrl(url: string): string {
   try {
     return normalizeHost(new URL(url).host);
   } catch {
     return normalizeHost(url);
+  }
+}
+
+/** URL-ul paginii, fără excepție dacă pagina e în tranziție. */
+function pageUrl(page: Page): string {
+  try {
+    return page.url();
+  } catch {
+    return '';
   }
 }
 
@@ -253,20 +248,19 @@ async function anyUsable(page: Page, sels: string[]): Promise<boolean> {
 /**
  * Verifică selectorii unui provider pe pagina dată: dacă sloturile critice nu
  * se rezolvă, încearcă repararea locală (fingerprint + AI) și, dacă nici așa
- * nu există un selector funcțional, întoarce raportul de trimis la server.
+ * nu există un selector funcțional, întoarce rapoartele de trimis la server.
+ *
+ * v2.5.11 (bug #34): `waitMs` = cât așteptăm SPA-ul să randeze (echivalentul
+ * `page.waitForSelector`), iar clasificarea trece prin `buildProbeReports`:
+ * dacă NICIUN slot critic nu există în DOM → un singur `wrong_page`, nu două
+ * rapoarte `not_found`.
  */
 export async function probeProviderSelectors(
   page: Page,
   providerId: string,
-  opts: { shareDomSnapshot?: boolean } = {}
+  opts: { shareDomSnapshot?: boolean; waitMs?: number } = {}
 ): Promise<ReportPayload[]> {
-  const failures: ReportPayload[] = [];
-  let url = '';
-  try {
-    url = page.url();
-  } catch {
-    /* pagina poate fi în tranziție */
-  }
+  const url = pageUrl(page);
   const domain = hostOfUrl(url);
   let snapshot: string | undefined;
   let snapshotTaken = false;
@@ -283,10 +277,17 @@ export async function probeProviderSelectors(
     return snapshot;
   };
 
+  const probes: SlotProbe[] = [];
   for (const slot of HEALTH_SLOTS) {
     const sels = selectors.candidates(providerId, slot);
     if (!sels.length) continue;
-    if (await anyUsable(page, sels)) continue;
+
+    // v2.5.11 (bug #34): SPA-ul poate avea nevoie de câteva secunde — nu
+    // declarăm slotul lipsă cât timp pagina se încarcă.
+    if (await waitForAny(() => anyUsable(page, sels), opts.waitMs ?? 0)) {
+      probes.push({ slot, candidates: sels, usable: true, present: true });
+      continue;
+    }
 
     // auto-heal local: exact aceeași cale ca la rularea normală
     let healed: string | null = null;
@@ -295,27 +296,27 @@ export async function probeProviderSelectors(
     } catch (e: any) {
       log('heal failed (' + providerId + '.' + slot + '): ' + (e?.message ?? String(e)));
     }
-    if (healed && (await selectorUsable(page, healed))) continue;
+    if (healed && (await selectorUsable(page, healed))) {
+      probes.push({ slot, candidates: sels, usable: true, present: true, healed });
+      continue;
+    }
 
-    const present = await anySelectorPresent(page, sels);
-    failures.push({
-      domain,
-      selector: sels[0],
-      failureType: present ? 'hidden' : 'not_found',
-      message:
-        'health check: no working selector for ' +
-        providerId +
-        '.' +
-        slot +
-        ' (tried: ' +
-        sels.join(', ') +
-        ')' +
-        (healed ? '; local heal proposed: ' + healed : '; local heal found nothing'),
-      url,
-      domSnapshot: await snapshotOnce()
+    probes.push({
+      slot,
+      candidates: sels,
+      usable: false,
+      present: await anySelectorPresent(page, sels),
+      healed
     });
   }
-  return failures;
+
+  const reports = buildProbeReports({ domain, providerId, url, slots: probes });
+  for (const r of reports) {
+    // v2.5.11 (bug #34): snapshot-ul se atașează doar rapoartelor per-slot — un
+    // snapshot de pe o pagină non-app (`wrong_page`) nu are ce învăța serverul.
+    if (r.failureType !== 'wrong_page') r.domSnapshot = await snapshotOnce();
+  }
+  return reports;
 }
 
 export interface HealthCheckOutcome {
@@ -448,7 +449,11 @@ export class ReportingClient {
             selector: payload.selector,
             failureType: payload.failureType,
             message: payload.message,
-            url: payload.url
+            url: payload.url,
+            // v2.5.11 (bug #34): sloturile vizate (opționale — serverele vechi
+            // le ignoră; `undefined` dispare la JSON.stringify)
+            slot: payload.slot,
+            slots: payload.slots
           }
         ]
       };
@@ -593,6 +598,24 @@ export class ReportingService {
   }
 
   /**
+   * v2.5.11 (bug #34): aduce tab-ul pe pagina aplicației providerului înainte
+   * de probă (timeout scurt). Eșecul duce la skip — nu la rapoarte false.
+   */
+  private async openAppPage(page: Page, appUrl: string): Promise<boolean> {
+    if (!appUrl) return false;
+    try {
+      await page.goto(appUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: APP_NAV_TIMEOUT_MS
+      });
+      return true;
+    } catch (e: any) {
+      log('health: navigation to ' + appUrl + ' failed — ' + (e?.message ?? String(e)));
+      return false;
+    }
+  }
+
+  /**
    * Verifică selectorii pe tab-urile deja deschise: repară local și, dacă
    * reparația eșuează, trimite rapoartele către server.
    */
@@ -621,7 +644,8 @@ export class ReportingService {
       }
 
       for (const pid of selectors.info().providers) {
-        const host = normalizeHost(selectorUrl(pid));
+        const appUrl = selectorUrl(pid);
+        const host = normalizeHost(appUrl);
         if (!host || !hosts.has(host)) continue;
 
         let page: Page;
@@ -632,11 +656,33 @@ export class ReportingService {
           continue;
         }
         // siguranță: nu verificăm un tab greșit (fals-pozitive)
-        if (!page || normalizeHost(hostOfUrl(page.url())) !== host) continue;
+        if (!page || normalizeHost(hostOfUrl(pageUrl(page))) !== host) continue;
+
+        // v2.5.11 (bug #34): verifică PAGINA aplicației, nu doar hostul — un
+        // tab pe landing / `/share/...` / eroare (același host) nu are niciun
+        // element al aplicației și producea 2 rapoarte `not_found` false.
+        // Excepție: alte rute valide ale aplicației (ex. Claude `/chat/<id>`,
+        // care nu e `selectors.url`) — dacă input-ul e deja utilizabil acolo,
+        // NU mutăm tab-ul utilizatorului.
+        if (!isAppPage(pageUrl(page), appUrl)) {
+          const inputSels = selectors.candidates(pid, 'input');
+          const looksLikeApp =
+            inputSels.length > 0 && (await anyUsable(page, inputSels));
+          if (!looksLikeApp) {
+            const moved = await this.openAppPage(page, appUrl);
+            if (!moved || !isAppPage(pageUrl(page), appUrl)) {
+              log(
+                'health check: skipping ' + pid + ' — wrong page (' + pageUrl(page) + ')'
+              );
+              continue;
+            }
+          }
+        }
 
         outcome.checkedProviders.push(pid);
         const found = await probeProviderSelectors(page, pid, {
-          shareDomSnapshot: this.client.shareDomSnapshot
+          shareDomSnapshot: this.client.shareDomSnapshot,
+          waitMs: HEALTH_WAIT_MS
         });
         for (const failure of found) {
           log('health: ' + pid + ' → ' + failure.failureType + ' (' + failure.selector + ')');

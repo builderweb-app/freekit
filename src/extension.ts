@@ -312,11 +312,15 @@ export async function activate(ctx: vscode.ExtensionContext) {
     })
   );
 
+  // v2.5.11 (bug #21): „Open Browser" și „Show Chrome" făceau lucruri aproape
+  // identice (ambele porneau Chrome, dar „Open Browser" îl lăsa ascuns), ceea ce
+  // crea confuzie. Comanda rămâne înregistrată ca alias ascuns pentru
+  // back-compat (nu mai e listată în Command Palette), dar face exact ce face
+  // „Show Browser": pornește Chrome dacă e nevoie ȘI îl aduce pe ecran.
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('freekit.openBrowser', async () => {
-      await browser.ensureOpen();
-      vscode.window.showInformationMessage('Connected to Chrome (Freekit profile).');
-    })
+    vscode.commands.registerCommand('freekit.openBrowser', () =>
+      chatView.showChrome()
+    )
   );
 
   // v0.3.0 (P0.3): Close Browser chiar închide procesul
@@ -392,7 +396,8 @@ export async function activate(ctx: vscode.ExtensionContext) {
     )
   );
 
-  // v0.4.0: Show Chrome — aduce fereastra offscreen (-32000,-32000) în față
+  // v0.4.0: Show Browser — aduce fereastra offscreen (-32000,-32000) în față
+  // v2.5.11 (bug #21): singurul buton vizibil pentru aducerea browserului pe ecran
   ctx.subscriptions.push(
     vscode.commands.registerCommand('freekit.showChrome', () =>
       chatView.showChrome()

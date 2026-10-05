@@ -526,7 +526,7 @@ export class BrowserManager {
   }
 
   /* ========================================================================
-   * v0.4.0 — Show Chrome: aduce fereastra din fundal (minimizată / la
+   * v0.4.0 — Show Browser: aduce fereastra din fundal (minimizată / la
    * -32000,-32000) înapoi în ecran și o activează. Pornește Chrome dacă nu
    * rulează (apoi o mută).
    * ======================================================================== */

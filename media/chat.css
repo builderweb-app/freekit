@@ -431,6 +431,24 @@ pre.code code {
   color: var(--vscode-foreground);
 }
 
+/* v2.5.11 (bug #28/#29): notificare cu buton de acțiune (model mic / hardware) */
+.notice.notice-actionable {
+  border-style: solid;
+  border-left: 3px solid var(--vscode-editorWarning-foreground, #d29922);
+  color: var(--vscode-foreground);
+  align-self: stretch;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.notice-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 /* ===== v2.0.4: card „login required" (Chrome în față + Retry) ===== */
 .notice.login-required {
   border-style: solid;
@@ -601,12 +619,6 @@ pre.code code {
 .reject-btn:disabled {
   opacity: 0.5;
   cursor: default;
-}
-
-.approval-hint {
-  margin-top: 8px;
-  font-size: 10.5px;
-  color: var(--vscode-descriptionForeground, #999);
 }
 
 .approval-status {
@@ -1215,6 +1227,15 @@ pre.code code {
   margin-top: 4px;
   padding-top: 6px;
   border-top: 1px solid var(--vscode-widget-border, #454545);
+}
+
+/* v2.5.11 (bug #29): avertismentul CPU/RAM (mașini fără GPU) — vizibil, nu
+   doar în tooltip */
+#model-advice.warn {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--vscode-widget-border, #454545);
+  color: var(--vscode-editorWarning-foreground, #d29922);
 }
 
 /* ===== Buton „mesaje noi" (scroll inteligent) ===== */

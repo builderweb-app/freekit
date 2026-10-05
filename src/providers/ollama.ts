@@ -7,6 +7,11 @@ import { promisify } from 'util';
 import { Page } from 'playwright';
 import { AIProvider, SendOptions } from './types';
 import { logLine } from '../log';
+import {
+  DetectedProviderError,
+  detectProviderError,
+  ollamaModelMissing
+} from '../providerErrors';
 
 const log = (msg: string) => logLine('ollama', msg);
 
@@ -188,6 +193,13 @@ export class OllamaProvider implements AIProvider {
 
   private history: Array<{ role: string; content: string }> = [];
 
+  /** v2.5.11: modelul local configurat (freekit.ollamaModel). */
+  private configuredModel(): string {
+    return vscode.workspace
+      .getConfiguration('freekit')
+      .get<string>('ollamaModel', 'qwen2.5-coder:7b');
+  }
+
   async open(_page?: Page): Promise<void> {
     // Verifică că Ollama rulează
     const ok = await this.isAvailable();
@@ -198,6 +210,17 @@ export class OllamaProvider implements AIProvider {
     }
     const models = await this.listModels();
     log('Ollama available, models: ' + (models.join(', ') || '(none)'));
+
+    // v2.5.11 (bug #24/#25): modelul configurat trebuie să existe local. Fără
+    // verificarea asta, `send` lovea un 404 sec, afișat ca text brut în chat.
+    // Lista e deja adusă aici, deci verificarea nu costă nimic în plus.
+    const configured = this.configuredModel();
+    if (!models.includes(configured)) {
+      throw new DetectedProviderError(
+        'ollama',
+        ollamaModelMissing(configured, models)
+      );
+    }
   }
 
   async newChat(_page?: Page): Promise<void> {
@@ -211,8 +234,7 @@ export class OllamaProvider implements AIProvider {
     signal?: AbortSignal,
     opts?: SendOptions
   ): Promise<string> {
-    const config = vscode.workspace.getConfiguration('freekit');
-    const model = config.get<string>('ollamaModel', 'qwen2.5-coder:7b');
+    const model = this.configuredModel();
 
     // Local nu există „upload în chat": binarele/imaginite nu pot pleca.
     // Conținutul text al atașamentelor e deja inclus în `message`.
@@ -244,11 +266,27 @@ export class OllamaProvider implements AIProvider {
     if (!response.ok) {
       // Ollama pune detaliul în JSON (ex: model negăsit -> 404)
       let detail = '';
+      let body = '';
       try {
         const err = (await response.json()) as any;
-        if (err?.error) detail = ' — ' + err.error;
+        if (err?.error) {
+          body = String(err.error);
+          detail = ' — ' + body;
+        }
       } catch {
         /* corp fără JSON */
+      }
+      // v2.5.11 (bug #25): model lipsă → eroare tipizată, ca chatView să
+      // afișeze cardul dedicat (buton „Download model"), nu textul brut de 404.
+      const detected = detectProviderError(body, 'ollama');
+      if (detected?.kind === 'model_missing' || response.status === 404) {
+        const available = await this.listModels().catch(() => []);
+        throw new DetectedProviderError(
+          'ollama',
+          detected?.kind === 'model_missing' && detected.model
+            ? { ...detected, availableModels: available }
+            : ollamaModelMissing(this.configuredModel(), available)
+        );
       }
       throw new Error(
         'Ollama error: ' + response.status + ' ' + response.statusText + detail
@@ -283,7 +321,11 @@ export class OllamaProvider implements AIProvider {
 
   async listModels(): Promise<string[]> {
     try {
-      const res = await fetch(`${this.url}/api/tags`);
+      const res = await fetch(`${this.url}/api/tags`, {
+        // v2.5.11: același timeout ca `listOllamaModelsDetailed` — un server
+        // care nu răspunde nu trebuie să blocheze fluxul de eroare.
+        signal: AbortSignal.timeout(5000)
+      });
       const data = (await res.json()) as any;
       return (data.models || []).map((m: any) => m.name);
     } catch {

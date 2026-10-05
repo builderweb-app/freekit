@@ -860,6 +860,70 @@ export function fitsThisMachine(model: string, hw: HardwareInfo): boolean {
   return !!entry && scoreEntry(entry, hw) !== null;
 }
 
+/**
+ * v2.5.11 (bug #28): modelele de embeddings nu pot ține o conversație —
+ * folosite doar de indexul semantic (`freekit.semanticIndex.model`).
+ */
+export function isEmbeddingModel(model: string): boolean {
+  return /embed|nomic/i.test(String(model ?? ''));
+}
+
+/** Sub pragul ăsta modelul scrie prost cod real (improvizează, trunchiază). */
+export const WEAK_MODEL_QUALITY = 45;
+/** Și sub atâția parametri — indiferent de rating-ul din catalog. */
+export const WEAK_MODEL_PARAMS_B = 3;
+
+export interface ModelQuality {
+  /** Eticheta de mărime din catalog: `1.5B`, `7B`, `3B MoE`. */
+  size: string;
+  /** Memoria aproximativă necesară (GB, Q4_K_M) — 0 dacă modelul nu e în catalog. */
+  needGb: number;
+  /** Rating de calitate comparabil (0-100) — 0 dacă modelul nu e în catalog. */
+  quality: number;
+  /** Numărul de parametri dedus din `size` (ex. `3B MoE` → 3). */
+  paramsB: number;
+  /** Prea mic pentru cod real: sub 3B sau calitate sub `WEAK_MODEL_QUALITY`. */
+  weak: boolean;
+  /** Model doar de embeddings (fără suport de conversație). */
+  embedding: boolean;
+}
+
+/**
+ * v2.5.11 (bug #28): „recommended" însemna doar „încape pe mașină" — un model
+ * de 1.5B apărea recomandat, deși scrie prost. Întoarce rating-ul din catalog
+ * (sau `embedding: true` pentru un id de embeddings necunoscut), ca UI-ul să
+ * poată avertiza. `null` = model necunoscut, fără date.
+ */
+export function modelQuality(model: string): ModelQuality | null {
+  const id = String(model ?? '').trim();
+  if (!id) return null;
+  const embedding = isEmbeddingModel(id);
+  const wanted = id.toLowerCase();
+  let entry = MODEL_CATALOG.find((m) => m.id.toLowerCase() === wanted);
+  if (!entry && !wanted.includes(':')) {
+    // id fără tag („llama3.2") → singurul tag din catalog cu acel prefix
+    const prefixed = MODEL_CATALOG.filter((m) =>
+      m.id.toLowerCase().startsWith(wanted + ':')
+    );
+    if (prefixed.length === 1) entry = prefixed[0];
+  }
+  if (!entry) {
+    return embedding
+      ? { size: '', needGb: 0, quality: 0, paramsB: 0, weak: false, embedding: true }
+      : null;
+  }
+  const p = /^([\d.]+)B/.exec(entry.size.trim());
+  const paramsB = p ? Number(p[1]) : 0;
+  return {
+    size: entry.size,
+    needGb: entry.needGb,
+    quality: entry.quality,
+    paramsB,
+    weak: !embedding && (paramsB < WEAK_MODEL_PARAMS_B || entry.quality < WEAK_MODEL_QUALITY),
+    embedding
+  };
+}
+
 /** Text scurt pentru UI / raport: „RTX 4060 · 8 GB VRAM · 32 GB RAM · T2". */
 export function hardwareSummary(hw: HardwareInfo): string {
   const parts: string[] = [];
@@ -875,6 +939,20 @@ export function hardwareSummary(hw: HardwareInfo): string {
   parts.push(`${hw.ramGb} GB RAM`);
   parts.push(hw.tier);
   return parts.join(' · ');
+}
+
+/**
+ * v2.5.11 (bug #29): mașinile fără GPU (T0/T1 sau VRAM 0) rulează modelele pe
+ * CPU/RAM — greu, cu ventilator și baterie. Avertizează și indică providerii
+ * web (cont gratuit, în browser) ca alternativă ușoară. `null` = hardware ok.
+ */
+export function hardwareAdvice(hw: HardwareInfo): string | null {
+  if (hw.tier !== 'T0' && hw.tier !== 'T1' && hw.vramGb !== 0) return null;
+  return (
+    '⚠️ Local models run on CPU/RAM — heavy load, fan, shorter battery. ' +
+    'For a lighter setup, use a web provider (DeepSeek, ChatGPT, Claude, ' +
+    'Gemini, Mistral, Qwen) — free account, runs in browser, no CPU load.'
+  );
 }
 
 /** v2.1.0: linii detaliate pentru raportul de status (toate GPU-urile, disc, VM). */

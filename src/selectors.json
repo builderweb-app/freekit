@@ -1,7 +1,7 @@
 {
-  "version": "1.5.0",
-  "updated": "2026-10-04",
-  "changelog": "v1.5.0: providerul Kimi eliminat — site-ul a migrat la kimi.ai, iar selectorii pentru kimi.com nu mai funcționează (fără cont de testare pe kimi.ai).",
+  "version": "1.5.1",
+  "updated": "2026-10-05",
+  "changelog": "v1.5.1: selectoare Gemini igienizate — eliminate `textarea` și `button[aria-label*=…]` (moarte, elementul „New chat” e `<a>`), adăugate alternative stabile pe role/aria/data-* (`[role='textbox'][contenteditable='true']`, `[aria-label='Enter a prompt for Gemini']`, `a[data-test-id='side-nav-sparkle-button']`); health check-ul nu mai raportează fals `not_found` pe pagini non-app (bug #34). v1.5.0: providerul Kimi eliminat — site-ul a migrat la kimi.ai, iar selectorii pentru kimi.com nu mai funcționează (fără cont de testare pe kimi.ai).",
   "providers": {
     "deepseek": {
       "url": "https://chat.deepseek.com/",
@@ -69,9 +69,11 @@
       "input": {
         "primary": "rich-textarea .ql-editor[contenteditable='true']",
         "alternatives": [
+          "div.ql-editor[contenteditable='true'][role='textbox']",
+          "[role='textbox'][contenteditable='true']",
+          "[aria-label='Enter a prompt for Gemini']",
           "rich-textarea div[contenteditable='true']",
-          "div[contenteditable='true']",
-          "textarea"
+          "div[contenteditable='true']"
         ],
         "fingerprint": {
           "tags": ["div", "textarea"],
@@ -100,9 +102,10 @@
       "newChat": {
         "primary": "[data-test-id='new-chat-button']",
         "alternatives": [
-          "a[href='/app']",
-          "button[aria-label*='New chat' i]",
-          "button[aria-label*='Chat nou' i]"
+          "gem-nav-list-item[data-test-id='new-chat-button']",
+          "a[data-test-id='side-nav-sparkle-button'][aria-label*='New chat' i]",
+          "a[aria-label*='New chat' i]",
+          "a[href='/app']"
         ],
         "fingerprint": {
           "tags": ["button", "a"],

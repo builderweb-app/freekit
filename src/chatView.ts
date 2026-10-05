@@ -16,8 +16,11 @@ import { pullOllamaModel } from './providers/ollama';
 import {
   detectHardware,
   fitsThisMachine,
+  hardwareAdvice,
   hardwareReport,
   hardwareSummary,
+  isEmbeddingModel,
+  modelQuality,
   modelSpeed,
   recommendModels,
   tierTarget
@@ -51,6 +54,11 @@ import {
   looksLikeToolCallAttempt,
   parseToolCallText
 } from './toolCallParser';
+import {
+  buildCircuitBreakerMessage,
+  CIRCUIT_BREAKER_THRESHOLD,
+  CircuitBreaker
+} from './circuitBreaker';
 import { mcp } from './mcp/manager';
 import { Attachment, describePath, prepareAttachments } from './attachments';
 import { detectProject, formatProjectInfo } from './project';
@@ -153,6 +161,15 @@ const LOGIN_MAX_ASSISTS = 2;
 // v1.8.0: asistentul de CAPTCHA — aceleași limite ca la login (5 min, poll 2.5s)
 const CAPTCHA_WAIT_MS = 5 * 60_000;
 const CAPTCHA_POLL_MS = 2500;
+
+/**
+ * v2.5.11 (bug #24): modele Ollama de start oferite spre descărcare când
+ * serverul rulează dar nu are NICIUN model instalat (`ollama list` gol) —
+ * altfel utilizatorul nu are ce selecta și nu știe de unde să înceapă.
+ * v2.5.11 (bug #28): fără modele de embeddings (`nomic-embed-text`) — acestea
+ * nu pot ține o conversație și nici nu se selectează automat la descărcare.
+ */
+const OLLAMA_STARTER_MODELS = ['qwen2.5-coder:7b', 'llama3.2'];
 
 // v1.3.0: auto-verify — tool-urile de scriere care declanșează verificarea
 const AUTO_VERIFY_TOOLS = new Set(['edit_file', 'write_file', 'write_files']);
@@ -887,6 +904,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (isBrowser) {
         await this.state.update(LAST_BROWSER_KEY, id);
       }
+      // v2.5.11 (bug #28/#29): la alegerea unui model/provider local, avertizează
+      // când modelul e prea mic ori de embeddings sau când mașina nu are GPU.
+      // (doar Ollama — la „Auto" browserul e oricum prima cale, fără avertisment)
+      if (id === 'ollama') {
+        const picked = typeof msg.modelId === 'string' ? msg.modelId.trim() : '';
+        const quality = picked ? modelQuality(picked) : null;
+        if (quality && (quality.weak || quality.embedding)) {
+          this.post('notice', {
+            text: quality.embedding
+              ? '⛔ "' + picked + '" is an embeddings model — it cannot hold a ' +
+                'conversation. Pick a chat model.'
+              : '⚠️ Small model selected (' + quality.size + '). It may produce ' +
+                'poor code — 7B+ recommended.',
+            action: 'open_model_menu',
+            actionLabel: quality.embedding ? 'Pick a chat model' : 'Pick bigger model'
+          });
+        } else {
+          const advice = hardwareAdvice(await detectHardware());
+          if (advice) {
+            this.post('notice', {
+              text: advice,
+              action: 'open_model_menu',
+              actionLabel: 'Switch to web provider'
+            });
+          }
+        }
+      }
       log(
         'provider chip set to ' +
           id +
@@ -994,10 +1038,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     // v2.0.2: acțiunile de context din meniul „⋯"
-    if (msg.type === 'open_browser') {
-      await vscode.commands.executeCommand('freekit.openBrowser');
-      return;
-    }
+    // v2.5.11 (bug #21): „open_browser" a fost eliminat împreună cu butonul
+    // „Open Browser" din meniu (comanda rămâne doar ca alias ascuns).
     if (msg.type === 'stop_dev_servers') {
       await vscode.commands.executeCommand('freekit.stopDevServers');
       return;
@@ -1130,7 +1172,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    // v0.4.0: butonul Show Chrome din toolbar — aduce fereastra Chrome în față
+    // v0.4.0: butonul „Show Browser" din meniul „⋯" — aduce fereastra Chrome în față
     if (msg.type === 'show_chrome') {
       await this.showChrome();
       return;
@@ -1457,6 +1499,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // v2.0.4: păstrăm eroarea de login, ca să nu se piardă în mesajul
         // generic „Auto: all failed" — UI-ul trebuie să afișeze cardul Retry.
         let loginErr: any;
+        // v2.5.11 (bug #25): idem pentru erorile tipizate (ex. model Ollama
+        // lipsă) — au card dedicat, nu trebuie pierdute în mesajul generic.
+        let detectedErr: any;
         for (let i = 0; i < chain.length; i++) {
           const id = chain[i];
           const label = chainLabels[i];
@@ -1485,10 +1530,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           } catch (e: any) {
             if (this.abortRequested || e?.message === '__ABORTED__') throw e;
             if (isLoginRequiredError(e)) loginErr = e;
+            // v2.5.11 (bug #25): eroarea tipizată (card dedicat) are prioritate
+            // față de mesajul generic, dar nu față de fluxul de login.
+            if (e instanceof DetectedProviderError) detectedErr = e;
             const reason = e?.message ? String(e.message) : String(e);
             log('auto: ' + id + ' failed — ' + reason);
             if (i === chain.length - 1) {
               if (loginErr) throw loginErr;
+              if (detectedErr) throw detectedErr;
               throw new Error(
                 'Auto: tried ' + chainLabels.join(' → ') +
                   ', but all failed. Last error (' + label + '): ' + reason
@@ -1538,6 +1587,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // v2.5.0 — FIX 3: verificarea rulează o SINGURĂ dată per răspuns complet
       // al AI (nu după fiecare fișier); flag = s-a modificat vreun fișier în tura asta
       let filesWereModifiedThisTurn = false;
+      // v2.5.11 FIX (bug #33): circuit breaker — max 3 eșecuri consecutive ale
+      // ACELUIAȘI tool (un succes, al oricărui tool, resetează contorul).
+      // Contorul e local mesajului ⇒ un mesaj nou pornește mereu de la 0.
+      const circuitBreaker = new CircuitBreaker();
+      let circuitBroken = false;
       while (iterations < MAX_ITERATIONS && !this.abortRequested) {
         // v0.3.0 (P0.6): verificăm bugetul de timp înainte de fiecare pas
         if (Date.now() > deadline) {
@@ -1740,6 +1794,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         });
         if (this.abortRequested) break;
 
+        // v2.5.11 FIX (bug #33): circuit breaker — oprește bucla după 3 eșecuri
+        // consecutive ale ACELUIAȘI tool (un succes, al oricărui tool, resetează
+        // contorul), în loc să mergem până la 40/40 iterații cu un tool stricat.
+        const cb = circuitBreaker.record(toolCall.tool, result.ok);
+        if (cb.warn) {
+          log('tool ' + toolCall.tool + ' failed twice — one more and we stop');
+        }
+        if (cb.triggered) {
+          log(
+            'circuit breaker: ' + toolCall.tool + ' failed ' +
+              CIRCUIT_BREAKER_THRESHOLD + ' times consecutively'
+          );
+          circuitBroken = true;
+          const message = buildCircuitBreakerMessage(
+            toolCall.tool,
+            result.error
+          );
+          this.post('error', message);
+          await this.appendHistory('assistant', message);
+          break; // iese din bucla agentică
+        }
+
         // v2.5.0 — FIX 3: NU mai verificăm după fiecare fișier. Marcăm doar că
         // s-a modificat ceva în tura curentă; verificarea (astro check / tsc /
         // build) rulează o singură dată, când AI-ul termină răspunsul complet.
@@ -1820,6 +1896,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         log('auto-verify: rollback completed — ending with the rollback report');
         await this.appendHistory('assistant', verifyRollbackText);
         this.post('reply', verifyRollbackText);
+      } else if (circuitBroken) {
+        // v2.5.11 FIX (bug #33): mesajul de circuit breaker a fost deja postat
+        // și salvat în istoric înainte de break — nu mai postăm răspunsul vechi.
+        log('circuit breaker stopped the loop — ending with the breaker message');
       } else if (limitHit) {
         log('max iterations reached (' + MAX_ITERATIONS + ')');
         this.post(
@@ -1861,7 +1941,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           message: e.message,
           resetTime: e.details.resetTime,
           upgradeUrl: e.details.upgradeUrl,
-          providerId: e.providerId
+          providerId: e.providerId,
+          // v2.5.11 (bug #24/#25): modelul local lipsă + ce e instalat
+          model: e.details.model,
+          availableModels: e.details.availableModels
         });
         return;
       } else if (isLoginRequiredError(e)) {
@@ -1939,7 +2022,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.post(
           'notice',
           '📝 Native diff opened for review: ' + target +
-            ' — choose Accept / Reject from the card below or from the VS Code notification.'
+            ' — accept or reject from the card in the chat.'
         );
         const decision = await this.showDiffReview(tool, changes);
         if (decision === 'accept') {
@@ -2169,7 +2252,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!shown.ok) {
       this.post(
         'notice',
-        '⚠️ ' + shown.message + ' (you can also use the 👁 Show Chrome button).'
+        '⚠️ ' + shown.message + ' (you can also use the 🌐 Show Browser button).'
       );
     }
 
@@ -2233,7 +2316,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!shown.ok) {
       this.post(
         'notice',
-        '⚠️ ' + shown.message + ' (you can also use the 👁 Show Chrome button).'
+        '⚠️ ' + shown.message + ' (you can also use the 🌐 Show Browser button).'
       );
     }
 
@@ -2969,7 +3052,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.view?.webview.postMessage({ type: 'edit_resend', text });
   }
 
-  /** v0.4.0: aduce fereastra Chrome în față (comanda + butonul 👁 din toolbar). */
+  /**
+   * v0.4.0: aduce fereastra Chrome în față (butonul 🌐 din meniul „⋯" + comenzile
+   * „Show Browser" și aliasul „Open Browser").
+   */
   async showChrome(): Promise<void> {
     log('show chrome requested');
     const res = await this.browser.show();
@@ -3112,23 +3198,41 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const sizeByModel = new Map(
       info.ollamaModelDetails.map((m) => [m.name.toLowerCase(), m.sizeBytes])
     );
-    const models = info.ollamaModels.length ? info.ollamaModels : [activeModel];
+    // v2.5.11 (bug #24): DOAR lista reală din `/api/tags`. Înainte, când lista
+    // era goală, valoarea din setare (`activeModel`) era afișată ca și cum ar fi
+    // instalată — cu bifă activă și punct albastru — iar la trimitere dădea 404.
+    const models = info.ollamaModels;
     for (const model of models) {
       const recommended = fitsThisMachine(model, hw);
       const speed = modelSpeed(model, hw);
       const size = formatModelSize(sizeByModel.get(model.toLowerCase()) ?? 0);
-      // v2.1.0: spune și CÂT de repede rulează: VRAM = rapid, MoE pe CPU =
-      // acceptabil, dens în RAM = lent (dar utilizabil).
-      const verdict = !recommended
+      const q = modelQuality(model);
+      // v2.5.11 (bug #28): „recommended" însemna doar „încape pe mașină" — un
+      // 1.5B apărea recomandat, deși scrie prost. Modelele mici primesc
+      // avertisment explicit, cele de embeddings sunt marcate ca atare (nu pot
+      // ține o conversație), iar modelele bune arată și clasa „7B+ best".
+      const speedLabel = !recommended
         ? ''
         : speed === 'fast'
           ? 'recommended · GPU'
           : speed === 'medium'
             ? 'recommended · CPU-friendly'
             : 'recommended · CPU (slow)';
+      const verdict = q?.embedding
+        ? '⛔ embeddings only — not a chat model'
+        : q?.weak
+          ? '⚠️ ' + q.size + ' — too small for real code; 7B+ recommended'
+          : [
+              speedLabel,
+              q?.size ?? '',
+              recommended && q && q.paramsB >= 7 ? '7B+ best' : ''
+            ]
+              .filter(Boolean)
+              .join(' · ');
       providers.push({
         id: 'ollama',
         label: model,
+        // v2.5.11 (bug #28): B + GB pe fiecare rând („7B · 4.8 GB")
         sub: [verdict, size].filter(Boolean).join(' · '),
         group: 'local',
         dot: info.ollama ? 'blue' : 'orange',
@@ -3138,29 +3242,84 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       });
     }
 
+    // v2.5.11 (bug #24): „0 modele instalate" (server pornit, `ollama list` gol).
+    const noLocalModels = info.ollama && models.length === 0;
+    const configuredInstalled = models.some(
+      (m) => m.toLowerCase() === activeModel.toLowerCase()
+    );
+
+    // v2.5.11 (bug #24): Ollama nu poate servi nimic (oprit SAU fără modele SAU
+    // modelul configurat nu e instalat) → rând informativ, ca chip-ul să arate
+    // providerul, nu un model fabricat din setare.
+    if (!info.ollama || !configuredInstalled) {
+      providers.push({
+        id: 'ollama',
+        label: 'Ollama (local)',
+        sub: !info.ollama
+          ? 'not running — start it with "ollama serve"'
+          : noLocalModels
+            ? 'no models installed — download one from the list'
+            : '"' + activeModel + '" is not installed — download it or pick another',
+        group: 'local',
+        dot: 'orange'
+      });
+    }
+
     // v2.0.2: recomandările care lipsesc — se descarcă direct din meniu.
     // Doar când serverul răspunde (altfel `ollama pull` nu are unde rula).
     if (info.ollama) {
-      const installed = new Set(models.map((m) => m.toLowerCase()));
-      for (const rec of recommendations) {
-        if (installed.has(rec.id.toLowerCase())) continue;
+      // v2.5.11 (bug #24): lista REALĂ a modelelor instalate. Înainte se folosea
+      // lista afișată (cu fallback-ul fabricat), deci rândul „download" pentru
+      // exact modelul lipsă era suprimat — utilizatorul nu-l putea descărca.
+      const installed = new Set(info.ollamaModels.map((m) => m.toLowerCase()));
+      // v2.5.11 (bug #28): rândurile de descărcare arată consecvent și
+      // parametrii, și memoria („7B · ~4.8 GB · …"), plus avertismentul pentru
+      // modelele prea mici.
+      const offerDownload = (id: string, speed?: string) => {
+        if (installed.has(id.toLowerCase())) return;
+        if (
+          providers.some(
+            (p) => p.group === 'local' && p.modelId?.toLowerCase() === id.toLowerCase()
+          )
+        ) {
+          return;
+        }
+        const q = modelQuality(id);
         providers.push({
           id: 'ollama',
-          label: rec.id,
-          sub: [rec.size, rec.speed, 'download'].join(' · '),
+          label: id,
+          sub: [
+            q?.size ?? '',
+            q ? '~' + q.needGb + ' GB' : '',
+            speed ?? '',
+            q?.embedding ? '⛔ embeddings only' : q?.weak ? '⚠️ too small for real code' : '',
+            'download'
+          ]
+            .filter(Boolean)
+            .join(' · '),
           group: 'local',
           dot: 'orange',
-          modelId: rec.id,
+          modelId: id,
           missing: true,
-          speed: rec.speed
+          speed
         });
+      };
+      for (const rec of recommendations) {
+        offerDownload(rec.id, rec.speed);
       }
+      // v2.5.11 (bug #24): nimic instalat → oferă și modelele de start.
+      if (noLocalModels) {
+        for (const id of OLLAMA_STARTER_MODELS) offerDownload(id);
+      }
+      // v2.5.11 (bug #24): modelul configurat dar neinstalat rămâne descărcabil
+      // din meniu, chiar dacă nu apare printre recomandările de hardware.
+      if (!configuredInstalled) offerDownload(activeModel);
     }
 
     for (const p of providers) {
       p.active =
         p.group === 'local'
-          ? selected === 'ollama' && p.modelId === activeModel
+          ? selected === 'ollama' && (p.modelId ? p.modelId === activeModel : true)
           : p.id === selected;
     }
 
@@ -3182,6 +3341,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         unifiedMemoryGb: hw.unifiedMemoryGb,
         freeDiskGb: hw.freeDiskGb,
         isVM: hw.isVM,
+        // v2.5.11 (bug #29): avertisment vizibil pe mașinile fără GPU (T0/T1)
+        advice: hardwareAdvice(hw) ?? '',
         gpus: hw.gpus.map((g) => ({
           name: g.name,
           vramGb: g.vramGb,
@@ -3191,7 +3352,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }))
       },
       recommendations,
-      ollama: { state: installState, running: info.ollama, installed: info.ollamaCli }
+      ollama: {
+        state: installState,
+        running: info.ollama,
+        installed: info.ollamaCli,
+        // v2.5.11 (bug #24): serverul rulează, dar nu are niciun model instalat
+        emptyModels: noLocalModels
+      }
     });
   }
 
@@ -3255,6 +3422,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     );
 
     if (!ok) return;
+
+    // v2.5.11 (bug #28e): un model de embeddings (nomic-embed-text etc.) nu
+    // poate ține o conversație — îl instalăm, dar NU îl selectăm ca model de
+    // chat (rămâne disponibil pentru indexul semantic).
+    if (isEmbeddingModel(model)) {
+      log('pulled embeddings-only model ' + model + ' — not selecting it for chat');
+      this.post('notice', {
+        text:
+          '📎 "' + model + '" is an embeddings model — installed, but not ' +
+          'selected for chat. Use it as `freekit.semanticIndex.model` or pick a chat model.',
+        action: 'open_model_menu',
+        actionLabel: 'Pick a chat model'
+      });
+      await this.refreshProviderStatus();
+      return;
+    }
 
     await vscode.workspace
       .getConfiguration('freekit')
@@ -3370,15 +3553,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return 'no provider available — start Chrome or Ollama.';
     }
     if (selected === 'ollama') {
-      if (info.ollama) return 'Ollama is ready to work (local mode).';
+      if (info.ollama)
+        return 'Ollama is ready to work (local mode; web providers available as a lighter alternative).';
       return info.browser
         ? 'Ollama is not responding — start "ollama serve" or choose a web provider.'
         : 'start Ollama with "ollama serve".';
     }
     if (info.browser) return 'the web provider can be used now.';
     return info.ollama
-      ? 'the browser is not running — use "Show Chrome" / Open Browser or choose Ollama (local).'
-      : 'start Chrome (Open Browser / Show Chrome) or Ollama.';
+      ? 'the browser is not running — use "Show Browser" or choose Ollama (local).'
+      : 'start the browser with "Show Browser" or Ollama.';
   }
 
   // FAZA II (A): lista de atașamente --------------------------------
@@ -3422,10 +3606,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * v0.5.0 — Diff & Review nativ VS Code
    * Scrierile de fișiere nu mai folosesc cardul text din chat: se deschide
    * un tab de diff NATIV VS Code (stânga = conținutul vechi, dreapta = cel
-   * nou) + o notificare cu butoanele Accept / Reject / Accept (nu mai
-   * întreba). Conținuturile merg în fișiere temporare (os.tmpdir) — fișierul
-   * real NU e atins până la acceptare. La închiderea notificării fără
-   * alegere, aprobarea revine pe cardul clasic din chat.
+   * nou), iar decizia se ia dintr-O SINGURĂ suprafață: cardul de review din
+   * chat. Notificarea VS Code cu Accept / Reject apare doar ca fallback,
+   * când cardul din chat nu poate fi afișat (fără webview / postMessage a
+   * eșuat) — v2.5.11 (bug #27): înainte apăreau ambele simultan și utilizatorul
+   * credea că trebuie să aprobe de două ori. Conținuturile merg în fișiere
+   * temporare (os.tmpdir) — fișierul real NU e atins până la acceptare.
    * ==================================================================== */
 
   /** Deblochează un diff review în așteptare (Stop / auto-approve activat). */
@@ -3476,10 +3662,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   /**
    * Deschide diff-ul nativ (stânga = vechi, dreapta = nou) și cere aprobarea.
-   * v1.2.1: cererea apare ÎN PARALEL în două locuri — card inline în chat
-   * (sursa principală de decizie; notificarea VS Code poate fi ascunsă,
-   * expirată sau nerandată) și notificarea nativă VS Code (a doua cale).
-   * Prima decizie câștigă; ambele căi ajung la aceeași promisiune.
+   * v1.2.1: card inline în chat (sursa principală de decizie).
+   * v2.5.11 (bug #27): decizia se ia dintr-O SINGURĂ suprafață — notificarea
+   * nativă VS Code (Accept / Reject) apare doar ca fallback, când cardul din
+   * chat nu poate fi livrat webview-ului; înainte apăreau simultan, ceea ce
+   * părea o dublă aprobare.
    * Întoarce 'fallback' doar când diff-ul nu se poate afișa sau chatul nu e
    * disponibil — aprobarea continuă pe cardul clasic din chat.
    */
@@ -3607,49 +3794,45 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.pendingInlineReview = { id: reviewId, resolve: resolveInline };
       this.pendingInlineReviewPayload = payload;
       this.pendingFileRows = { reviewId, single, title, rows, pairs };
-      this.view.webview.postMessage({ type: 'diff_review', ...payload });
-      for (const row of rows) {
-        this.view.webview.postMessage({ type: 'file_change_row', ...row });
+      try {
+        // v2.5.11 (bug #27): `postMessage` întoarce `false` când webview-ul nu
+        // poate primi mesajul (dispus) → știm sigur dacă decizia se poate lua
+        // din chat sau trebuie să cădem pe notificarea VS Code.
+        inlineShown =
+          (await this.view.webview.postMessage({ type: 'diff_review', ...payload })) !==
+          false;
+      } catch {
+        inlineShown = false;
       }
-      inlineShown = true;
-      log(
-        'diff review: inline card + ' +
-          rows.length +
-          ' file change row(s) sent to chat (id ' +
-          reviewId +
-          ')'
-      );
+      if (inlineShown) {
+        for (const row of rows) {
+          void this.view.webview.postMessage({ type: 'file_change_row', ...row });
+        }
+        log(
+          'diff review: inline card + ' +
+            rows.length +
+            ' file change row(s) sent to chat (id ' +
+            reviewId +
+            ')'
+        );
+      } else {
+        this.pendingInlineReview = undefined;
+        this.pendingInlineReviewPayload = undefined;
+        this.pendingFileRows = undefined;
+        log(
+          'diff review: the chat card could not be shown — falling back to the VS Code notification'
+        );
+      }
     }
 
-    // 3) întreabă utilizatorul (butoane nativ VS Code, în bara de jos)
-    const msg = single
-      ? 'Freekit: ' +
-        toolName +
-        ' wants to write ' +
-        changes[0].label +
-        ' — the diff is open in the editor.'
-      : 'Freekit: ' +
-        toolName +
-        ' wants to write ' +
-        changes.length +
-        ' files — the multi-file diff is open in the editor.';
-    const buttons = single
-      ? ['Accept', 'Reject', NO_ASK_LABEL]
-      : ['Accept', 'Reject'];
-
-    const pick = await Promise.race([
-      vscode.window.showInformationMessage(
-        msg,
-        { modal: false },
-        ...buttons
-      ),
-      wake.then((): string | undefined => undefined),
-      inlineDecision
-    ]);
-    this.pendingReviewResolve = undefined;
-
-    // v1.2.1: oricare cale răspunde prima decide review-ul
-    let via: 'notification' | 'chat' | 'stop' | 'auto' = 'notification';
+    // 3) decizia — O SINGURĂ suprafață (v2.5.11, bug #27):
+    //    - cardul din chat e sursa principală (când a putut fi afișat);
+    //    - notificarea VS Code apare DOAR ca fallback (fără webview / cardul
+    //      nu a putut fi livrat) — înainte rula în paralel și părea o a doua
+    //      aprobare obligatorie.
+    let via: 'notification' | 'chat' | 'stop' | 'auto' = inlineShown
+      ? 'chat'
+      : 'notification';
     let decision: 'accept' | 'reject' | 'accept_no_ask' | 'fallback';
     if (this.abortRequested) {
       // Stop apăsat cât timp era deschis → refuz
@@ -3659,28 +3842,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // Auto-approve activat în timpul review-ului → accept
       via = 'auto';
       decision = 'accept';
-    } else if (pick === '__inline_accept__') {
-      via = 'chat';
-      decision = 'accept';
-    } else if (pick === '__inline_reject__') {
-      via = 'chat';
-      decision = 'reject';
-    } else if (pick === 'Accept') {
-      decision = 'accept';
-    } else if (pick === 'Reject') {
-      decision = 'reject';
-    } else if (single && pick === NO_ASK_LABEL) {
-      decision = 'accept_no_ask';
     } else if (inlineShown) {
-      // v1.2.1: notificarea a fost închisă fără alegere → cardul inline din
-      // chat rămâne sursa de decizie (înainte se cădea pe cardul clasic)
-      log('diff review: notification closed without a choice — waiting for the inline card');
-      const wake2 = new Promise<void>((resolve) => {
-        this.pendingReviewResolve = resolve;
-      });
+      // așteaptă decizia din cardul de chat (Stop / auto-approve deblochează)
       const inlinePick = await Promise.race([
         inlineDecision,
-        wake2.then((): undefined => undefined)
+        wake.then((): undefined => undefined)
       ]);
       this.pendingReviewResolve = undefined;
       if (this.abortRequested) {
@@ -3694,8 +3860,44 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         decision = inlinePick === '__inline_accept__' ? 'accept' : 'reject';
       }
     } else {
-      // fără webview (nicio cale din chat) → cardul clasic de aprobare
-      decision = 'fallback';
+      // fallback: notificarea VS Code (webview indisponibil)
+      const msg = single
+        ? 'Freekit: ' +
+          toolName +
+          ' wants to write ' +
+          changes[0].label +
+          ' — the diff is open in the editor.'
+        : 'Freekit: ' +
+          toolName +
+          ' wants to write ' +
+          changes.length +
+          ' files — the multi-file diff is open in the editor.';
+      const buttons = single
+        ? ['Accept', 'Reject', NO_ASK_LABEL]
+        : ['Accept', 'Reject'];
+
+      const pick = await Promise.race([
+        vscode.window.showInformationMessage(msg, { modal: false }, ...buttons),
+        wake.then((): string | undefined => undefined)
+      ]);
+      this.pendingReviewResolve = undefined;
+
+      if (this.abortRequested) {
+        via = 'stop';
+        decision = 'reject';
+      } else if (this.autoApprove) {
+        via = 'auto';
+        decision = 'accept';
+      } else if (pick === 'Accept') {
+        decision = 'accept';
+      } else if (pick === 'Reject') {
+        decision = 'reject';
+      } else if (single && pick === NO_ASK_LABEL) {
+        decision = 'accept_no_ask';
+      } else {
+        // notificarea a fost închisă fără alegere → cardul clasic de aprobare
+        decision = 'fallback';
+      }
     }
 
     this.pendingInlineReview = undefined;
@@ -3721,8 +3923,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /**
    * v2.0.1: acțiunile rândurilor inline de „file change" din chat.
    * `view_diff` redeschide diff-ul nativ VS Code; `approve` / `reject` ajung la
-   * ACEEAȘI promisiune ca cardul de diff review și notificarea VS Code — prima
-   * decizie câștigă.
+   * ACEEAȘI promisiune ca butoanele cardului de diff review — prima decizie
+   * câștigă. (v2.5.11 / bug #27: notificarea VS Code e doar fallback, nu mai
+   * rulează în paralel.)
    */
   private async handleFileChangeAction(
     rowId: string,
@@ -3849,8 +4052,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
            meniul contextual (dreapta-click pe conversație). -->
       <div class="menu down" id="menuMore" role="menu">
         <div class="mh">Context</div>
-        <button class="mi plain" id="mShowChrome" role="menuitem"><i class="codicon codicon-eye"></i>Show Chrome</button>
-        <button class="mi plain" id="mOpenBrowser" role="menuitem"><i class="codicon codicon-globe"></i>Open Browser</button>
+        <!-- v2.5.11 (bug #21): un singur buton — „Open Browser" a fost eliminat
+             (făcea aproape același lucru și lăsa fereastra ascunsă). -->
+        <button class="mi plain" id="mShowChrome" role="menuitem"><i class="codicon codicon-globe"></i>Show Browser</button>
         <button class="mi plain" id="mStopDev" role="menuitem"><i class="codicon codicon-debug-stop"></i>Stop dev servers</button>
         <button class="mi plain" id="mStatus" role="menuitem"><i class="codicon codicon-pulse"></i>Provider status</button>
         <button class="mi plain" id="mInstallOllama" role="menuitem" hidden><i class="codicon codicon-cloud-download"></i>Install Ollama</button>
@@ -3902,6 +4106,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           <div class="mh">Local &middot; Ollama</div>
           <div id="model-local"></div>
           <div class="mnote" id="model-hw" hidden></div>
+          <!-- v2.5.11 (bug #29): avertisment CPU/RAM + alternativa web -->
+          <div class="mnote warn" id="model-advice" hidden></div>
         </div>
       </div>
 

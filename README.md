@@ -39,7 +39,7 @@ Unlike other AI coding agents, Freekit works with your existing web AI accounts:
 - 🎯 **Six web AI providers + Ollama** — DeepSeek, ChatGPT, Claude, Gemini, Mistral, Qwen + local Ollama
 - 🔒 **Stealth mode** — human-like typing (real keydown/keyup), anti-detection
 - 🤖 **Agentic loop** — up to 40 iterations, 12 tools (read/write/edit/search/run/git)
-- 📝 **Native diff review** — Accept/Reject each file change in VS Code's diff viewer
+- 📝 **Native diff review** — each file change opens in VS Code's diff viewer; accept or reject it from the card in the chat
 - ⟲ **Git checkpoints** — restore any prompt with one click
 - ✂️ **Fork & edit conversations** — ChatGPT-style conversation branching
 - 🔊 **TTS + 🎤 voice input** — offline Whisper transcription
@@ -74,7 +74,7 @@ Unlike other AI coding agents, Freekit works with your existing web AI accounts:
 
 ### Local
 
-- **Ollama** — 51-model catalog, hardware tiers T0-T6, auto-recommendation based on your VRAM and RAM
+- **Ollama** — 51-model catalog, hardware tiers T0-T6, auto-recommendation based on your VRAM and RAM; warns when a model is too small for real code (under 3B) and points to the free web providers on machines without a GPU
 
 ## How it works
 
@@ -84,7 +84,7 @@ Freekit connects to your **existing web AI sessions** via browser automation:
 2. You log in **once** to each provider (session is saved)
 3. Freekit types messages with **human-like keystrokes** (real keydown/keyup, random delays)
 4. It reads the AI response and renders it in the VS Code sidebar
-5. File changes appear as **native VS Code diffs** — you Accept or Reject each one
+5. File changes appear as **native VS Code diffs** — accept or reject each one from the card in the chat
 
 Everything is local. No middle server. No data sent to third parties.
 
@@ -113,7 +113,7 @@ You can also run `Freekit: Trust This Workspace` from the Command Palette.
 
 Additional safeguards:
 
-- Writes open a **native VS Code diff** for review — accept or reject from the in-chat card or the VS Code notification; shell commands and git operations require approval cards unless ⚡ auto-approve is enabled.
+- Writes open a **native VS Code diff** for review — accept or reject from the **in-chat card** (the VS Code notification appears only as a fallback, when the chat card cannot be shown); shell commands and git operations require approval cards unless ⚡ auto-approve is enabled.
 - Anti-spam limits: max 3 writes per file and 15 write operations per message.
 - The webview runs with a strict Content Security Policy.
 
@@ -122,9 +122,8 @@ Additional safeguards:
 | Command | What it does |
 | --- | --- |
 | `Freekit: Trust This Workspace` | Grant Workspace Trust to the current folder (opens the native dialog) — unlocks file writes, shell commands, git changes and MCP tools |
-| `Freekit: Open Browser` | Launch / connect the dedicated Chrome |
 | `Freekit: Close Browser` | Really close it (graceful CDP close + PID fallback) |
-| `Freekit: Show Chrome` | Bring the hidden Chrome window back on screen and focus it |
+| `Freekit: Show Browser` | Launch the dedicated Chrome if it is not running, then bring its window on screen and focus it (the old `Freekit: Open Browser` command still works as a hidden alias) |
 | `Freekit: Show Provider Status` | Detailed report: CDP port, DeepSeek login, Ollama models |
 | `Freekit: Clear No-Ask File List` | Forget the files you marked "Accept (don't ask again)" |
 | `Freekit: Reset Repaired Selectors` | Forget auto-repaired selectors, go back to `selectors.json` |
@@ -245,7 +244,7 @@ Every MCP call shows an **approval card** (server, tool and arguments) before it
 
 **"Could not find the input box"**
 
-→ Log in to the provider. Click **Show Chrome** in the ⋯ menu, sign in, then retry.
+→ Log in to the provider. Click **Show Browser** in the ⋯ menu, sign in, then retry.
 
 **"Restricted Mode — some features disabled"**
 

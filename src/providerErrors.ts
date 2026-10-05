@@ -9,10 +9,20 @@
  */
 
 export interface ProviderError {
-  kind: 'out_of_messages' | 'login_required' | 'rate_limit' | 'captcha' | 'unknown';
+  kind:
+    | 'out_of_messages'
+    | 'login_required'
+    | 'rate_limit'
+    | 'captcha'
+    | 'model_missing'
+    | 'unknown';
   message: string;
   resetTime?: string;
   upgradeUrl?: string;
+  /** v2.5.11 (bug #24/#25): modelul local care lipsește (Ollama). */
+  model?: string;
+  /** v2.5.11 (bug #24/#25): modelele Ollama instalate, pentru cardul din chat. */
+  availableModels?: string[];
 }
 
 /** Codul purtat de eroarea aruncată către chatView (pentru afișare dedicată). */
@@ -29,6 +39,24 @@ const PROVIDER_LABELS: Record<string, string> = {
 };
 
 /**
+ * v2.5.11 (bug #24/#25): eroarea „model Ollama neinstalat", cu lista celor
+ * instalate — folosită de `OllamaProvider` (validare în `open` + 404 în `send`).
+ */
+export function ollamaModelMissing(
+  model: string,
+  available: string[]
+): ProviderError {
+  return {
+    kind: 'model_missing',
+    message: model
+      ? 'Model "' + model + '" is not installed in Ollama.'
+      : 'The configured Ollama model is not installed.',
+    model: model || undefined,
+    availableModels: available
+  };
+}
+
+/**
  * v2.5.1: detectează erorile cunoscute în textul brut (răspuns extras din DOM
  * sau textul paginii). Întoarce `null` dacă nu recunoaște nicio eroare.
  */
@@ -37,6 +65,17 @@ export function detectProviderError(
   providerId: string
 ): ProviderError | null {
   if (!rawText) return null;
+
+  // v2.5.11 (bug #25): Ollama — modelul cerut nu e instalat.
+  // Corpul răspunsului: `{"error":"model \"x\" not found, try pulling it first"}`.
+  if (providerId === 'ollama') {
+    const notFound = rawText.match(
+      /model\s+["']?([^"'\n,]+?)["']?\s+not found|try pulling it first/i
+    );
+    if (notFound) {
+      return ollamaModelMissing((notFound[1] || '').trim(), []);
+    }
+  }
 
   // Out of messages / usage limit
   // v2.5.1: terminator tolerant — bannerele pot termina cu „.”, „!”, newline
@@ -120,6 +159,15 @@ export function providerErrorMessage(
       return (
         name +
         ' requires CAPTCHA verification ("I\'m not a robot"). Solve it in the Chrome window, then retry.'
+      );
+    case 'model_missing':
+      return (
+        (e.model ? 'Model "' + e.model + '"' : 'The configured Ollama model') +
+        ' is not installed in Ollama.' +
+        (e.availableModels?.length
+          ? ' Installed: ' + e.availableModels.join(', ') + '.'
+          : '') +
+        ' Download it from the model menu (⋯ → model chip).'
       );
     default:
       return name + ': ' + e.message;

@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.5.4
+
+- CRITICAL FIX: strip UI artifacts (astro/Copy/Download header) that DeepSeek and other providers inject at the start of code block content. Without this, files written via DeepSeek were corrupted with extra header lines.
+
 ## v2.5.3
 
 - Fix DeepSeek echo bug (prompt echoed at start of reply). Strip echoed user message before parsing. Normalize literal \n in content. Auto-retry on malformed tool call.

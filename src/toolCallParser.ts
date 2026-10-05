@@ -421,6 +421,27 @@ function normalizeContentNewlines(text: string): string {
 }
 
 /**
+ * v2.5.4 FIX 8: UI-ul din chatul web (DeepSeek) adaugă artefacte la începutul
+ * conținutului extras dintr-un code block: eticheta limbajului, „Copy”,
+ * „Download” (uneori „Copy code”). Le eliminăm ca fișierul scris să nu fie
+ * corupt; doar începutul blocului e curățat (regexele nu au flag `m`).
+ */
+const UI_ARTIFACTS = [
+  /^(astro|javascript|typescript|python|css|html|json|bash|shell|text|plaintext|markdown|md|yaml|xml|sql|java|cpp|c|go|rust|php|ruby)\r?\nCopy\r?\nDownload\r?\n/i,
+  /^Copy\r?\nDownload\r?\n/i,
+  /^Copy code\r?\n/i,
+  /^Download\r?\n/i,
+];
+
+function stripUiArtifacts(text: string): string {
+  let result = text;
+  for (const pattern of UI_ARTIFACTS) {
+    result = result.replace(pattern, '');
+  }
+  return result;
+}
+
+/**
  * Conținutul RAW dintre linia markerului și linia lui `END_...`. Newline-ul
  * de dinaintea terminatorului nu face parte din conținut (un rând gol în plus
  * înainte de `END_...` rămâne, însă, păstrat).
@@ -437,7 +458,10 @@ function readMarkerBlock(
   // `CONTENT: valoare` (fără rând nou) e acceptat: primul rând e restul liniei.
   const inline = start.rest.trim() ? [start.rest.replace(/^[ \t]/, '')] : [];
   const text = inline.concat(body).join('\n');
-  return { text: normalizeContentNewlines(stripWrappingFence(text)), next: end + 1 };
+  return {
+    text: stripUiArtifacts(normalizeContentNewlines(stripWrappingFence(text))),
+    next: end + 1,
+  };
 }
 
 function parseWriteFileMarkers(lines: string[], from: number): ToolCall | null {

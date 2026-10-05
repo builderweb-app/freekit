@@ -34,6 +34,8 @@ export class ClaudeProvider implements AIProvider {
       label: 'Claude',
       signal,
       ...opts,
+      // v2.5.1: erorile site-ului (out of messages / rate limit / CAPTCHA) sunt
+      // detectate central în sendAndWait — vezi src/providerErrors.ts.
       // v1.7.1: thinking-ul modelului → pasul „Thinking" din chat (verbose)
       onThinking: this.onThinking
     });

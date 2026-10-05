@@ -479,6 +479,32 @@ pre.code code {
   background: var(--vscode-button-secondaryHoverBackground, #45494e);
 }
 
+/* ===== v2.5.1 — FIX 2b: card „provider error" (mesaje epuizate / rate limit) ===== */
+.provider-error-card {
+  padding: 12px;
+  border: 1px solid var(--vscode-charts-orange, #ff8c00);
+  border-radius: 6px;
+  margin: 8px 0;
+  background: rgba(255, 140, 0, 0.08);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.provider-error-card .pe-msg { margin: 6px 0; }
+.provider-error-card .pe-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+.provider-error-card .pe-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--vscode-button-border, #555);
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #fff);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  text-decoration: none;
+}
+.provider-error-card .pe-btn:hover {
+  background: var(--vscode-button-hoverBackground, #1177bb);
+}
+
 /* ===== Carduri de aprobare (fallback clasic) ===== */
 .msg.approval {
   background: var(--vscode-editorWidget-background);

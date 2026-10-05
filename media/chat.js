@@ -416,6 +416,77 @@ function addLoginRequiredCard(text) {
   scrollAfterAppend();
 }
 
+// v2.5.1 — FIX 2b: card de eroare de provider (mesaje gratuite epuizate /
+// rate limit / CAPTCHA) — mesaj clar + ora de reset; butoanele (FIX 2c) vin
+// în .pe-actions. Construit cu textContent (fără innerHTML), ca textul venit
+// din pagina providerului să nu poată injecta HTML.
+const PROVIDER_NAMES = {
+  claude: 'Claude',
+  chatgpt: 'ChatGPT',
+  deepseek: 'DeepSeek',
+  gemini: 'Gemini',
+  mistral: 'Mistral',
+  qwen: 'Qwen',
+  ollama: 'Ollama'
+};
+
+function addProviderErrorCard(msg) {
+  const card = document.createElement('div');
+  card.className = 'provider-error-card';
+
+  const title = document.createElement('b');
+  title.textContent =
+    '⚠️ ' + (PROVIDER_NAMES[msg.providerId] || msg.providerId || 'Provider') + ' unavailable';
+
+  const text = document.createElement('div');
+  text.className = 'pe-msg';
+  text.textContent = msg.message || '';
+
+  const actions = document.createElement('div');
+  actions.className = 'pe-actions';
+
+  // v2.5.1 — FIX 2c: acțiuni rapide pe cardul de eroare.
+  const makeBtn = (label, action, payload) => {
+    const b = document.createElement('button');
+    b.className = 'pe-btn';
+    b.textContent = label;
+    b.addEventListener('click', () => {
+      vscode.postMessage(Object.assign({ type: action }, payload || {}));
+    });
+    return b;
+  };
+
+  actions.appendChild(makeBtn('Show Chrome', 'show_chrome'));
+  actions.appendChild(makeBtn('Retry', 'retry_message'));
+  actions.appendChild(
+    makeBtn('Switch to DeepSeek', 'switch_provider', { providerId: 'deepseek' })
+  );
+  if (msg.upgradeUrl) {
+    const a = document.createElement('a');
+    a.textContent = 'Upgrade';
+    a.href = msg.upgradeUrl;
+    a.target = '_blank';
+    a.className = 'pe-btn pe-btn-link';
+    actions.appendChild(a);
+  }
+
+  card.appendChild(title);
+  card.appendChild(text);
+  if (msg.resetTime) {
+    const reset = document.createElement('div');
+    reset.textContent = 'Try again after ';
+    const when = document.createElement('b');
+    when.textContent = msg.resetTime;
+    reset.appendChild(when);
+    reset.appendChild(document.createTextNode('.'));
+    card.appendChild(reset);
+  }
+  card.appendChild(actions);
+
+  messages.appendChild(card);
+  scrollAfterAppend();
+}
+
 // ===== v1.7.1: pași verbose (Thinking / Executing / Result / Decision) =====
 const VSTEP_KINDS = {
   thinking: { icon: '🧠', label: 'Thinking' },
@@ -1884,6 +1955,16 @@ window.addEventListener('message', (event) => {
       setBusy(false);
       if (!stick) jumpBtn.hidden = false;
     }
+  } else if (msg.type === 'provider_error') {
+    // v2.5.1 — FIX 2b: eroare de provider detectată (mesaje gratuite epuizate,
+    // rate limit, CAPTCHA) → card cu mesaj clar în loc de timeout sec.
+    if (pendingEl) {
+      pendingEl.remove();
+      pendingEl = null;
+    }
+    addProviderErrorCard(msg);
+    setBusy(false);
+    if (!stick) jumpBtn.hidden = false;
   } else if (msg.type === 'login_required') {
     // v2.0.4: Chrome a fost adus în față pentru login → card cu buton Retry
     if (pendingEl) {

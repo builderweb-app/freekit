@@ -18,6 +18,11 @@ import {
 } from '../human-behavior';
 import { installMutationTracker, waitForAbort, waitStep } from '../mutation';
 import { autoAcceptPopups } from '../popups';
+import {
+  DetectedProviderError,
+  detectProviderError,
+  ProviderError
+} from '../providerErrors';
 
 const log = (msg: string) => console.log('[Freekit]', msg);
 
@@ -262,6 +267,98 @@ export async function detectCaptcha(page: Page): Promise<boolean> {
     log('detectCaptcha failed: ' + (e?.message ?? String(e)));
     return false;
   }
+}
+
+/* =========================================================================
+ * v2.5.1 — ERORI DE PROVIDER („out of free messages”, rate limit, CAPTCHA…)
+ * Când chatul web afișează o eroare în loc de răspuns, textul ei NU ajunge în
+ * selectorii de răspuns: fără detecție, utilizatorul aștepta 150s și primea
+ * „Timeout: no stable response…”. Aici recunoaștem eroarea și aruncăm un mesaj
+ * clar (chatView îl afișează ca eroare; login-ul intră pe fluxul dedicat).
+ * ========================================================================= */
+
+/**
+ * Rulează ÎN PAGINĂ: adună textul vizibil de tip banner/alertă/toast plus coada
+ * paginii (bannerele fără rol/clasă evidentă stau spre finalul DOM-ului).
+ * Exclude codul și căsuța de input, ca o discuție despre „rate limit” să nu
+ * fie confundată cu o eroare reală.
+ */
+const scanProviderErrorText = (): string => {
+  const parts: string[] = [];
+  const visible = (el: Element): boolean => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) return false;
+    const s = window.getComputedStyle(el as HTMLElement);
+    return s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity) > 0.05;
+  };
+  const usable = (el: Element): boolean =>
+    !el.closest('pre, code, textarea, input, [contenteditable="true"]');
+  const sels = [
+    '[role="alert"]',
+    '[role="status"]',
+    '[class*="error" i]',
+    '[class*="alert" i]',
+    '[class*="toast" i]',
+    '[class*="banner" i]',
+    '[class*="limit" i]',
+    '[class*="upsell" i]',
+    '[class*="quota" i]',
+    '[class*="paywall" i]'
+  ];
+  for (const sel of sels) {
+    if (parts.length >= 40) break;
+    let els: Element[] = [];
+    try {
+      els = Array.prototype.slice.call(document.querySelectorAll(sel));
+    } catch {
+      continue;
+    }
+    for (const el of els) {
+      if (!visible(el) || !usable(el)) continue;
+      const t = String((el as HTMLElement).innerText || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (t && t.length <= 600 && parts.indexOf(t) < 0) parts.push(t);
+    }
+  }
+  const body = String(document.body ? document.body.innerText : '')
+    .replace(/\s+/g, ' ');
+  if (body) parts.push(body.slice(-2500));
+  return parts.join('\n');
+};
+
+/** Scoate ecoul mesajului trimis din textul paginii (anti false-positive). */
+const stripEcho = (text: string, message: string): string => {
+  const m = normalize(message);
+  if (!m || m.length < ECHO_PREFIX_MIN_CHARS) return text;
+  return text.split(m).join(' ');
+};
+
+/** Detectează o eroare de provider în textul paginii (banner/toast/coadă). */
+async function detectProviderErrorOnPage(
+  page: Page,
+  providerId: string,
+  message: string
+): Promise<ProviderError | null> {
+  try {
+    const text = await page.evaluate<string>(scanProviderErrorText);
+    const detected = detectProviderError(stripEcho(text, message), providerId);
+    if (!detected) return null;
+    if (isEchoOf(detected.message, message)) return null;
+    return detected;
+  } catch (e: any) {
+    log('detectProviderErrorOnPage failed: ' + (e?.message ?? String(e)));
+    return null;
+  }
+}
+
+/** Aruncă eroarea specifică; login-ul folosește fluxul existent (Chrome + Retry). */
+function throwProviderError(providerId: string, detected: ProviderError, page: Page): never {
+  log('provider error detected (' + detected.kind + '): ' + detected.message);
+  if (detected.kind === 'login_required') {
+    throw loginError(providerId, page.url());
+  }
+  throw new DetectedProviderError(providerId, detected);
 }
 
 /** Deschide providerul în pagină: refolosește tab-ul dacă e deja pe domeniu. */
@@ -544,6 +641,7 @@ export async function sendAndWait(
   let previousText = '';
   let lastChangeAt = Date.now();
   let healIndex = 0;
+  let lastErrorCheckpoint = 0;
   let enterRetried = false;
   let lastStreamAt = 0;
   const started = Date.now();
@@ -588,6 +686,15 @@ export async function sendAndWait(
           }
         }
       }
+    }
+
+    // v2.5.1: la fiecare checkpoint verificăm și erorile afișate în pagină —
+    // „out of free messages” / rate limit / CAPTCHA opresc imediat, cu mesaj
+    // clar, în loc să așteptăm 150s pentru un timeout sec.
+    if (healIndex > lastErrorCheckpoint) {
+      lastErrorCheckpoint = healIndex;
+      const pageError = await detectProviderErrorOnPage(page, providerId, message);
+      if (pageError) throwProviderError(providerId, pageError, page);
     }
 
     // 2) la ~25s: al doilea Enter (uneori primul nu pleacă mesajul)
@@ -638,6 +745,10 @@ export async function sendAndWait(
             currentText.length +
             ' chars)'
         );
+        // v2.5.1: răspunsul „stabil” poate fi de fapt mesajul de eroare al
+        // site-ului (ex: „You are out of free messages until 6:20 PM.”).
+        const detected = detectProviderError(currentText, providerId);
+        if (detected) throwProviderError(providerId, detected, page);
         // v1.7.1: thinking-ul modelului (best-effort, înainte de return)
         await emitThinking(page, providerId, message, cfg, label);
         return currentText;
@@ -656,10 +767,19 @@ export async function sendAndWait(
   );
   if (rescued && rescued.length >= 20 && rescued !== beforeText && !isEchoOf(rescued, message)) {
     log(label + ': RESCUE generic, ' + rescued.length + ' chars');
+    // v2.5.1: și textul de la „rescue” poate fi un mesaj de eroare al site-ului
+    const detected = detectProviderError(rescued, providerId);
+    if (detected) throwProviderError(providerId, detected, page);
     // v1.7.1: thinking-ul modelului (best-effort, înainte de return)
     await emitThinking(page, providerId, message, cfg, label);
     return rescued;
   }
+
+  // v2.5.1: înainte de timeout-ul sec, verificăm dacă pagina afișează o eroare
+  // cunoscută (banner care nu intră în selectorii de răspuns) — ex: limita de
+  // mesaje gratuite la Claude/ChatGPT.
+  const pageError = await detectProviderErrorOnPage(page, providerId, message);
+  if (pageError) throwProviderError(providerId, pageError, page);
 
   throw new Error(
     'Timeout: no stable response from ' + label + ' after 150s.'

@@ -53,6 +53,7 @@ import { Attachment, describePath, prepareAttachments } from './attachments';
 import { detectProject, formatProjectInfo } from './project';
 import { initLogChannel, logLine } from './log';
 import { detectCaptcha, isLoginRequiredError, isLoginUrl, sleep } from './providers/base';
+import { DetectedProviderError } from './providerErrors';
 import { runVerification, createPromptCheckpoint, restoreToCheckpoint, Checkpoint } from './verifier';
 import { ConversationStore, ConversationMessage } from './conversations';
 import { EditRollback } from './rollback';
@@ -422,8 +423,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private post(type: string, text: string) {
-    this.view?.webview.postMessage({ type, text });
+  /**
+   * v2.5.1: acceptă și un payload structurat (ex: `provider_error` cu
+   * kind/resetTime/upgradeUrl) — câmpurile ajung direct pe mesaj, ca în
+   * webview să fie citite ca `msg.kind`, `msg.message` etc.
+   */
+  private post(type: string, text: string | Record<string, unknown>) {
+    this.view?.webview.postMessage(
+      typeof text === 'string' ? { type, text } : { type, ...text }
+    );
   }
 
   /** v1.1.0: notice public — alte module (ex: managerul MCP) scriu în chat. */
@@ -888,6 +896,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    // v2.5.1 — FIX 2c: butonul „Switch to …” din cardul de eroare de provider:
+    // comută providerul (ca `provider_change`, dar fără model) și reia ultimul
+    // prompt, ca utilizatorul să nu rămână blocat pe providerul indisponibil.
+    if (msg.type === 'switch_provider') {
+      const id = PROVIDER_IDS.includes(msg.providerId)
+        ? String(msg.providerId)
+        : 'deepseek';
+      await vscode.workspace
+        .getConfiguration('freekit')
+        .update('provider', id, vscode.ConfigurationTarget.Global);
+      if (BROWSER_PROVIDER_IDS.includes(id)) {
+        await this.state.update(LAST_BROWSER_KEY, id);
+      }
+      log('provider error card: switching to ' + id);
+      // chip-ul din composer trebuie să reflecte noul provider
+      void this.refreshProviderStatus();
+      if (this.abortController) return; // se generează deja
+      const switchRetryText = this.lastUserText;
+      if (!switchRetryText) return;
+      await this.handleMessage({
+        type: 'send',
+        text: switchRetryText,
+        msgId: 'auto' + Date.now().toString(36),
+        retry: true
+      });
+      return;
+    }
+
     // Linkurile din răspunsuri se deschid în browserul extern
     if (msg.type === 'open_link') {
       vscode.env.openExternal(vscode.Uri.parse(msg.url));
@@ -1160,7 +1196,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     // v2.0.4: butonul Retry din cardul „login required" — reia ultimul prompt
     // fără să dubleze mesajul în istoric și fără să re-consume atașamentele.
-    if (msg.type === 'retry_last') {
+    // v2.5.1 — FIX 2c: același flux deservește și butonul „Retry" din cardul
+    // de eroare de provider (`retry_message`).
+    if (msg.type === 'retry_last' || msg.type === 'retry_message') {
       if (this.abortController) return; // se generează deja
       const text = this.lastUserText;
       if (!text) return;
@@ -1770,6 +1808,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (this.abortRequested || e?.message === '__ABORTED__') {
         log('aborted during send');
         this.post('stopped', '');
+      } else if (e instanceof DetectedProviderError) {
+        // v2.5.1: eroare de provider detectată (mesaje gratuite epuizate,
+        // rate limit, CAPTCHA) — nu mai arătăm un timeout sec, ci un mesaj
+        // clar, cu timpul de reset / link de upgrade pentru cardul din chat.
+        log('provider error: ' + (e?.message ?? String(e)));
+        this.post('provider_error', {
+          kind: e.details.kind,
+          message: e.message,
+          resetTime: e.details.resetTime,
+          upgradeUrl: e.details.upgradeUrl,
+          providerId: e.providerId
+        });
+        return;
       } else if (isLoginRequiredError(e)) {
         // v2.0.4: login UX — în loc de o eroare seacă, aducem Chrome în față
         // (ca utilizatorul să se poată autentifica) și oferim în chat cardul

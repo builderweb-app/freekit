@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.5.1
+
+- Detect provider errors (out of messages, login, rate limit, CAPTCHA) with clear in-chat card.
+- Action buttons: Show Chrome / Retry / Switch provider / Upgrade.
+
 ## v2.5.0
 
 - **CRITICAL FIX**: auto-verify no longer blocks new project scaffolding. Skips when `node_modules` missing, `src/` empty, or no verified-good state. Runs once per AI response, not per file write.

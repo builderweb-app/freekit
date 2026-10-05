@@ -43,6 +43,11 @@ import {
   TEXT_RETRY_NUDGE,
   looksLikeIntentOnly
 } from './tools';
+import {
+  MALFORMED_TOOL_CALL_ERROR,
+  looksLikeToolCallAttempt,
+  parseToolCallText
+} from './toolCallParser';
 import { mcp } from './mcp/manager';
 import { Attachment, describePath, prepareAttachments } from './attachments';
 import { detectProject, formatProjectInfo } from './project';
@@ -105,6 +110,17 @@ const NO_ASK_KEY = 'freekit.noAskFiles';
 
 // v0.5.0: eticheta butonului „nu mai întreba" din notificarea de diff
 const NO_ASK_LABEL = 'Accept (don\'t ask again)';
+
+// v2.4.9: exemplu concret de format marker-based trimis modelului în prompt —
+// conținutul RAW între markeri, ca să nu mai apară JSON cu ghilimele neescapeate.
+const MARKER_FORMAT_EXAMPLE = `Example — creating a file:
+TOOL: write_file
+PATH: src/hello.ts
+CONTENT:
+export function hello() {
+  return "salut";
+}
+END_CONTENT`;
 
 // v1.7.1: verbose mode — pașii AI afișați în chat (persistat în globalState)
 const VERBOSE_KEY = 'freekit.verboseMode';
@@ -1296,6 +1312,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         return (
           prompt +
+          (p.local ? '' : '\n\n' + MARKER_FORMAT_EXAMPLE) +
           (mcpSection ? '\n\n---\n' + mcpSection : '') +
           contextBlock
         );
@@ -1517,6 +1534,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             });
             continue;
           }
+          // v2.4.8: răspunsul e o ÎNCERCARE de tool call pe care extractorul
+          // n-o poate recupera (JSON trunchiat, ghilimele neescapate) — în loc
+          // să afișăm JSON-ul brut ca răspuns final, dăm o eroare clară.
+          if (looksLikeToolCallAttempt(aiReply)) {
+            log(
+              'malformed tool call after ' +
+                textRetries +
+                ' auto-retries — surfacing an error'
+            );
+            this.postVerboseStep({
+              kind: 'decision',
+              title: 'Malformed tool call',
+              text: MALFORMED_TOOL_CALL_ERROR,
+              status: 'done'
+            });
+            this.post('error', MALFORMED_TOOL_CALL_ERROR);
+            await this.appendHistory('assistant', MALFORMED_TOOL_CALL_ERROR);
+            break;
+          }
+
           // v1.7.1: verbose — răspuns final, fără acțiuni
           this.postVerboseStep({
             kind: 'decision',
@@ -3420,105 +3457,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  // v2.4.8: extractorul robust (acolade echilibrate + fence markdown) trăiește
+  // în src/toolCallParser.ts — vezi acolo de ce regex-ul naiv eșua pe JSON-ul
+  // cu `content` nested.
   private parseToolCall(text: string): ToolCall | null {
-    const trimmed = text.trim();
-    let clean = trimmed;
-    if (clean.startsWith('```')) {
-      clean = clean
-        .replace(/^```(?:json)?\s*\n?/, '')
-        .replace(/\n?```\s*$/, '');
-    }
-    if (!clean.startsWith('{') || !clean.endsWith('}')) return null;
-
-    try {
-      const parsed = JSON.parse(clean);
-      return this.normalizeToolCall(parsed);
-    } catch {
-      // Modelul poate omite escape-ul ghilimelelor din valorile string.
-    }
-
-    const repaired = this.repairJsonQuotes(clean);
-    try {
-      const parsed = JSON.parse(repaired);
-      return this.normalizeToolCall(parsed);
-    } catch {
-      // Încearcă să recupereze obiectul tool call dintr-un răspuns mai larg.
-    }
-
-    const match = clean.match(/\{\s*"tool"\s*:[\s\S]*\}/);
-    if (match) {
-      try {
-        const parsed = JSON.parse(this.repairJsonQuotes(match[0]));
-        return this.normalizeToolCall(parsed);
-      } catch {
-        // Răspunsul nu poate fi recuperat ca tool call valid.
-      }
-    }
-
-    return null;
-  }
-
-  private normalizeToolCall(parsed: any): ToolCall | null {
-    if (!parsed || typeof parsed.tool !== 'string') return null;
-
-    if (parsed.args && typeof parsed.args === 'object') {
-      return { tool: parsed.tool, args: parsed.args };
-    }
-
-    if (typeof parsed.action === 'string') {
-      const { tool, action, ...rest } = parsed;
-      return { tool: `${tool}_${action}`, args: rest };
-    }
-
-    return { tool: parsed.tool, args: {} };
-  }
-
-  private repairJsonQuotes(json: string): string {
-    let result = '';
-    let inString = false;
-    let escaped = false;
-
-    for (let i = 0; i < json.length; i++) {
-      const char = json[i];
-
-      if (escaped) {
-        result += char;
-        escaped = false;
-        continue;
-      }
-
-      if (char === '\\') {
-        result += char;
-        escaped = true;
-        continue;
-      }
-
-      if (char === '"') {
-        if (!inString) {
-          inString = true;
-          result += char;
-        } else {
-          const nextNonSpace = json.slice(i + 1).match(/\S/)?.[0];
-          if (
-            nextNonSpace === ':' ||
-            nextNonSpace === ',' ||
-            nextNonSpace === '}' ||
-            nextNonSpace === ']' ||
-            nextNonSpace === undefined
-          ) {
-            inString = false;
-            result += char;
-          } else {
-            result += '\\"';
-          }
-        }
-        continue;
-      }
-
-      result += char;
-    }
-
-    return result;
+    return parseToolCallText(text);
   }
 
   private getHtml(webview: vscode.Webview): string {

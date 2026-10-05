@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.5.5
+
+- CRITICAL FIX (bug #8b): the UI-artifact stripper no longer misses the header when the extracted content starts with a leading newline/space/BOM (code block whose first line is empty). Leading whitespace is ignored when looking for the `astro`/`Copy`/`Download` header, artifacts are removed in up to 5 passes, and the header regex now tolerates spaces around the lines and extra language labels (`js`, `ts`, `jsx`, `tsx`, `sh`).
+- Real indentation of the first content line is preserved when no UI artifact follows, so `edit_file`/`write_file` content is not altered.
+
 ## v2.5.4
 
 - CRITICAL FIX: strip UI artifacts (astro/Copy/Download header) that DeepSeek and other providers inject at the start of code block content. Without this, files written via DeepSeek were corrupted with extra header lines.

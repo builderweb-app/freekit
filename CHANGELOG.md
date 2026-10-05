@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.5.2
+
+- CRITICAL FIX: content of write_file/edit_file is now wrapped in a markdown code fence to prevent markdown rendering from corrupting # and * characters (e.g. # Heading, **bold**, CSS hex colors like #ff0000).
+- Parser strips the wrapping fence if it survives extraction.
+- 'Switch provider' button in provider-error card now opens the real model menu (removed hardcoded DeepSeek).
+
 ## v2.5.1
 
 - Detect provider errors (out of messages, login, rate limit, CAPTCHA) with clear in-chat card.

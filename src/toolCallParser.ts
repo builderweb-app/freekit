@@ -356,6 +356,27 @@ function findMarkerEnd(
 }
 
 /**
+ * v2.5.1 — FIX B1: conținutul e scris de model într-un code fence markdown
+ * (cerut în prompt, ca #, *, _ să supraviețuiască randării din chatul web).
+ * Când textul e integral înconjurat de un fence (```…``` sau mai lung),
+ * gardurile se scot; fence-urile interioare rămân neatinse. Dacă randarea
+ * markdown a consumat deja fence-urile (calea normală în browser), textul
+ * rămâne neschimbat.
+ */
+function stripWrappingFence(text: string): string {
+  const lines = text.split('\n');
+  let first = 0;
+  while (first < lines.length && !lines[first].trim()) first++;
+  let last = lines.length - 1;
+  while (last > first && !lines[last].trim()) last--;
+  if (first >= last) return text;
+  const open = /^[ \t]*(`{3,})[ \t]*[A-Za-z0-9_.+-]*[ \t]*$/.exec(lines[first]);
+  const close = /^[ \t]*(`{3,})[ \t]*$/.exec(lines[last]);
+  if (!open || !close || close[1].length < open[1].length) return text;
+  return lines.slice(first + 1, last).join('\n');
+}
+
+/**
  * Conținutul RAW dintre linia markerului și linia lui `END_...`. Newline-ul
  * de dinaintea terminatorului nu face parte din conținut (un rând gol în plus
  * înainte de `END_...` rămâne, însă, păstrat).
@@ -371,7 +392,8 @@ function readMarkerBlock(
   const body = lines.slice(start.index + 1, end);
   // `CONTENT: valoare` (fără rând nou) e acceptat: primul rând e restul liniei.
   const inline = start.rest.trim() ? [start.rest.replace(/^[ \t]/, '')] : [];
-  return { text: inline.concat(body).join('\n'), next: end + 1 };
+  const text = inline.concat(body).join('\n');
+  return { text: stripWrappingFence(text), next: end + 1 };
 }
 
 function parseWriteFileMarkers(lines: string[], from: number): ToolCall | null {

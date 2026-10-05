@@ -114,13 +114,17 @@ const NO_ASK_LABEL = 'Accept (don\'t ask again)';
 
 // v2.4.9: exemplu concret de format marker-based trimis modelului în prompt —
 // conținutul RAW între markeri, ca să nu mai apară JSON cu ghilimele neescapeate.
+// v2.5.1 — FIX B1: conținutul stă într-un code fence markdown — doar așa
+// caracterele #, *, _ și backtick-urile supraviețuiesc randării din chatul web.
 const MARKER_FORMAT_EXAMPLE = `Example — creating a file:
 TOOL: write_file
 PATH: src/hello.ts
 CONTENT:
+\`\`\`ts
 export function hello() {
   return "salut";
 }
+\`\`\`
 END_CONTENT`;
 
 // v1.7.1: verbose mode — pașii AI afișați în chat (persistat în globalState)

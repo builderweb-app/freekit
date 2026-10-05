@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.5.7.1
+
+- FIX (bug #13b): **direct write detection never fired** when the code block in the prompt has no closing fence — the final fence is forgotten or gets lost when the prompt is pasted. The prompt that reproduced it (`Creează fișierul src/layouts/BaseLayout.astro cu EXACT acest conținut:`, followed by an open Astro block) arrived exactly like that, so v2.5.7 always fell back to the AI. Direct write mode now also accepts a single **open** fence: everything after it is the file content.
+- Whitespace between the opening fence and the language label is tolerated now, and the closing fence may be indented.
+- A code block with no content is no longer written as an empty file — the request goes to the AI instead.
+- Prompts the previous version already detected behave identically: closed block, inline fence, quoted / Windows paths, text after the block. Two or more blocks are still left to the AI.
+
 ## v2.5.7
 
 - MAJOR: Direct write mode. When the user provides exact content via code fence with "EXACT"/"cu exact acest conținut", Freekit writes the file DIRECTLY from the prompt, bypassing the AI. Zero improvisation, zero truncation, zero UI artifacts. Fixes the root cause of bugs #8, #10, #11 for prompts with exact content.

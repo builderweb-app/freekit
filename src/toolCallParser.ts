@@ -26,6 +26,29 @@ import type { ToolCall } from './tools';
 export const MALFORMED_TOOL_CALL_ERROR =
   'Model returned malformed tool call. Try again or switch provider.';
 
+/** v2.5.3 FIX 7: câte reluări facem înainte de a afișa MALFORMED_TOOL_CALL_ERROR. */
+export const MAX_MALFORMED_RETRIES = 1;
+
+/**
+ * v2.5.3 FIX 7: nudge trimis modelului când răspunsul conține `TOOL:` dar nu
+ * poate fi parsat (ex: DeepSeek ecouază promptul și strivesc conținutul pe o
+ * singură linie). Cerem explicit formatul marker cu conținut în code fence.
+ */
+export const MALFORMED_TOOL_CALL_NUDGE = `SYSTEM NOTICE — MALFORMED TOOL CALL.
+
+Your previous response was malformed. Try again.
+Use TOOL: write_file with content in a code fence, one item per line:
+
+TOOL: write_file
+PATH: <relative path>
+CONTENT:
+\`\`\`text
+<file content — one line per line>
+\`\`\`
+END_CONTENT
+
+Do NOT echo the user message. Do NOT explain. Reply with EXACTLY ONE tool call and nothing else.`;
+
 /** Început de obiect JSON cu cheia „tool” (acceptă și spații în plus). */
 const TOOL_MARKER_HEAD_RE = /^\{\s*["']?tool["']?\s*:/;
 
@@ -377,6 +400,27 @@ function stripWrappingFence(text: string): string {
 }
 
 /**
+ * v2.5.3 FIX 7: unii provideri (DeepSeek) strivesc conținutul pe o singură
+ * linie. Normalizăm DOAR când nu există niciun newline real:
+ *  - `\n` / `\r\n` literal (backslash+n) → newline real;
+ *  - conținut cu tag-uri HTML de închidere, tot pe o linie → introducem (brute
+ *    force) un newline după fiecare tag de închidere.
+ * Textul care are deja newline-uri reale rămâne neatins (nu stricăm un
+ * „a\\nb" dintr-un string de cod) — normalizăm doar când nu există niciun
+ * newline real.
+ */
+function normalizeContentNewlines(text: string): string {
+  if (!text || text.includes('\n')) return text;
+  if (/\\r\\n|\\n/.test(text)) {
+    return text.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n');
+  }
+  if (/<\/[a-zA-Z][\w:-]*\s*>/.test(text)) {
+    return text.replace(/(<\/[a-zA-Z][\w:-]*\s*>)/g, '$1\n').replace(/\n+$/, '');
+  }
+  return text;
+}
+
+/**
  * Conținutul RAW dintre linia markerului și linia lui `END_...`. Newline-ul
  * de dinaintea terminatorului nu face parte din conținut (un rând gol în plus
  * înainte de `END_...` rămâne, însă, păstrat).
@@ -393,7 +437,7 @@ function readMarkerBlock(
   // `CONTENT: valoare` (fără rând nou) e acceptat: primul rând e restul liniei.
   const inline = start.rest.trim() ? [start.rest.replace(/^[ \t]/, '')] : [];
   const text = inline.concat(body).join('\n');
-  return { text: stripWrappingFence(text), next: end + 1 };
+  return { text: normalizeContentNewlines(stripWrappingFence(text)), next: end + 1 };
 }
 
 function parseWriteFileMarkers(lines: string[], from: number): ToolCall | null {

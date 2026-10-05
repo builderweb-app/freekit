@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.5.3
+
+- Fix DeepSeek echo bug (prompt echoed at start of reply). Strip echoed user message before parsing. Normalize literal \n in content. Auto-retry on malformed tool call.
+
 ## v2.5.2
 
 - CRITICAL FIX: content of write_file/edit_file is now wrapped in a markdown code fence to prevent markdown rendering from corrupting # and * characters (e.g. # Heading, **bold**, CSS hex colors like #ff0000).

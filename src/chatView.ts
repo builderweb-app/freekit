@@ -45,6 +45,8 @@ import {
 } from './tools';
 import {
   MALFORMED_TOOL_CALL_ERROR,
+  MALFORMED_TOOL_CALL_NUDGE,
+  MAX_MALFORMED_RETRIES,
   looksLikeToolCallAttempt,
   parseToolCallText
 } from './toolCallParser';
@@ -1546,6 +1548,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       let timedOut = false;
       // v1.1.2: auto-retry — câte nudge-uri „text în loc de tool call" am trimis
       let textRetries = 0;
+      // v2.5.3 FIX 7: câte nudge-uri „tool call malformat" am trimis (max 1)
+      let malformedRetries = 0;
       // v1.3.0: mesajul final de rollback (auto-repair eșuat definitiv)
       let verifyRollbackText = '';
       // v2.5.0 — FIX 3: verificarea rulează o SINGURĂ dată per răspuns complet
@@ -1598,9 +1602,47 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           // n-o poate recupera (JSON trunchiat, ghilimele neescapate) — în loc
           // să afișăm JSON-ul brut ca răspuns final, dăm o eroare clară.
           if (looksLikeToolCallAttempt(aiReply)) {
+            // v2.5.3 FIX 7: mai întâi o singură reluare cu un nudge explicit
+            // (DeepSeek ecouază promptul și strivește conținutul pe o linie) —
+            // abia dacă și a doua încercare e malformată afișăm eroarea.
+            if (malformedRetries < MAX_MALFORMED_RETRIES) {
+              malformedRetries++;
+              log(
+                'malformed tool call — auto-retry ' +
+                  malformedRetries +
+                  '/' +
+                  MAX_MALFORMED_RETRIES
+              );
+              this.post(
+                'heal',
+                '🔁 Auto-retry ' +
+                  malformedRetries +
+                  '/' +
+                  MAX_MALFORMED_RETRIES +
+                  ': the tool call was malformed — asking again for the marker format with the content in a code fence.'
+              );
+              this.postVerboseStep({
+                kind: 'decision',
+                title:
+                  'Auto-retry ' +
+                  malformedRetries +
+                  '/' +
+                  MAX_MALFORMED_RETRIES +
+                  ' (malformed tool call)',
+                text: 'Tool call malformed — asking again for the marker format with the content in a code fence.',
+                status: 'done'
+              });
+              aiReply = await provider.send(
+                page,
+                MALFORMED_TOOL_CALL_NUDGE,
+                signal,
+                { onProgress }
+              );
+              continue;
+            }
             log(
               'malformed tool call after ' +
-                textRetries +
+                malformedRetries +
                 ' auto-retries — surfacing an error'
             );
             this.postVerboseStep({

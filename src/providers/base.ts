@@ -56,6 +56,46 @@ export function isEchoOf(text: string, message: string): boolean {
   return t.startsWith(m) || m.startsWith(t);
 }
 
+/**
+ * v2.5.3 FIX 7: unii provideri (DeepSeek) ecouază promptul la începutul
+ * răspunsului, apoi adaugă tool call-ul — `isEchoOf` respinge tot răspunsul
+ * (e prefix), deci tool call-ul se pierde. Aici tăiem DOAR prefixul ecou și
+ * păstrăm restul, tolerant la spații (DOM-ul normalizează whitespace-ul).
+ *
+ * Întoarce răspunsul neschimbat dacă nu recunoaște un ecou.
+ */
+export function stripEchoedUserMessage(reply: string, message: string): string {
+  const raw = String(reply ?? '');
+  const msg = String(message ?? '');
+  if (!raw || !msg) return raw;
+
+  // gardă: primele ~100 de caractere trebuie să se potrivească (normalizat)
+  const head = normalize(msg.slice(0, 100));
+  if (!head || !normalize(raw).startsWith(head)) return raw;
+
+  // consumăm mesajul din reply ignorând diferențele de whitespace
+  let i = 0;
+  let j = 0;
+  while (i < raw.length && j < msg.length) {
+    if (raw[i] === msg[j]) {
+      i++;
+      j++;
+      continue;
+    }
+    if (/\s/.test(msg[j])) {
+      j++;
+      continue;
+    }
+    if (/\s/.test(raw[i])) {
+      i++;
+      continue;
+    }
+    return raw; // divergență reală → nu e ecou, nu atingem răspunsul
+  }
+  if (j < msg.length) return raw; // mesajul nu a fost consumat integral
+  return raw.slice(i).replace(/^\s+/, '');
+}
+
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export { getLastResponseText };
@@ -715,25 +755,34 @@ export async function sendAndWait(
     const currentText = await getLastResponseText(page, responseSelectors);
     if (!currentText || currentText === beforeText) continue;
 
+    // v2.5.3 FIX 7: providerii care ecouază promptul (DeepSeek) trimit
+    // „<mesaj user> \n TOOL: …” — tăiem prefixul ecou ÎNAINTE de isEchoOf, ca
+    // tool call-ul de după el să nu mai fie respins (și pierdut) ca ecou.
+    const visible = stripEchoedUserMessage(currentText, message);
+    if (visible !== currentText) {
+      log(label + ': stripped echoed user message from AI reply');
+    }
+    if (!visible || visible === beforeText) continue;
+
     // v0.8.0: ecoul propriului mesaj nu e răspuns — nu îl declarăm "stabil".
     // v0.9.3: extins cu sufixele de acțiuni (Kimi „Edit/Copy/Share”) — vezi isEchoOf.
-    if (isEchoOf(currentText, message)) continue;
+    if (isEchoOf(visible, message)) continue;
 
     // FAZA III (E): progres vizibil — trimitem și textul parțial (throttled).
     if (
       cfg.onProgress &&
-      currentText !== previousText &&
+      visible !== previousText &&
       Date.now() - lastStreamAt > 900
     ) {
       lastStreamAt = Date.now();
       try {
-        cfg.onProgress(currentText);
+        cfg.onProgress(visible);
       } catch {
         /* progresul nu trebuie să strice trimiterea */
       }
     }
 
-    if (currentText === previousText) {
+    if (visible === previousText) {
       // v0.8.0: stabil = text neschimbat STABLE_MS (echiv. vechiului 4×500ms),
       // independent de ritmul pașilor (quiet/timeout).
       if (Date.now() - lastChangeAt >= STABLE_MS) {
@@ -742,29 +791,33 @@ export async function sendAndWait(
             ': stable response after ' +
             (Date.now() - started) +
             'ms (' +
-            currentText.length +
+            visible.length +
             ' chars)'
         );
         // v2.5.1: răspunsul „stabil” poate fi de fapt mesajul de eroare al
         // site-ului (ex: „You are out of free messages until 6:20 PM.”).
-        const detected = detectProviderError(currentText, providerId);
+        const detected = detectProviderError(visible, providerId);
         if (detected) throwProviderError(providerId, detected, page);
         // v1.7.1: thinking-ul modelului (best-effort, înainte de return)
         await emitThinking(page, providerId, message, cfg, label);
-        return currentText;
+        return visible;
       }
     } else {
-      previousText = currentText;
+      previousText = visible;
       lastChangeAt = Date.now();
     }
   }
 
   // RESCUE: ultima șansă — extragere generică, ca să nu blocăm utilizatorul
-  const rescued = await getLastResponseText(
+  const rescuedRaw = await getLastResponseText(
     page,
     selectors.candidates(providerId, 'response'),
     true
   );
+  const rescued = stripEchoedUserMessage(rescuedRaw, message);
+  if (rescued !== rescuedRaw) {
+    log(label + ': stripped echoed user message from AI reply (rescue)');
+  }
   if (rescued && rescued.length >= 20 && rescued !== beforeText && !isEchoOf(rescued, message)) {
     log(label + ': RESCUE generic, ' + rescued.length + ' chars');
     // v2.5.1: și textul de la „rescue” poate fi un mesaj de eroare al site-ului

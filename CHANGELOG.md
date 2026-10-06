@@ -1,8 +1,12 @@
 # Changelog
 
+## v2.5.19
+
+- FIX (bug #48): **the „Chat memory full" card was skipped (regression from v2.5.15)** — the full-chat banner was only handled on the *first* send of a turn; when it was detected on a follow-up send (tool-result message, refusal / text-retry nudge, malformed-JSON retry, auto-repair of a failed check), those calls did **not** pass `onMemoryFull`, so `restartInNewChat` fell back to „cancel": plain notice text („memory full — stopped; the next message will start a new chat") plus an auto-cleared browser chat, with **no 💬 New chat & continue / 🌐 Show Browser / ⏹ Stop card**. All secondary sends now reuse the same decision callbacks (`onMemoryFull`, `onLoggedOut`, `onNotice`, `onProgress`), so the card appears whichever send trips the banner and the loop can continue in a new chat with the handoff. The Stop / restart-limit fallback (notice + forget the browser-chat reference) still behaves as before.
+
 ## v2.5.18
 
-- FIX (bug #48): **verbose steps were squashed into thin lines** when the chat content exceeded the panel — the chat is a scrollable flex column, and cards with `overflow: hidden` (like `.vstep`) get an automatic minimum size of 0, so flexbox compressed every step to ~2px instead of scrolling. All direct children of the chat are now `flex-shrink: 0`: measured live with 30 steps + a long reply, every card keeps its height (32px when collapsed) and the chat scrolls.
+- FIX (bug #49): **verbose steps were squashed into thin lines** when the chat content exceeded the panel — the chat is a scrollable flex column, and cards with `overflow: hidden` (like `.vstep`) get an automatic minimum size of 0, so flexbox compressed every step to ~2px instead of scrolling. All direct children of the chat are now `flex-shrink: 0`: measured live with 30 steps + a long reply, every card keeps its height (32px when collapsed) and the chat scrolls.
 - Verbose steps are now **compact 1-row cards (32px collapsed) with a chevron on every step** (▼ expanded / ▶ collapsed; previously only the „Thinking" card had one). Click — or Enter/Space — toggles the details, and `aria-expanded` is kept in sync.
 - **Auto-collapse at the end of every turn** — on reply / Stop / error all steps fold to their 32px header row so the chat stays clean; the per-step auto-collapse of finished `Result` steps is kept.
 - **Summary in the collapsed header** — the first line of the step details (up to 90 chars, hover for the full text) is shown next to the title while the step is collapsed, and hidden again when expanded.

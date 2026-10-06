@@ -145,7 +145,7 @@ textarea:focus-visible {
 }
 
 /*
- * v2.5.18 (bug #48): copiii direcți NU au voie să se comprime. Fără asta,
+ * v2.5.18 (bug #49): copiii direcți NU au voie să se comprime. Fără asta,
  * flex column + `overflow: hidden` pe carduri (ex: .vstep) => minimum-size 0,
  * iar la conținut peste viewport-ul panoului cardurile se striveau la ~2px
  * („linii subțiri"). Containerul e scrollabil — scroll, nu compresie.
@@ -1487,7 +1487,7 @@ pre.code code {
   opacity: 0.7;
 }
 
-/* v2.5.18 (bug #48): chevron pe TOȚI pașii — ▼ extins, ▶ pliat */
+/* v2.5.18 (bug #49): chevron pe TOȚI pașii — ▼ extins, ▶ pliat */
 .vstep-arrow::before {
   content: '▼';
 }
@@ -1526,7 +1526,7 @@ pre.code code {
   align-items: center;
   gap: 6px;
   padding: 4px 8px;
-  /* v2.5.18 (bug #48): 30px + 2×1px border = rând compact de 32px */
+  /* v2.5.18 (bug #49): 30px + 2×1px border = rând compact de 32px */
   min-height: 30px;
   cursor: pointer;
   user-select: none;
@@ -1568,7 +1568,7 @@ pre.code code {
 }
 
 /*
- * v2.5.18 (bug #48): sumarul din header — vizibil DOAR când pasul e pliat
+ * v2.5.18 (bug #49): sumarul din header — vizibil DOAR când pasul e pliat
  * (prima linie din detalii, trunchiată); titlul e limitat ca să încapă amândouă.
  */
 .vstep-summary {

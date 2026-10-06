@@ -1527,8 +1527,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ) || 20
       );
       const deadline = Date.now() + timeoutMinutes * 60_000;
-      const sendOpts = {
-        files: uploads.length ? uploads : undefined,
+      /**
+       * v2.5.19 (bug #48): callback-urile „de decizie" trebuie să fie pe TOATE
+       * trimiterile, nu doar pe prima. Altfel un banner „Chat memory full"
+       * (sau guest mode) prins pe un nudge / auto-repair / follow-up ocolea
+       * cardul: base.ts nu vedea `onMemoryFull` și trata ca „cancel" — text
+       * simplu + clear, exact regresia raportată.
+       */
+      const baseSendOpts = {
         onProgress,
         onNotice,
         // v2.5.12 (bug #35): guest mode (ChatGPT fără cont) → card cu decizie
@@ -1536,6 +1542,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // v2.5.15 (bug #41): „Chat memory full" → card „New chat & continue"
         onMemoryFull: (id: string) => this.handleMemoryFull(id, signal)
       };
+      const sendOpts = {
+        files: uploads.length ? uploads : undefined,
+        ...baseSendOpts
+      };
+      // trimiterile secundare nu re-încară atașamentele, dar păstrează deciziile
+      const followUpOpts = { ...baseSendOpts };
 
       // v0.4.0: primul mesaj — Auto încearcă lanțul (browser → Ollama) pe rând
       let aiReply = '';
@@ -1673,9 +1685,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               text: 'The model refused to use the tools — re-asking with an explicit notice that the tools run in the VS Code client.',
               status: 'done'
             });
-            aiReply = await provider.send(page, TOOL_REFUSAL_NUDGE, signal, {
-              onProgress
-            });
+            aiReply = await provider.send(page, TOOL_REFUSAL_NUDGE, signal, followUpOpts);
             continue;
           }
           // v1.1.2: auto-retry — modelul a răspuns cu text descriptiv
@@ -1713,9 +1723,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               text: 'Replied with text instead of a tool call — asking again for the action JSON.',
               status: 'done'
             });
-            aiReply = await provider.send(page, TEXT_RETRY_NUDGE, signal, {
-              onProgress
-            });
+            aiReply = await provider.send(page, TEXT_RETRY_NUDGE, signal, followUpOpts);
             continue;
           }
           // v2.4.8: răspunsul e o ÎNCERCARE de tool call pe care extractorul
@@ -1756,7 +1764,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 page,
                 MALFORMED_TOOL_CALL_NUDGE,
                 signal,
-                { onProgress }
+                followUpOpts
               );
               continue;
             }
@@ -1790,7 +1798,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               break;
             }
             if (this.verifyRepairs > repairsBefore) {
-              aiReply = await provider.send(page, v.suffix, signal, { onProgress });
+              aiReply = await provider.send(page, v.suffix, signal, followUpOpts);
               log('auto-repair reply length: ' + aiReply.length);
               continue;
             }
@@ -1957,7 +1965,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           page,
           resultMessage + selfFix,
           signal,
-          { onProgress }
+          followUpOpts
         );
         log('follow-up reply length: ' + aiReply.length);
       }

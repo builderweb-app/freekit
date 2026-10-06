@@ -2,6 +2,7 @@ import { Locator, Page } from 'playwright';
 import {
   anySelectorMatches,
   anySelectorPresent,
+  countAssistantResponses,
   getLastResponseText,
   healSlot,
   inputAvailable,
@@ -708,7 +709,13 @@ export async function sendAndWait(
 
   let responseSelectors = selectors.candidates(providerId, 'response');
   let beforeText = await getLastResponseText(page, responseSelectors);
-  log(label + ': send() START, beforeLen=' + beforeText.length);
+  // v2.5.12 FIX (bug #36): numărul de răspunsuri existente ÎNAINTE de trimitere —
+  // sentinela pentru „a apărut un răspuns nou", independentă de conținutul lui.
+  let beforeCount = await countAssistantResponses(page, responseSelectors);
+  log(
+    label + ': send() START, beforeLen=' + beforeText.length +
+      ', beforeCount=' + beforeCount
+  );
 
   // v0.8.0: setările de humanizare (citite o dată per mesaj)
   const human = humanSettings();
@@ -746,6 +753,9 @@ export async function sendAndWait(
   let lastErrorCheckpoint = 0;
   let enterRetried = false;
   let lastStreamAt = 0;
+  // v2.5.12 FIX (bug #36): true după ce am văzut un răspuns NOU (count crescut
+  // sau text schimbat) — folosit de „rescue" ca să accepte și un răspuns identic.
+  let sawNewResponse = false;
   const started = Date.now();
 
   while (Date.now() - started < HARD_TIMEOUT_MS) {
@@ -815,7 +825,15 @@ export async function sendAndWait(
     }
 
     const currentText = await getLastResponseText(page, responseSelectors);
-    if (!currentText || currentText === beforeText) continue;
+    if (!currentText) continue;
+
+    // v2.5.12 FIX (bug #36): „răspuns nou" = a apărut o bulă în plus în DOM
+    // (count mai mare) SAU textul diferă de cel de dinainte de trimitere. Cu
+    // doar textul ca sentinelă, un răspuns IDENTIC cu precedentul (exact același
+    // tool call repetat) era confundat cu „încă nimic" → buclă până la timeout.
+    const currentCount = await countAssistantResponses(page, responseSelectors);
+    if (currentCount <= beforeCount && currentText === beforeText) continue;
+    sawNewResponse = true;
 
     // v2.5.3 FIX 7: providerii care ecouază promptul (DeepSeek) trimit
     // „<mesaj user> \n TOOL: …” — tăiem prefixul ecou ÎNAINTE de isEchoOf, ca
@@ -824,7 +842,7 @@ export async function sendAndWait(
     if (visible !== currentText) {
       log(label + ': stripped echoed user message from AI reply');
     }
-    if (!visible || visible === beforeText) continue;
+    if (!visible) continue;
 
     // v0.8.0: ecoul propriului mesaj nu e răspuns — nu îl declarăm "stabil".
     // v0.9.3: extins cu sufixele de acțiuni (Kimi „Edit/Copy/Share”) — vezi isEchoOf.
@@ -880,7 +898,12 @@ export async function sendAndWait(
   if (rescued !== rescuedRaw) {
     log(label + ': stripped echoed user message from AI reply (rescue)');
   }
-  if (rescued && rescued.length >= 20 && rescued !== beforeText && !isEchoOf(rescued, message)) {
+  if (
+    rescued &&
+    rescued.length >= 20 &&
+    (sawNewResponse || rescued !== beforeText) &&
+    !isEchoOf(rescued, message)
+  ) {
     log(label + ': RESCUE generic, ' + rescued.length + ' chars');
     // v2.5.1: și textul de la „rescue” poate fi un mesaj de eroare al site-ului
     const detected = detectProviderError(rescued, providerId);

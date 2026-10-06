@@ -1246,6 +1246,37 @@ const readLastText = (args: ReadArgs): string => {
   return last ? textOf(last) : '';
 };
 
+interface CountArgs {
+  sels: string[];
+}
+
+/**
+ * v2.5.12 FIX (bug #36): câte răspunsuri (bule non-goale) sunt în DOM. Folosim
+ * ACELAȘI selector ca getLastResponseText pentru citire — primul care prinde
+ * cel puțin un element cu text — ca numărătoarea și textul citit să rămână
+ * consistente: când apare o bulă nouă, count-ul crește, chiar dacă textul ei e
+ * identic cu răspunsul precedent (exact cazul care bloca sendAndWait).
+ */
+const countLastResponses = (args: CountArgs): number => {
+  const textOf = (el: Element): string =>
+    (((el as HTMLElement).innerText || el.textContent || '') as string).trim();
+
+  for (const sel of args.sels) {
+    let nodes: NodeListOf<Element>;
+    try {
+      nodes = document.querySelectorAll(sel);
+    } catch {
+      continue;
+    }
+    let count = 0;
+    for (let i = 0; i < nodes.length; i++) {
+      if (textOf(nodes[i])) count++;
+    }
+    if (count) return count;
+  }
+  return 0;
+};
+
 /* =========================================================================
  * API public
  * ========================================================================= */
@@ -1459,6 +1490,23 @@ export async function getLastResponseText(
   } catch (e: any) {
     log('reading the response failed: ' + (e?.message ?? String(e)));
     return '';
+  }
+}
+
+/**
+ * v2.5.12 FIX (bug #36): numărul de răspunsuri vizibile în DOM pentru slotul
+ * `response` (același selector ca getLastResponseText). O creștere a acestui
+ * număr = a apărut un răspuns NOU, indiferent de conținutul lui.
+ */
+export async function countAssistantResponses(
+  page: Page,
+  sels: string[]
+): Promise<number> {
+  try {
+    return await page.evaluate<number, CountArgs>(countLastResponses, { sels });
+  } catch (e: any) {
+    log('counting the responses failed: ' + (e?.message ?? String(e)));
+    return 0;
   }
 }
 

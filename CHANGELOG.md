@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.5.12
+
+- FIX (bug #36): **the agentic loop froze at „Pasul 1/40" when the AI repeated its previous answer verbatim** — typically the same tool call again after a `TOOL_ERROR` (e.g. `read_file` for a file that does not exist). `sendAndWait` used the text of the last response captured *before* sending as its „a new response appeared" sentinel; when the new reply was identical to the previous one, that comparison stayed true forever, so the loop spun until the 150 s hard timeout and the follow-up reply was never parsed or executed. The sentinel is now the **number of response bubbles present in the DOM** (`countAssistantResponses`): any new bubble counts, regardless of its content. The redundant identical-text guards in the streaming loop and in the RESCUE path were updated accordingly.
+
 ## v2.5.11
 
 - FIX (bug #21): **„Show Chrome" and „Open Browser" were two buttons that did almost the same thing**, which confused users — „Show Chrome" brought the window to the front, while „Open Browser" started/reconnected Chrome but then left it minimized and without a taskbar button (`applyHiddenState`), so the user saw only the „Connected to Chrome" toast and never found the window. The two are now a single **„Show Browser"** button (menu ⋯ → Context, 🌐 globe icon) that launches Chrome when needed *and* brings the window on screen and focuses it.

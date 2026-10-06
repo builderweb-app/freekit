@@ -819,6 +819,21 @@ async function emitThinking(
   }
 }
 
+/* =========================================================================
+ * v2.5.20 (bug #44/#58) — „RĂSPUNSUL NU E ÎNCĂ RANDAT" ≠ „SELECTOR STRICAT"
+ * La 4s după Enter bila AI nu există încă în DOM (site-urile o randează în
+ * 2–10s) → `anySelectorMatches` = false, dar asta NU înseamnă „selector
+ * stricat": healer-ul pleca pe „no candidate" și chema AI finder-ul pe un
+ * snapshot FĂRĂ răspuns (45–120s arși pe un slot care funcționa perfect;
+ * răspunsul real apărea la 6s și era citit abia după ce finder-ul renunța).
+ * Repararea slotului `response` pornește abia de la checkpoint-ul de 20s (se
+ * reia la 40s). Verificarea erorilor de pagină (rate limit / memory full /
+ * CAPTCHA) rămâne la toate checkpoint-urile, inclusiv 4s și 9s.
+ * ========================================================================= */
+
+/** v2.5.20 (bug #44/#58): sub acest prag `response` NU se repară. */
+const RESPONSE_HEAL_MIN_MS = 20_000;
+
 export async function sendAndWait(
   page: Page,
   message: string,
@@ -1042,9 +1057,17 @@ export async function sendAndWait(
 
     // 1) dacă selectoarele de răspuns nu prind nimic, repară-le (checkpoint-uri)
     if (healIndex < HEAL_CHECKPOINTS.length && elapsed > HEAL_CHECKPOINTS[healIndex]) {
+      const checkpoint = HEAL_CHECKPOINTS[healIndex];
       healIndex++;
-      if (await anySelectorMatches(page, responseSelectors)) {
-        if (healIndex === 1) {
+      if (checkpoint < RESPONSE_HEAL_MIN_MS) {
+        // v2.5.20 (bug #44/#58): prea devreme — la 4s/9s bila AI poate fi doar
+        // nerandată; lipsa unui match NU dovedește un selector stricat.
+        log(
+          label + ': response heal skipped at ' + checkpoint +
+          'ms (the reply may still be rendering)'
+        );
+      } else if (await anySelectorMatches(page, responseSelectors)) {
+        if (checkpoint === RESPONSE_HEAL_MIN_MS) {
           log(label + ': response selectors work, waiting for the stream');
         }
       } else {

@@ -4,7 +4,7 @@ import type { Page } from 'playwright';
 import { logLine } from './log';
 import { OllamaProvider } from './providers/ollama';
 import { PROVIDER_LABELS } from './providers';
-import { promoPhraseHit, selectors, setAIFinder, SLOTS, SlotName } from './selectors';
+import { getLastResponseText, promoPhraseHit, selectors, setAIFinder, SLOTS, SlotName } from './selectors';
 
 const log = (msg: string) => logLine('ai-finder', msg);
 
@@ -549,6 +549,38 @@ function dropStaleOverride(providerId: string, slot: SlotName): void {
   if (learned.how === 'ai') saveUserSelectors();
 }
 
+/**
+ * v2.5.20 (bug #44/#58): există în DOM conținut de răspuns pe care selectorii
+ * curenți îl ratează? (text substanțial, în afara navigației, diferit de
+ * mesajul tocmai trimis). Fără el, AI finder-ul nu are ce găsi — orice apel ar
+ * consuma doar timeout-ul. Acoperă exact cazul „avem deja un selector static
+ * care a mers în sesiuni anterioare": dacă elementul lui e prezent dar încă
+ * gol (bila se randează), nu există conținut → nu-l înlocuim. Fail-open la
+ * erori de evaluare, ca un bug de probe să nu blocheze repararea reală.
+ */
+async function hasResponseContentToFind(
+  page: Page,
+  providerId: string,
+  echoText?: string
+): Promise<boolean> {
+  try {
+    const probe = await getLastResponseText(
+      page,
+      selectors.candidates(providerId, 'response'),
+      true
+    );
+    const flat = String(probe || '').replace(/\s+/g, ' ').trim();
+    if (flat.length < 60) return false;
+    const echo = String(echoText || '').replace(/\s+/g, ' ').trim();
+    // doar ecoul mesajului trimis (bula userului), nu un răspuns
+    if (echo.length >= 40 && flat.includes(echo.slice(0, 40))) return false;
+    return true;
+  } catch (e: any) {
+    log('AI finder probe failed: ' + (e?.message ?? String(e)));
+    return true;
+  }
+}
+
 async function discoverForHealer(
   page: Page,
   providerId: string,
@@ -579,6 +611,15 @@ async function discoverForHealer(
   }
   inFlight.add(key);
   recentAttempts.set(key, Date.now());
+  // v2.5.20 (bug #44/#58): fără conținut de răspuns în DOM nu există nimic de
+  // găsit — finder-ul ar arde timeout-ul complet (45–120s) pe un snapshot fără
+  // bilă AI. Se întâmplă când bila nu e încă randată (selectorul static e
+  // prezent, dar gol) sau pagina e goală. Îl lăsăm pe healer-ul de fingerprint
+  // să rămână singura cale de reparare până apare conținut real.
+  if (slot === 'response' && !(await hasResponseContentToFind(page, providerId, echoText))) {
+    log('AI finder: no response content in the DOM yet — skipping for ' + key);
+    return null;
+  }
   try {
     const label = PROVIDER_LABELS[providerId] || providerId;
     const discovered = await findSelectorsWithAI(page, label, [slot]);

@@ -71,6 +71,7 @@ import {
   isReadEverythingTask,
   recordReadFiles
 } from './chatRotation';
+import { drainAliasLogs, stripTsAliasesInText } from './tsAlias';
 import { mcp } from './mcp/manager';
 import { Attachment, describePath, prepareAttachments } from './attachments';
 import { detectProject, formatProjectInfo } from './project';
@@ -1958,7 +1959,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           kind: 'result',
           id: 'res' + iterations,
           title: result.ok ? 'OK: ' + toolCall.tool : 'Error: ' + toolCall.tool,
-          text: vOut.length > 4000 ? vOut.slice(0, 4000) + '\n… (truncated)' : vOut,
+          // v2.5.27 (bug #63): utilizatorul vede calea originală (`.ts`), nu
+          // eticheta `.ts.txt` trimisă AI-ului
+          text: stripTsAliasesInText(
+            vOut.length > 4000 ? vOut.slice(0, 4000) + '\n… (truncated)' : vOut
+          ),
           status: result.ok ? 'done' : 'error'
         });
         if (this.abortRequested) break;
@@ -2112,7 +2117,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         } else {
           log('posting final reply, length=' + aiReply.length);
           await this.appendHistory('assistant', aiReply);
-          this.post('reply', aiReply);
+          // v2.5.27 (bug #63): în chat calea rămâne cea originală (`.ts`)
+          this.post('reply', stripTsAliasesInText(aiReply));
         }
       }
     } catch (e: any) {
@@ -4575,7 +4581,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   // în src/toolCallParser.ts — vezi acolo de ce regex-ul naiv eșua pe JSON-ul
   // cu `content` nested.
   private parseToolCall(text: string): ToolCall | null {
-    return parseToolCallText(text);
+    const call = parseToolCallText(text);
+    // v2.5.27 (bug #63): log-ul traducerilor `.ts.txt` → `.ts` (parserul le
+    // pune în coadă, aici ajung în Output → Freekit)
+    for (const msg of drainAliasLogs()) log(msg);
+    return call;
   }
 
   private getHtml(webview: vscode.Webview): string {

@@ -15,6 +15,7 @@
  * ========================================================================= */
 
 import type { ToolCall, ToolResult } from './tools';
+import { stripTsAliasPath, toAiPath, TS_ALIAS_NOTE } from './tsAlias';
 
 /** câte fișiere ținem minte per chat de browser (handoff-ul rămâne mărginit) */
 const MAX_TRACKED_FILES = 120;
@@ -71,7 +72,9 @@ export function extractReadFiles(
   for (const part of out.split(/^--- FILE: /m).slice(1)) {
     const sep = part.indexOf(' ---');
     if (sep <= 0) continue;
-    const p = part.slice(0, sep).trim();
+    // v2.5.27 (bug #63): antetul poate purta aliasul `.ts.txt` trimis AI-ului —
+    // în mapă ținem calea reală (`.ts`), ca invalidarea după scriere să nimerească
+    const p = stripTsAliasPath(part.slice(0, sep).trim());
     const body = part.slice(sep + 4).trim();
     // fișierele SĂRITE (buget de payload) sau eronate NU au ajuns la AI
     if (!p || body.startsWith('[SKIPPED:') || body.startsWith('(error:')) continue;
@@ -122,16 +125,18 @@ export function invalidateTouchedFiles(
 /**
  * Lista inline „Already read: …" — intră în corpul handoff-ului (deci
  * supraviețuiește trunchierii lui), ca modelul să nu ceară re-citirea.
+ * v2.5.27 (bug #63): căile TS apar cu aliasul `.ts.txt` (cum le-a văzut AI-ul).
  */
 export function formatReadFilesList(files: Map<string, string>): string {
   if (!files.size) return '';
   const shown: string[] = [];
   let chars = 0;
   for (const p of files.keys()) {
+    const aiPath = toAiPath(p);
     if (shown.length >= MAX_LISTED_PATHS) break;
-    if (chars + p.length > MAX_PATH_LIST_CHARS) break;
-    shown.push(p);
-    chars += p.length + 2;
+    if (chars + aiPath.length > MAX_PATH_LIST_CHARS) break;
+    shown.push(aiPath);
+    chars += aiPath.length + 2;
   }
   if (!shown.length) return '';
   const rest = files.size - shown.length;
@@ -158,6 +163,7 @@ function headTail(text: string, max: number): string {
  * Extrasele (head+tail) ale fișierelor citite — așa chatul nou primește chiar
  * conținutul, nu doar numele fișierelor. Buget total mărginit, ca paste-ul de
  * la rotire să rămână mic.
+ * v2.5.27 (bug #63): fișierele TS se trimit și aici ca `.ts.txt` (+ notă).
  */
 export function formatReadFilesExcerpts(
   files: Map<string, string>,
@@ -171,7 +177,11 @@ export function formatReadFilesExcerpts(
     if (budget < MIN_EXCERPT_BUDGET) break;
     const body = headTail(content, Math.min(maxPerFile, budget));
     if (!body) continue;
-    const block = '--- FILE: ' + p + ' ---\n' + body;
+    const aiPath = toAiPath(p);
+    const block =
+      '--- FILE: ' + aiPath + ' ---' +
+      (aiPath === p ? '' : '\n' + TS_ALIAS_NOTE) +
+      '\n' + body;
     parts.push(block);
     budget -= block.length;
   }

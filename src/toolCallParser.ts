@@ -1,4 +1,5 @@
 import type { ToolCall } from './tools';
+import { mapToolCallAliases, queueAliasLog } from './tsAlias';
 
 /* =========================================================================
  * v2.4.8 — Extractor robust de tool call
@@ -584,6 +585,20 @@ function parseWriteFilesMarkers(lines: string[], from: number): ToolCall | null 
 }
 
 /**
+ * v2.5.27 (bug #63) FIX 2: căile-alias `.ts.txt` primite de la AI (eticheta pe
+ * care a văzut-o la citire) se traduc înapoi în căile reale (`.ts`) — astfel
+ * aprobarea, diff-ul, verificarea de trunchiere și scrierea pe disc lucrează
+ * pe fișierul ORIGINAL. Traducerile se loghează prin tsAlias (drenate de
+ * chatView, care are canalul Output).
+ */
+function withResolvedPaths(call: ToolCall): ToolCall {
+  const { args, mappings } = mapToolCallAliases(call.tool, call.args);
+  if (!mappings.length || !args) return call;
+  for (const m of mappings) queueAliasLog(m);
+  return { tool: call.tool, args };
+}
+
+/**
  * Extrage un tool call din formatul marker-based (conținut RAW, fără escape).
  * Întoarce null pentru orice alt tool sau bloc incomplet → fallback pe JSON.
  */
@@ -594,9 +609,16 @@ export function parseMarkerToolCall(text: string): ToolCall | null {
     if (!m) continue;
     const tool = m[1].toLowerCase();
     if (!MARKER_TOOLS.has(tool)) return null;
-    if (tool === 'write_file') return parseWriteFileMarkers(lines, i + 1);
-    if (tool === 'edit_file') return parseEditFileMarkers(lines, i + 1);
-    return parseWriteFilesMarkers(lines, i + 1);
+    if (tool === 'write_file') {
+      const call = parseWriteFileMarkers(lines, i + 1);
+      return call ? withResolvedPaths(call) : null;
+    }
+    if (tool === 'edit_file') {
+      const call = parseEditFileMarkers(lines, i + 1);
+      return call ? withResolvedPaths(call) : null;
+    }
+    const call = parseWriteFilesMarkers(lines, i + 1);
+    return call ? withResolvedPaths(call) : null;
   }
   return null;
 }
@@ -627,7 +649,7 @@ export function parseToolCallText(text: string): ToolCall | null {
     const parsed = tryParseJsonObject(candidate);
     if (!parsed) continue;
     const call = normalizeToolCall(parsed);
-    if (call) return call;
+    if (call) return withResolvedPaths(call);
   }
 
   return null;

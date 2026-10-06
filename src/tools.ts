@@ -25,6 +25,12 @@ import {
   truncateContent
 } from './payload';
 import { RESTRICTED_TOOL_ERROR } from './trust';
+import {
+  TS_ALIAS_NOTE,
+  isTypeScriptPath,
+  mapToolCallAliases,
+  toAiPath
+} from './tsAlias';
 
 // Pending approvals: id -> resolver
 export const pendingApprovals = new Map<string, (ok: boolean) => void>();
@@ -737,6 +743,12 @@ use the JSON format:
 12. search_semantic(query) - semantic code search (if indexed)
 13. open_workspace(path) - open folder in new window
 
+NOTE (TypeScript): .ts / .tsx / .mts / .cts files are shown to you with a ".txt"
+suffix (e.g. "src/file.ts.txt") because web chat backends refuse plain ".ts"
+files. The file on disk is still "src/file.ts": reading works with either path,
+and when you write/edit it use the SAME path you were shown (the ".txt" suffix
+is stripped automatically before writing to disk).
+
 ## WORKFLOW EXAMPLES
 
 USER: "change the title from X to Y"
@@ -835,6 +847,10 @@ Tools:
 12. search_semantic(query) — find code by MEANING (e.g. "where do we validate login"); works only if the workspace was indexed (command "Freekit: Index Workspace")
 
 For git you may also use the short names "git_status", "git_diff", "git_log", "git_commit", "git_branch", "git_revert".
+
+NOTE (TypeScript): .ts / .tsx / .mts / .cts files are shown to you with a ".txt"
+suffix (e.g. "src/file.ts.txt"); the real file on disk is "src/file.ts" (the
+suffix is stripped automatically when you write or edit).
 
 CRITICAL WRITE RULES (the system REJECTS violations with an error):
 - Write each file ONLY ONCE. First compose the COMPLETE final content, then call write_file ONE time.
@@ -1089,6 +1105,17 @@ export async function executeTool(
   userText?: string
 ): Promise<ToolResult> {
   log('executing tool: ' + call.tool);
+  // v2.5.27 (bug #63): dacă AI-ul trimite calea-alias `.ts.txt` (cea pe care a
+  // văzut-o la citire), o traducem înapoi în calea reală ÎNAINTE de aprobare,
+  // diff, verificarea de trunchiere și scrierea pe disc. Parserul face deja
+  // asta (Fix 2) — aici e plasa de siguranță pentru apelurile care o ocolesc.
+  const mapped = mapToolCallAliases(call.tool, call.args);
+  if (mapped.mappings.length) {
+    for (const m of mapped.mappings) {
+      log('mapped ' + m.alias + ' → ' + m.original + ' for ' + m.op);
+    }
+    call = { tool: call.tool, args: mapped.args ?? {} };
+  }
   if (!vscode.workspace.isTrusted && isToolTrustRequired(call.tool, call.args)) {
     log('blocked by Restricted Mode: ' + call.tool);
     return { ok: false, error: RESTRICTED_TOOL_ERROR };
@@ -1107,7 +1134,7 @@ export async function executeTool(
     }
     switch (call.tool) {
       case 'read_file':
-        return await readFile(call.args.path, workspaceRoot);
+        return await readFile(call.args.path, workspaceRoot, log);
 
       case 'write_file': {
         // v0.2.1: anti-spam — verificăm ÎNAINTE de cardul de aprobare
@@ -1232,7 +1259,7 @@ export async function executeTool(
         return await gitTool(call.args, workspaceRoot, approve, log);
 
       case 'read_files':
-        return await readFilesBatch(call.args, workspaceRoot);
+        return await readFilesBatch(call.args, workspaceRoot, log);
 
       case 'write_files':
         return await writeFilesBatch(call.args, workspaceRoot, approve, userText);
@@ -1341,15 +1368,29 @@ function safePath(rel: string, root: string): string {
   return normalized;
 }
 
-async function readFile(rel: string, root: string): Promise<ToolResult> {
+async function readFile(
+  rel: string,
+  root: string,
+  log?: (msg: string) => void
+): Promise<ToolResult> {
   const abs = safePath(rel, root);
   const content = await vscode.workspace.fs.readFile(vscode.Uri.file(abs));
   const text = Buffer.from(content).toString('utf8');
   // v2.5.22 (bug #54): trunchiere head+tail, nu doar capul (vezi truncateContent).
-  return {
-    ok: true,
-    result: truncateContent(text, MAX_LINES_PER_FILE, MAX_CHARS_PER_FILE)
-  };
+  const body = truncateContent(text, MAX_LINES_PER_FILE, MAX_CHARS_PER_FILE);
+  // v2.5.27 (bug #63): fișierele TypeScript pleacă spre AI etichetate `.txt`
+  // (ChatGPT refuză `.ts`), cu note în antet; calea reală rămâne în registru.
+  if (isTypeScriptPath(rel)) {
+    const alias = toAiPath(rel);
+    log?.(
+      'read_file: sent ' + rel + ' as ' + alias + ' (.ts → .txt for AI compatibility)'
+    );
+    return {
+      ok: true,
+      result: '--- FILE: ' + alias + ' ---\n' + TS_ALIAS_NOTE + '\n' + body
+    };
+  }
+  return { ok: true, result: body };
 }
 
 async function writeFile(
@@ -1732,7 +1773,8 @@ const MAX_BATCH_READ_FILES = 12;
 
 async function readFilesBatch(
   args: Record<string, any>,
-  root: string
+  root: string,
+  log?: (msg: string) => void
 ): Promise<ToolResult> {
   const paths: string[] = Array.isArray(args.paths)
     ? args.paths.filter((p: any) => typeof p === 'string' && p)
@@ -1748,6 +1790,14 @@ async function readFilesBatch(
   const sections: string[] = [];
   let total = 0;
   for (const rel of limited) {
+    // v2.5.27 (bug #63): fișierele TypeScript se trimit ca `X.ts.txt`
+    const aiRel = toAiPath(rel);
+    const isTs = aiRel !== rel;
+    if (isTs) {
+      log?.(
+        'read_files: sent ' + rel + ' as ' + aiRel + ' (.ts → .txt for AI compatibility)'
+      );
+    }
     try {
       const abs = safePath(rel, root);
       const content = Buffer.from(
@@ -1762,15 +1812,19 @@ async function readFilesBatch(
       // se sar (nu se trimit la model), ca payload-ul să rămână mic.
       if (total + clipped.length > MAX_CHARS_TOTAL) {
         sections.push(
-          '--- FILE: ' + rel + ' ---\n[SKIPPED: payload limit reached]'
+          '--- FILE: ' + aiRel + ' ---\n[SKIPPED: payload limit reached]'
         );
         continue;
       }
-      sections.push('--- FILE: ' + rel + ' ---\n' + clipped);
+      sections.push(
+        '--- FILE: ' + aiRel + ' ---\n' +
+          (isTs ? TS_ALIAS_NOTE + '\n' : '') +
+          clipped
+      );
       total += clipped.length;
     } catch (e: any) {
       sections.push(
-        '--- FILE: ' + rel + ' ---\n(error: ' + (e?.message ?? String(e)) + ')'
+        '--- FILE: ' + aiRel + ' ---\n(error: ' + (e?.message ?? String(e)) + ')'
       );
     }
   }

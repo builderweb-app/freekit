@@ -8,6 +8,13 @@ export interface SendOptions {
   onProgress?: (partial: string) => void;
   /** Mesaje de tip notice pentru utilizator (ex: upload eșuat). */
   onNotice?: (text: string) => void;
+  /**
+   * v2.5.12 (bug #35): providerul afișează CTA-ul de „nelogat" (ex: ChatGPT
+   * guest mode). chatView întreabă utilizatorul (card: Show Browser /
+   * Continue as guest / Cancel) și întoarce decizia: 'continue' = trimite
+   * mai departe, 'cancel' = anulează trimiterea. Fără el, nu se întreabă nimic.
+   */
+  onLoggedOut?: (providerId: string) => Promise<'continue' | 'cancel'>;
 }
 
 /**

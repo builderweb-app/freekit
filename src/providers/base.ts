@@ -250,6 +250,41 @@ export async function detectLoginPage(page: Page): Promise<boolean> {
 }
 
 /* =========================================================================
+ * v2.5.12 (bug #35) — GUEST MODE („Log in" vizibil, dar composer funcțional)
+ * ChatGPT fără cont păstrează composerul activ (câteva mesaje gratuite), deci
+ * `findInput` reușește și verificarea de login (doar pe ramura „input lipsă")
+ * nu se execută niciodată. Aici detectăm CTA-ul de „nelogat" prin selectorii
+ * `loggedOut` din selectors.json (ex: butonul „Log in" din header/sidebar) —
+ * prezența lui vizibilă înseamnă sesiune neautentificată, chiar și cu input.
+ * Providerii fără slot `loggedOut` nu sunt afectați (lista e goală → false).
+ * ========================================================================= */
+
+/** Selectorii `loggedOut` ai providerului (gol dacă nu are detecție configurată). */
+export function loggedOutSelectors(providerId: string): string[] {
+  try {
+    return selectors.candidates(providerId, 'loggedOut');
+  } catch {
+    return [];
+  }
+}
+
+/** true dacă pagina afișează un indicator VIZIBIL de sesiune neautentificată. */
+export async function detectLoggedOut(
+  page: Page,
+  providerId: string
+): Promise<boolean> {
+  for (const sel of loggedOutSelectors(providerId)) {
+    try {
+      const loc = page.locator(sel).first();
+      if ((await loc.count()) > 0 && (await loc.isVisible())) return true;
+    } catch (e: any) {
+      log('detectLoggedOut: selector failed (' + sel + '): ' + (e?.message ?? String(e)));
+    }
+  }
+  return false;
+}
+
+/* =========================================================================
  * v1.8.0 — DETECȚIE CAPTCHA
  * Paginile cu verificare „I'm not a robot” (reCAPTCHA challenge / hCaptcha /
  * Cloudflare „Just a moment”) nu pot fi rezolvate automat — chatView aduce
@@ -720,7 +755,17 @@ export async function sendAndWait(
   // v0.8.0: setările de humanizare (citite o dată per mesaj)
   const human = humanSettings();
 
-  const input = await findInput(page, providerId, label, 15000);
+  let input = await findInput(page, providerId, label, 15000);
+  // v2.5.12 (bug #35): ChatGPT fără cont păstrează composerul funcțional
+  // (guest mode), deci findInput reușește și verificarea de login din el
+  // (ramura „input lipsă") nu se execută. Întrebăm utilizatorul înainte de a
+  // trimite — NU blocăm: „Continue as guest" merge exact ca înainte.
+  if (cfg.onLoggedOut && (await detectLoggedOut(page, providerId))) {
+    const decision = await cfg.onLoggedOut(providerId);
+    if (decision !== 'continue') throw new Error('__ABORTED__');
+    // după login pagina se poate reîncărca → re-resolve composerul
+    input = await findInput(page, providerId, label, 15000);
+  }
   await clickInput(page, input);
 
   // v0.8.0: tastare "umană" (evenimente reale de tastatură); v2.0.6: mesajele

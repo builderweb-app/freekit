@@ -166,7 +166,7 @@ export function formatToolCallResult(result: any): McpToolCallResult {
     if (c.type === 'text' && typeof c.text === 'string') {
       parts.push(c.text);
     } else if (c.type === 'image') {
-      parts.push('[imagine ' + (c.mimeType || '') + ' — nu poate fi afișată în chat]');
+      parts.push('[image ' + (c.mimeType || '') + ' — cannot be displayed in chat]');
     } else if (c.type === 'resource') {
       const uri = c.resource?.uri ?? '';
       const text = typeof c.resource?.text === 'string' ? '\n' + c.resource.text : '';
@@ -342,7 +342,7 @@ export class McpClient {
         try {
           const v = require('vscode') as typeof vscode;
           void v.window.showWarningMessage(
-            'MCP server "' + name + '" nu a pornit: ' + message
+            'MCP server "' + name + '" failed to start: ' + message
           );
         } catch {
           /* fără vscode (teste) */
@@ -412,7 +412,7 @@ export class McpClient {
           this.pending.delete(id);
           p.reject(
             new Error(
-              'Serverul ' + name + ' s-a închis (code ' + code + ')'
+              'MCP server ' + name + ' closed (code ' + code + ')'
             )
           );
         }
@@ -569,7 +569,7 @@ export class McpClient {
                 '[MCP ' +
                   serverName +
                   '] ' +
-                  (msg.error.message || 'eroare') +
+                  (msg.error.message || 'error') +
                   (msg.error.code !== undefined
                     ? ' (code ' + msg.error.code + ')'
                     : '')
@@ -612,7 +612,7 @@ export class McpClient {
     return new Promise((resolve, reject) => {
       const proc = this.processes.get(serverName);
       if (!proc || !proc.stdin || proc.stdin.destroyed) {
-        reject(new Error('Serverul ' + serverName + ' nu rulează'));
+        reject(new Error('MCP server ' + serverName + ' is not running'));
         return;
       }
 
@@ -686,7 +686,7 @@ export class McpClient {
       if (p.serverName === name) {
         clearTimeout(p.timer);
         this.pending.delete(id);
-        p.reject(new Error('Serverul ' + name + ' a fost oprit'));
+        p.reject(new Error('MCP server ' + name + ' was stopped'));
       }
     }
 

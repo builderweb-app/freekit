@@ -534,7 +534,7 @@ export async function startDevServer(
 
   if (entry.closed) {
     removeEntry(entry);
-    return fail('(terminal închis înainte de trimiterea comenzii)', name);
+    return fail('(terminal closed before the command was sent)', name);
   }
 
   if (execution) {
@@ -589,11 +589,11 @@ export async function startDevServer(
     // procesul încă rulează (sau fallback-ul nu poate ști) — server pornit
     if (!entry.capture) {
       notes.push(
-        'captură live indisponibilă (shell integration nu s-a activat în acest terminal) — output-ul complet se vede doar în terminal'
+        'live capture unavailable (shell integration did not activate in this terminal) — the full output is only visible in the terminal'
       );
     } else if (looksLikeStartupError(captured)) {
       notes.push(
-        'output-ul de pornire conține linii aparent de eroare — verifică în terminal dacă serverul chiar a pornit corect'
+        'the startup output contains apparent error lines — check the terminal to confirm the server actually started correctly'
       );
     }
     return {
@@ -612,12 +612,12 @@ export async function startDevServer(
   }
 
   // s-a terminat (crash / eroare de pornire) sau terminalul a fost închis
-  const output = captured || (entry.closed ? '(terminal închis)' : '(fără output)');
+  const output = captured || (entry.closed ? '(terminal closed)' : '(no output)');
   notes.push(
-    'terminalul „' + name + '” rămâne deschis — output-ul complet e vizibil acolo'
+    'terminal „' + name + '” stays open — the full output is visible there'
   );
   if (!entry.capture) {
-    notes.push('captură live indisponibilă (shell integration) — vezi terminalul');
+    notes.push('live capture unavailable (shell integration) — see the terminal');
   }
   return {
     running: false,
@@ -700,9 +700,9 @@ export function formatDevServerStartResult(
 ): string {
   const lines: string[] = [];
   lines.push(
-    '✅ Server pornit în TERMINALUL VS Code „' +
+    '✅ Server started in the VS Code TERMINAL „' +
       (res.terminalName || '?') +
-      '” (vizibil în panoul de jos al VS Code)'
+      '” (visible in the VS Code bottom panel)'
   );
   lines.push('tool: ' + toolLabel + ' — command: ' + command);
   if (opts.cwd) lines.push('directory: ' + opts.cwd);

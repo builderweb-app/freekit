@@ -115,6 +115,8 @@ function setVerboseUi(enabled) {
 }
 
 let pendingEl = null;
+// v2.5.12 (bug #35): cardul „guest mode" activ (ChatGPT fără cont)
+let guestCardEl = null;
 let busy = false;
 let stick = true; // true = suntem lipiți de capătul listei
 
@@ -358,7 +360,17 @@ function setPendingText(text) {
   if (!pendingEl) return;
   pendingEl.classList.remove('md');
   pendingEl.classList.remove('streaming');
-  msgBody(pendingEl).textContent = text;
+  const body = msgBody(pendingEl);
+  body.textContent = text;
+  // v2.5.12 (bug #32): „Step X of N" e iterația din bucla agentică, nu un
+  // contor de încercări — tooltip la hover cât timp pasul e afișat.
+  const m = /(?:^|\s)Step (\d+) of (\d+)\b/.exec(String(text || ''));
+  body.title = m ? 'Agentic loop iteration ' + m[1] + ' of ' + m[2] + ' max' : '';
+}
+
+/** v2.5.12 (bug #32): scoate tooltip-ul de pas când textul e înlocuit de răspuns. */
+function clearPendingTip() {
+  if (pendingEl) msgBody(pendingEl).title = '';
 }
 
 // FAZA I: notificare discretă când un selector a fost reparat automat
@@ -431,6 +443,51 @@ function addLoginRequiredCard(text) {
   card.appendChild(msgEl);
   card.appendChild(row);
   messages.appendChild(card);
+  scrollAfterAppend();
+}
+
+// v2.5.12 (bug #35): card „guest mode" — providerul răspunde, dar sesiunea NU
+// e autentificată (ChatGPT fără cont): 3 opțiuni, fără blocare.
+function removeGuestModeCard() {
+  if (guestCardEl) {
+    guestCardEl.remove();
+    guestCardEl = null;
+  }
+}
+
+function addGuestModeCard(text) {
+  removeGuestModeCard();
+  const card = document.createElement('div');
+  card.className = 'notice guest-mode';
+
+  const msgEl = document.createElement('div');
+  msgEl.className = 'guest-mode-text';
+  msgEl.textContent =
+    text ||
+    'You are not logged in — the provider is running in guest mode (messages are not saved to an account and limits apply).';
+
+  const row = document.createElement('div');
+  row.className = 'guest-mode-actions';
+
+  const decide = (label, choice, cls) => {
+    const b = document.createElement('button');
+    b.className = cls;
+    b.textContent = label;
+    b.onclick = () => {
+      removeGuestModeCard();
+      vscode.postMessage({ type: 'guest_decision', choice });
+    };
+    return b;
+  };
+
+  row.appendChild(decide('🌐 Show Browser', 'show', 'show-chrome-btn'));
+  row.appendChild(decide('💬 Continue as guest', 'guest', 'guest-btn'));
+  row.appendChild(decide('⏹ Cancel', 'cancel', 'guest-cancel-btn'));
+
+  card.appendChild(msgEl);
+  card.appendChild(row);
+  messages.appendChild(card);
+  guestCardEl = card;
   scrollAfterAppend();
 }
 
@@ -1365,6 +1422,7 @@ function resetChatUi() {
   if (sttState === 'recording' || sttState === 'starting') stopDictation(); // v1.6.0/v1.7.3
   messages.innerHTML = '';
   pendingEl = null;
+  guestCardEl = null; // v2.5.12 (bug #35)
   verboseSteps.clear(); // v1.7.1
   fileRows.clear(); // v2.0.1
   setBusy(false);
@@ -2013,7 +2071,9 @@ window.addEventListener('message', (event) => {
 
   if (msg.type === 'reply') {
     try {
+      removeGuestModeCard(); // v2.5.12 (bug #35): răspunsul a sosit, cardul nu mai e necesar
       if (pendingEl) {
+        clearPendingTip(); // v2.5.12 (bug #32)
         pendingEl.classList.remove('streaming');
         renderMarkdown(pendingEl, msg.text || '(empty)');
         addCopyButton(pendingEl, msg.text || '');
@@ -2026,6 +2086,7 @@ window.addEventListener('message', (event) => {
       if (!stick) jumpBtn.hidden = false;
     }
   } else if (msg.type === 'stopped') {
+    removeGuestModeCard(); // v2.5.12 (bug #35): Stop/anulare cu cardul deschis
     try {
       if (pendingEl) setPendingText(msg.text || '(stopped)');
     } finally {
@@ -2059,6 +2120,11 @@ window.addEventListener('message', (event) => {
     }
     addLoginRequiredCard(msg.text || '');
     setBusy(false);
+    if (!stick) jumpBtn.hidden = false;
+  } else if (msg.type === 'guest_mode') {
+    // v2.5.12 (bug #35): sesiune neautentificată, dar composerul funcționează
+    // (ChatGPT guest mode) → card cu 3 opțiuni; trimiterea așteaptă decizia.
+    addGuestModeCard(msg.text || '');
     if (!stick) jumpBtn.hidden = false;
   } else if (msg.type === 'open_model_menu') {
     // v2.5.1 — FIX A: „Switch provider" din cardul de eroare → meniul de modele
@@ -2119,6 +2185,7 @@ window.addEventListener('message', (event) => {
     renderAttachments();
   } else if (msg.type === 'stream') {
     if (pendingEl) {
+      clearPendingTip(); // v2.5.12 (bug #32)
       const t = String(msg.text || '');
       const disp = t.length > 6000 ? '…\n' + t.slice(-6000) : t;
       renderMarkdown(pendingEl, disp);

@@ -17,9 +17,15 @@ const log = (msg: string) => logLine('selectors', msg);
  *                   cunoscute nu mai găsesc nimic, apoi salvează rezultatul
  * ========================================================================= */
 
-export type SlotName = 'input' | 'response' | 'newChat' | 'stopButton';
+export type SlotName = 'input' | 'response' | 'newChat' | 'stopButton' | 'loggedOut';
 
-export const SLOTS: SlotName[] = ['input', 'response', 'newChat', 'stopButton'];
+/**
+ * Sloturile care pot fi auto-reparate / învățate (healer, AI finder, override-uri).
+ * v2.5.12 (bug #35): `loggedOut` NU e aici, intenționat — un false positive
+ * ar bloca/întreba greșit utilizatorul, deci rămâne doar din config-ul verificat.
+ * (`as const` păstrează tipul restrâns la aceste 4 sloturi, nu tot SlotName.)
+ */
+export const SLOTS = ['input', 'response', 'newChat', 'stopButton'] as const;
 
 /** Semnale "moi" folosite când selectorii CSS nu mai funcționează. */
 export interface Fingerprint {
@@ -59,6 +65,12 @@ export interface ProviderConfig {
   response: SlotConfig;
   newChat: SlotConfig;
   stopButton?: SlotConfig;
+  /**
+   * v2.5.12 (bug #35): elemente care apar DOAR când sesiunea nu e autentificată
+   * (ex: CTA-ul „Log in"/„Sign up" din header/sidebar la ChatGPT). Opțional —
+   * providerii fără intrare aici nu au detecție de guest mode. NU se auto-repară.
+   */
+  loggedOut?: SlotConfig;
 }
 
 export interface SelectorConfig {
@@ -152,11 +164,20 @@ export function selectorsUrlFromSettings(): string {
 
 /** Suprapune un config peste altul (providerii se merge-uiesc per cheie). */
 function mergeConfigs(base: SelectorConfig, overlay: SelectorConfig): SelectorConfig {
+  const providers: Record<string, ProviderConfig> = { ...base.providers, ...overlay.providers };
+  // v2.5.12 (bug #35): un remote mai vechi (fără slotul `loggedOut`) nu are
+  // voie să șteargă detecția de guest mode livrată local.
+  for (const [pid, cfg] of Object.entries(providers)) {
+    const local = base.providers[pid];
+    if (local?.loggedOut && !cfg.loggedOut) {
+      providers[pid] = { ...cfg, loggedOut: local.loggedOut };
+    }
+  }
   return {
     version: overlay.version,
     updated: overlay.updated || base.updated,
     changelog: overlay.changelog,
-    providers: { ...base.providers, ...overlay.providers }
+    providers
   };
 }
 

@@ -292,7 +292,7 @@ export async function ensureGitRepo(
       return {
         ok: false,
         initialized: false,
-        error: rev.error || rev.stderr || 'nu e un repo git'
+        error: rev.error || rev.stderr || 'not a git repo'
       };
     }
     INIT_ATTEMPTED.add(key);
@@ -304,7 +304,7 @@ export async function ensureGitRepo(
       return {
         ok: false,
         initialized: false,
-        error: detail || 'git init a eșuat (git lipsește?)'
+        error: detail || 'git init failed (is git missing?)'
       };
     }
 
@@ -436,10 +436,10 @@ export async function restoreToCheckpoint(
 }> {
   try {
     if (!GIT_HASH_RE.test(String(checkpointId ?? ''))) {
-      return { ok: false, error: 'id de checkpoint invalid: ' + checkpointId };
+      return { ok: false, error: 'invalid checkpoint id: ' + checkpointId };
     }
     const gitDir = await gitRun(root, ['rev-parse', '--git-dir']);
-    if (!gitDir.ok) return { ok: false, error: 'nu e un proiect git' };
+    if (!gitDir.ok) return { ok: false, error: 'not a git project' };
 
     // 1. backup al stării curente (safety) — doar dacă working tree-ul e dirty
     let backupId: string | undefined;
@@ -447,10 +447,10 @@ export async function restoreToCheckpoint(
     if (status.ok && status.stdout.trim()) {
       const add = await gitRun(root, ['add', '-A']);
       if (!add.ok) {
-        return { ok: false, error: 'git add -A a eșuat: ' + (add.stderr || add.error || '') };
+        return { ok: false, error: 'git add -A failed: ' + (add.stderr || add.error || '') };
       }
       if (!(await gitCommit(root, 'freekit-backup-before-restore:' + Date.now(), false))) {
-        return { ok: false, error: 'commit-ul de backup a eșuat (verifică git user.name/email)' };
+        return { ok: false, error: 'the backup commit failed (check git user.name/email)' };
       }
       const head = await gitRun(root, ['rev-parse', 'HEAD']);
       if (head.ok && GIT_HASH_RE.test(head.stdout.trim())) {
@@ -462,7 +462,7 @@ export async function restoreToCheckpoint(
     const reset = await gitRun(root, ['reset', '--hard', checkpointId]);
     if (!reset.ok) {
       const detail = (reset.stderr || reset.error || '').split('\n')[0];
-      return { ok: false, error: 'git reset --hard a eșuat: ' + detail };
+      return { ok: false, error: 'git reset --hard failed: ' + detail };
     }
 
     // 3. raportează eventualele fișiere neignorate rămase după reset

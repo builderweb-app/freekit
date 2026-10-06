@@ -545,7 +545,7 @@ export class BrowserManager {
       if (!ctx) {
         return {
           ok: false,
-          message: 'Chrome rulează, dar nu are nicio fereastră (context) disponibilă.'
+          message: 'Chrome is running but has no window (context) available.'
         };
       }
       const pages = ctx.pages().filter((p) => !p.isClosed());
@@ -554,7 +554,7 @@ export class BrowserManager {
       if (!moved) {
         return {
           ok: false,
-          message: 'CDP nu a putut muta fereastra Chrome în ecran.'
+          message: 'CDP could not move the Chrome window on screen.'
         };
       }
       log('show: fereastra adusă în față');
@@ -565,7 +565,7 @@ export class BrowserManager {
           : 'Chrome was started and the window is now visible.'
       };
     } catch (e: any) {
-      const msg = 'Nu am putut afișa Chrome: ' + (e?.message ?? String(e));
+      const msg = 'Could not show Chrome: ' + (e?.message ?? String(e));
       log(msg);
       return { ok: false, message: msg };
     }
@@ -626,7 +626,7 @@ export class BrowserManager {
       if (!ctx) {
         return {
           ok: false,
-          message: 'Chrome rulează, dar nu are nicio fereastră (context).'
+          message: 'Chrome is running but has no window (context).'
         };
       }
       const pages = ctx.pages().filter((p) => !p.isClosed());
@@ -635,7 +635,7 @@ export class BrowserManager {
       log('hideToBackground: fereastra minimizată (fundal)');
       return { ok: true, message: 'The Chrome window has returned to the background (minimized).' };
     } catch (e: any) {
-      const msg = 'Nu am putut ascunde Chrome: ' + (e?.message ?? String(e));
+      const msg = 'Could not hide Chrome: ' + (e?.message ?? String(e));
       log(msg);
       return { ok: false, message: msg };
     }

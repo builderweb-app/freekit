@@ -1,7 +1,7 @@
 {
-  "version": "1.5.1",
-  "updated": "2026-10-05",
-  "changelog": "v1.5.1: selectoare Gemini igienizate — eliminate `textarea` și `button[aria-label*=…]` (moarte, elementul „New chat” e `<a>`), adăugate alternative stabile pe role/aria/data-* (`[role='textbox'][contenteditable='true']`, `[aria-label='Enter a prompt for Gemini']`, `a[data-test-id='side-nav-sparkle-button']`); health check-ul nu mai raportează fals `not_found` pe pagini non-app (bug #34). v1.5.0: providerul Kimi eliminat — site-ul a migrat la kimi.ai, iar selectorii pentru kimi.com nu mai funcționează (fără cont de testare pe kimi.ai).",
+  "version": "1.5.2",
+  "updated": "2026-10-06",
+  "changelog": "v1.5.2: new `loggedOut` slot for ChatGPT (bug #35) — detects the visible „Log in”/„Sign up for free” CTAs (header/aside) on the logged-out page, including the guest mode where the composer still works; validated live against the real page. v1.5.1: Gemini selectors cleaned up — removed the dead `textarea` and `button[aria-label*=…]` candidates (the „New chat” element is an `<a>`), added stable role/aria/data-* alternatives (`[role='textbox'][contenteditable='true']`, `[aria-label='Enter a prompt for Gemini']`, `a[data-test-id='side-nav-sparkle-button']`); the health check no longer reports a false `not_found` on non-app pages (bug #34). v1.5.0: the Kimi provider was removed — the site migrated to kimi.ai and the kimi.com selectors no longer work (no test account on kimi.ai).",
   "providers": {
     "deepseek": {
       "url": "https://chat.deepseek.com/",
@@ -240,6 +240,14 @@
           "nearbyText": ["Stop", "Stop streaming"],
           "position": "bottom"
         }
+      },
+      "loggedOut": {
+        "primary": "header button:text-is('Log in')",
+        "alternatives": [
+          "aside button:text-is('Log in')",
+          "header button:text-is('Sign up for free')",
+          "aside button:text-is('Sign up for free')"
+        ]
       }
     },
 

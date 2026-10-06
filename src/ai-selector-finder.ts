@@ -252,7 +252,7 @@ export async function findSelectorsWithAI(
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         controller.abort();
-        reject(new Error('timeout după ' + Math.round(settings.timeoutMs / 1000) + 's'));
+        reject(new Error('timeout after ' + Math.round(settings.timeoutMs / 1000) + 's'));
       }, settings.timeoutMs);
     });
     const reply = await Promise.race([work, timeout]);

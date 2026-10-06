@@ -497,6 +497,63 @@ pre.code code {
   background: var(--vscode-button-secondaryHoverBackground, #45494e);
 }
 
+/* ===== v2.5.12 (bug #35): card „guest mode" (provider nelogat, composer activ) ===== */
+.notice.guest-mode {
+  border-style: solid;
+  border-left: 3px solid var(--vscode-editorWarning-foreground, #d29922);
+  color: var(--vscode-foreground);
+  align-self: stretch;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.guest-mode-text {
+  white-space: pre-line;
+}
+
+.guest-mode-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.guest-btn {
+  padding: 5px 14px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  transition: all 0.1s ease;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.guest-btn:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+.guest-cancel-btn {
+  padding: 5px 14px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  transition: all 0.1s ease;
+  background: transparent;
+  color: var(--vscode-foreground);
+}
+
+.guest-cancel-btn:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(90, 93, 94, 0.31));
+}
+
 /* ===== v2.5.1 — FIX 2b: card „provider error" (mesaje epuizate / rate limit) ===== */
 .provider-error-card {
   padding: 12px;

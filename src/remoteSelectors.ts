@@ -166,10 +166,13 @@ export function normalizeRemoteConfig(raw: any): SelectorConfig {
     const response = normalizeSlot(praw.response, 'response', pid, errors);
     const newChat = normalizeSlot(praw.newChat, 'newChat', pid, errors);
     const stopButton = normalizeSlot(praw.stopButton, 'stopButton', pid, errors, true);
+    // v2.5.12 (bug #35): detecția de guest mode (opțională, per provider)
+    const loggedOut = normalizeSlot(praw.loggedOut, 'loggedOut', pid, errors, true);
     if (input) cfg.input = input;
     if (response) cfg.response = response;
     if (newChat) cfg.newChat = newChat;
     if (stopButton) cfg.stopButton = stopButton;
+    if (loggedOut) cfg.loggedOut = loggedOut;
     if (cfg.url && cfg.input && cfg.response && cfg.newChat) {
       providers[pid] = cfg as ProviderConfig;
     }

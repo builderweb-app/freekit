@@ -65,6 +65,7 @@ import { detectProject, formatProjectInfo } from './project';
 import { initLogChannel, logLine } from './log';
 import {
   detectCaptcha,
+  detectLoggedOut,
   isLoginRequiredError,
   isLoginUrl,
   isProviderRootUrl,
@@ -76,6 +77,7 @@ import { runVerification, createPromptCheckpoint, restoreToCheckpoint, Checkpoin
 import { ConversationStore, ConversationMessage } from './conversations';
 import { detectDirectWrite } from './directWrite';
 import { EditRollback } from './rollback';
+import { waitForAbort } from './mutation';
 import {
   RESTRICTED_BLOCKED_NOTICE,
   RESTRICTED_NOTICE,
@@ -336,6 +338,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /** v2.0.5: Chrome a fost adus automat în față pentru login — îl trimitem înapoi
    *  în fundal la următorul mesaj (randarea nu mai are nevoie de el vizibil). */
   private chromeShownForLogin = false;
+  /**
+   * v2.5.12 (bug #35): „Continue as guest" confirmat pentru providerul X în
+   * sesiunea curentă — nu mai întrebăm la fiecare mesaj.
+   */
+  private guestModeAck = new Set<string>();
+  /** v2.5.12 (bug #35): resolver-ul întrebării curente din cardul de guest mode. */
+  private guestDecision?: (choice: 'show' | 'guest' | 'cancel') => void;
   /** v0.2.1: aprobă automat toate operațiile care necesită confirmare. */
   private autoApprove = false;
   /** v0.4.0: guard anti-suprapunere pentru verificarea de status. */
@@ -1261,6 +1270,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    // v2.5.12 (bug #35): decizia din cardul „guest mode" (ChatGPT fără cont)
+    if (msg.type === 'guest_decision') {
+      const raw = String(msg.choice ?? '');
+      let choice: 'show' | 'guest' | 'cancel' = 'cancel';
+      if (raw === 'show' || raw === 'guest') choice = raw;
+      const resolve = this.guestDecision;
+      this.guestDecision = undefined;
+      if (resolve) resolve(choice);
+      return;
+    }
+
     // v2.0.4: butonul Retry din cardul „login required" — reia ultimul prompt
     // fără să dubleze mesajul în istoric și fără să re-consume atașamentele.
     // v2.5.1 — FIX 2c: același flux deservește și butonul „Retry" din cardul
@@ -1488,7 +1508,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const sendOpts = {
         files: uploads.length ? uploads : undefined,
         onProgress,
-        onNotice
+        onNotice,
+        // v2.5.12 (bug #35): guest mode (ChatGPT fără cont) → card cu decizie
+        onLoggedOut: (id: string) => this.handleGuestMode(id, signal)
       };
 
       // v0.4.0: primul mesaj — Auto încearcă lanțul (browser → Ollama) pe rând
@@ -1725,9 +1747,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
 
         log('tool call #' + iterations + '/' + MAX_ITERATIONS + ': ' + toolCall.tool);
+        // v2.5.12 (bug #26 + #32): EN string; „X of 40" e iterația din bucla
+        // agentică (nu numărul de încercări) — clarificat și prin tooltip în chat.js
         this.post(
           'status',
-          '⚙️ Pasul ' + iterations + '/' + MAX_ITERATIONS + ': ' + toolCall.tool
+          '⚙️ Step ' + iterations + ' of ' + MAX_ITERATIONS + ': ' + toolCall.tool
         );
 
         // v1.7.1: verbose — decizia (unealta aleasă) + execuția care începe
@@ -2269,6 +2293,122 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (url && !isLoginUrl(url)) {
         loggedIn = true;
         break;
+      }
+      await sleep(LOGIN_POLL_MS);
+    }
+
+    await this.browser.hideOffscreen();
+    if (this.abortRequested || signal.aborted) throw new Error('__ABORTED__');
+    if (loggedIn) {
+      this.post('notice', '✅ Login detected — Chrome is back in the background, continuing.');
+      return true;
+    }
+    this.post(
+      'notice',
+      '⏱ Login not detected within ' +
+        Math.round(LOGIN_WAIT_MS / 60000) +
+        ' min — Chrome is back in the background. Log in, then send the message again.'
+    );
+    return false;
+  }
+
+  /* ======================================================================
+   * v2.5.12 (bug #35) — GUEST MODE (ChatGPT fără cont)
+   * Providerul afișează CTA-ul de login („Log in"/„Sign up for free"), DAR
+   * composerul funcționează (câteva mesaje gratuite) → findInput() reușește,
+   * deci verificarea de login din el nu se execută. NU blocăm (guest mode e
+   * legitim): card cu 3 opțiuni — Show Browser / Continue as guest / Cancel.
+   * „Continue as guest" se ține minte per sesiune (nu întrebăm la fiecare mesaj).
+   * ==================================================================== */
+
+  /** Întreabă utilizatorul (card) și execută decizia; întoarce 'continue'/'cancel'. */
+  private async handleGuestMode(
+    providerId: string,
+    signal: AbortSignal
+  ): Promise<'continue' | 'cancel'> {
+    if (this.guestModeAck.has(providerId)) return 'continue';
+    // fără webview nu putem întreba nimic — nu blocăm trimiterea
+    if (!this.view) return 'continue';
+    const label = PROVIDER_LABELS[providerId] ?? providerId;
+    const choice = await this.askGuestMode(label, signal);
+    if (choice === 'guest') {
+      this.guestModeAck.add(providerId);
+      return 'continue';
+    }
+    if (choice === 'cancel') {
+      this.post(
+        'notice',
+        '⏹ Message not sent — ' + label + ' is not logged in.'
+      );
+      return 'cancel';
+    }
+    // 'show' → Chrome în față, așteptăm login-ul (indicatorul dispare)
+    const page = this.active?.page;
+    const ok = page
+      ? await this.waitForLoginIndicator(label, providerId, page, signal)
+      : false;
+    if (!ok) return 'cancel';
+    this.guestModeAck.add(providerId);
+    return 'continue';
+  }
+
+  /** Cardul din chat cu 3 opțiuni; Stop (abort) echivalează cu Cancel. */
+  private askGuestMode(
+    label: string,
+    signal: AbortSignal
+  ): Promise<'show' | 'guest' | 'cancel'> {
+    return new Promise((resolve) => {
+      this.guestDecision = resolve;
+      this.post(
+        'guest_mode',
+        '⚠️ ' + label + ' is not logged in — running in guest mode ' +
+          '(messages are not saved to an account and limits apply).\n' +
+          'Log in for the full experience, or continue as guest.'
+      );
+      void waitForAbort(signal).then(() => {
+        if (this.guestDecision === resolve) {
+          this.guestDecision = undefined;
+          resolve('cancel');
+        }
+      });
+    });
+  }
+
+  /**
+   * Aduce Chrome în față și așteaptă dispariția indicatorului de „nelogat"
+   * (nu doar schimbarea URL-ului — pe chatgpt.com URL-ul rămâne neschimbat).
+   */
+  private async waitForLoginIndicator(
+    label: string,
+    providerId: string,
+    page: Page,
+    signal: AbortSignal
+  ): Promise<boolean> {
+    this.post(
+      'notice',
+      '🔐 ' + label + ': the Chrome window was brought to the front — log in there; ' +
+        'I continue automatically after login.'
+    );
+    const shown = await this.browser.showTemporarily(LOGIN_WAIT_MS);
+    if (!shown.ok) {
+      this.post(
+        'notice',
+        '⚠️ ' + shown.message + ' (you can also use the 🌐 Show Browser button).'
+      );
+    }
+
+    const deadline = Date.now() + LOGIN_WAIT_MS;
+    let loggedIn = false;
+    while (Date.now() < deadline) {
+      if (this.abortRequested || signal.aborted) break;
+      try {
+        const url = page.url();
+        if (!isLoginUrl(url) && !(await detectLoggedOut(page, providerId))) {
+          loggedIn = true;
+          break;
+        }
+      } catch {
+        /* pagina poate fi în tranziție (auth.openai.com etc.) */
       }
       await sleep(LOGIN_POLL_MS);
     }

@@ -208,13 +208,13 @@ export async function resolveWhisper(
 
   if (!cliPath || !modelPath) {
     const hints: string[] = [
-      'Rulează comanda „Freekit: Setup Local Whisper” (descarcă whisper.cpp + modelul ggml-base o singură dată, ~160 MB).',
-      'Sau setează manual freekit.whisperCliPath și freekit.whisperModelPath.'
+      'Run the "Freekit: Setup Local Whisper" command (downloads whisper.cpp + the ggml-base model once, ~160 MB).',
+      'Or set freekit.whisperCliPath and freekit.whisperModelPath manually.'
     ];
     if (!cliPath) {
-      return { ok: false, error: 'Whisper CLI (whisper-cli) nu a fost găsit.', hints };
+      return { ok: false, error: 'Whisper CLI (whisper-cli) was not found.', hints };
     }
-    return { ok: false, error: 'Modelul ggml pentru Whisper nu a fost găsit.', hints };
+    return { ok: false, error: 'The Whisper ggml model was not found.', hints };
   }
   log('rezolvat: cli=' + cliPath + ' (' + source + '), model=' + modelPath);
   return { ok: true, cliPath, modelPath, source, hints: [] };
@@ -229,7 +229,7 @@ async function downloadFile(
 ): Promise<void> {
   const res = await fetch(url, { redirect: 'follow' });
   if (!res.ok || !res.body) {
-    throw new Error('HTTP ' + res.status + ' pentru ' + url);
+    throw new Error('HTTP ' + res.status + ' for ' + url);
   }
   const total = Number(res.headers.get('content-length') || 0);
   const st = fs.createWriteStream(dest);
@@ -255,7 +255,7 @@ async function downloadFile(
     await new Promise<void>((resolve) => st.end(() => resolve()));
   }
   if (total && got < total) {
-    throw new Error('Descărcare incompletă (' + got + '/' + total + ' bytes).');
+    throw new Error('Incomplete download (' + got + '/' + total + ' bytes).');
   }
 }
 
@@ -282,7 +282,7 @@ async function extractZip(zipPath: string, destDir: string): Promise<void> {
         ? resolve()
         : reject(
             new Error(
-              'Extragerea zip a eșuat (cod ' + code + ')' +
+              'Zip extraction failed (code ' + code + ')' +
                 (err ? ': ' + err.trim().slice(-300) : '')
             )
           )
@@ -310,7 +310,7 @@ export async function setupWhisperAssets(
     if (!findExecutable(binDir, exe)) {
       log('setup: descarc binarele whisper.cpp...');
       const zipPath = path.join(binDir, 'whisper-bin.zip');
-      await downloadFile(WHISPER_BIN_ZIP_URL, zipPath, onProgress, 'Binare whisper.cpp');
+      await downloadFile(WHISPER_BIN_ZIP_URL, zipPath, onProgress, 'whisper.cpp binaries');
       await extractZip(zipPath, binDir);
       try {
         fs.unlinkSync(zipPath);
@@ -324,7 +324,7 @@ export async function setupWhisperAssets(
     const modelFile = path.join(modelsDir, 'ggml-base.bin');
     if (!existsFile(modelFile) || fs.statSync(modelFile).size < 10 * 1024 * 1024) {
       log('setup: descarc modelul ggml-base.bin...');
-      await downloadFile(WHISPER_MODEL_URL, modelFile, onProgress, 'Model ggml-base');
+      await downloadFile(WHISPER_MODEL_URL, modelFile, onProgress, 'ggml-base model');
     } else {
       log('setup: modelul există deja — sar peste descărcare');
     }
@@ -338,7 +338,7 @@ export async function setupWhisperAssets(
     log('setup: eroare — ' + msg);
     return {
       ok: false,
-      error: 'Setup Whisper a eșuat: ' + msg,
+      error: 'Whisper setup failed: ' + msg,
       hints: [],
       downloaded
     };
@@ -357,7 +357,7 @@ export async function transcribeAudioFile(
   if (!assets.ok || !assets.cliPath || !assets.modelPath) {
     return {
       ok: false,
-      error: assets.error ?? 'Whisper indisponibil.',
+      error: assets.error ?? 'Whisper is unavailable.',
       hints: assets.hints
     };
   }
@@ -438,7 +438,7 @@ export async function transcribeAudioFile(
     return {
       ok: false,
       error:
-        'Transcrierea a depășit ' + Math.round(timeoutMs / 1000) + 's (timeout).',
+        'Transcription exceeded ' + Math.round(timeoutMs / 1000) + 's (timeout).',
       hints: []
     };
   }
@@ -447,7 +447,7 @@ export async function transcribeAudioFile(
     return {
       ok: false,
       error:
-        'whisper-cli a ieșit cu codul ' + res.code + (tail ? ': ' + tail : ''),
+        'whisper-cli exited with code ' + res.code + (tail ? ': ' + tail : ''),
       hints: []
     };
   }

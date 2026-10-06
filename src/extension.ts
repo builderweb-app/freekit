@@ -254,7 +254,7 @@ export async function activate(ctx: vscode.ExtensionContext) {
       await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: 'Freekit: setup Whisper local (offline STT)',
+          title: 'Freekit: local Whisper setup (offline STT)',
           cancellable: false
         },
         async (prog) => {

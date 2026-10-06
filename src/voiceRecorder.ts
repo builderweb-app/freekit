@@ -138,12 +138,12 @@ export async function detectVoiceBackend(): Promise<VoiceBackendKind | null> {
 export async function voiceBackendInfo(): Promise<string> {
   const backend = await detectVoiceBackend();
   if (backend === 'windows-wavein') {
-    return 'Windows nativ — PowerShell + winmm (waveIn), zero dependențe externe';
+    return 'Native Windows — PowerShell + winmm (waveIn), zero external dependencies';
   }
   if (backend === 'sox') {
-    return 'SoX (node-audiorecorder / `rec` din PATH)';
+    return 'SoX (node-audiorecorder / `rec` from PATH)';
   }
-  return 'INDISPONIBIL — Windows PowerShell lipsește și SoX (`rec`/`sox`) nu e instalat';
+  return 'UNAVAILABLE — Windows PowerShell is missing and SoX (`rec`/`sox`) is not installed';
 }
 
 /* =========================================================================
@@ -446,18 +446,18 @@ public sealed class FreekitWavRecorder : IDisposable
     {
         switch (code)
         {
-            case 1: return "eroare interna audio (1)";
-            case 2: return "ID de dispozitiv invalid (2)";
-            case 4: return "dispozitivul e deja folosit de alt program (4)";
-            case 5: return "handle invalid (5)";
-            case 6: return "niciun dispozitiv de inregistrare gasit (6) - conecteaza un microfon";
-            case 7: return "memorie insuficienta (7)";
-            case 8: return "functie nesuportata (8)";
-            case 11: return "parametru invalid (11)";
-            case 32: return "format audio nesuportat (32)";
-            case 33: return "recorder-ul inca ruleaza (33)";
-            case 34: return "buffer nepreparat (34)";
-            default: return "cod " + code;
+            case 1: return "audio internal error (1)";
+            case 2: return "invalid device ID (2)";
+            case 4: return "the device is already in use by another program (4)";
+            case 5: return "invalid handle (5)";
+            case 6: return "no recording device found (6) - connect a microphone";
+            case 7: return "out of memory (7)";
+            case 8: return "function not supported (8)";
+            case 11: return "invalid parameter (11)";
+            case 32: return "unsupported audio format (32)";
+            case 33: return "the recorder is already running (33)";
+            case 34: return "buffer not prepared (34)";
+            default: return "code " + code;
         }
     }
 }
@@ -466,7 +466,7 @@ public sealed class FreekitWavRecorder : IDisposable
 try {
   Add-Type -TypeDefinition $source -Language CSharp | Out-Null
 } catch {
-  [Console]::Error.WriteLine('RECORDER ERROR: compilarea recorder-ului a esuat: ' + $_.Exception.Message)
+  [Console]::Error.WriteLine('RECORDER ERROR: failed to compile the recorder: ' + $_.Exception.Message)
   exit 2
 }
 
@@ -566,7 +566,7 @@ class WindowsCapture implements VoiceCapture {
 
     this.child.on('error', (e: any) => {
       // najungem niciodată la READY (ex: powershell.exe lipsește)
-      const err = new Error('PowerShell nu a putut porni: ' + (e?.message ?? String(e)));
+      const err = new Error('PowerShell failed to start: ' + (e?.message ?? String(e)));
       if (!this.readyReached) {
         this.rejectReady(err);
       }
@@ -580,7 +580,7 @@ class WindowsCapture implements VoiceCapture {
       if (!this.readyReached) {
         this.rejectReady(
           new Error(
-            'Recorderul s-a oprit înainte de READY (cod ' +
+            'Recorder stopped before READY (code ' +
               code +
               ')' +
               (this.stderrTail() ? ': ' + this.stderrTail() : '')
@@ -612,12 +612,12 @@ class WindowsCapture implements VoiceCapture {
     let error: string | undefined;
     if (!ok) {
       if (!this.readyReached) {
-        error = 'microfonul nu a pornit' + (this.stderrTail() ? ' — ' + this.stderrTail() : '');
+        error = 'the microphone did not start' + (this.stderrTail() ? ' — ' + this.stderrTail() : '');
       } else if (this.exitCode !== 0) {
         error =
-          'recorderul a ieșit cu cod ' + this.exitCode + (this.stderrTail() ? ' — ' + this.stderrTail() : '');
+          'the recorder exited with code ' + this.exitCode + (this.stderrTail() ? ' — ' + this.stderrTail() : '');
       } else {
-        error = 'fișierul audio nu a fost scris';
+        error = 'the audio file was not written';
       }
     }
     return {
@@ -639,7 +639,7 @@ class WindowsCapture implements VoiceCapture {
         } catch {
           /* procesul poate fi deja încheiat */
         }
-        throw new Error('Pornirea microfonului a expirat (' + timeoutMs + ' ms).');
+        throw new Error('Microphone startup timed out (' + timeoutMs + ' ms).');
       }
     });
     await Promise.race([this.readyPromise, timeout]);
@@ -765,7 +765,7 @@ class SoxCapture implements VoiceCapture {
     this.recorder.start();
     const stream = this.recorder.stream();
     if (!stream) {
-      throw new Error('node-audiorecorder nu a putut porni (lipsește SoX / `rec`).');
+      throw new Error('node-audiorecorder could not start (SoX / `rec` is missing).');
     }
     this.ws = fs.createWriteStream(outFile);
     stream.pipe(this.ws);
@@ -774,7 +774,7 @@ class SoxCapture implements VoiceCapture {
   async waitReady(): Promise<void> {
     await delay(1500);
     if (this.firstError) {
-      throw new Error('SoX / `rec` nu a pornit: ' + this.firstError.message);
+      throw new Error('SoX / `rec` failed to start: ' + this.firstError.message);
     }
   }
 
@@ -813,7 +813,7 @@ class SoxCapture implements VoiceCapture {
             ? undefined
             : this.firstError
               ? 'SoX / `rec`: ' + this.firstError.message
-              : 'fișierul audio nu a fost scris'
+              : 'the audio file was not written'
         };
       })();
     }
@@ -855,7 +855,7 @@ export async function startVoiceCapture(opts: StartVoiceOptions): Promise<VoiceC
   const backend = await detectVoiceBackend();
   if (!backend) {
     throw new Error(
-      'Niciun backend de captare audio: Windows PowerShell (nativ) sau SoX (`rec`/`sox` în PATH) nu au fost găsite.'
+      'No audio capture backend found: Windows PowerShell (native) or SoX (`rec`/`sox` in PATH) were not found.'
     );
   }
   const maxSeconds = Math.max(5, Math.min(3600, Math.floor(opts.maxSeconds ?? 600)));

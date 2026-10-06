@@ -353,6 +353,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private guestModeAck = new Set<string>();
   /** v2.5.12 (bug #35): resolver-ul întrebării curente din cardul de guest mode. */
   private guestDecision?: (choice: 'show' | 'guest' | 'cancel') => void;
+  /**
+   * v2.5.15 (bug #41): resolver-ul întrebării din cardul „Chat memory full"
+   * (continuăm într-un chat nou sau ne oprim).
+   */
+  private memoryFullDecision?: (choice: 'continue' | 'cancel') => void;
   /** v0.2.1: aprobă automat toate operațiile care necesită confirmare. */
   private autoApprove = false;
   /** v0.4.0: guard anti-suprapunere pentru verificarea de status. */
@@ -1289,6 +1294,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    // v2.5.15 (bug #41): decizia din cardul „Chat memory full" (context epuizat)
+    if (msg.type === 'memory_full_decision') {
+      const raw = String(msg.choice ?? '');
+      const resolve = this.memoryFullDecision;
+      this.memoryFullDecision = undefined;
+      if (resolve) resolve(raw === 'continue' ? 'continue' : 'cancel');
+      return;
+    }
+
     // v2.0.4: butonul Retry din cardul „login required" — reia ultimul prompt
     // fără să dubleze mesajul în istoric și fără să re-consume atașamentele.
     // v2.5.1 — FIX 2c: același flux deservește și butonul „Retry" din cardul
@@ -1518,7 +1532,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         onProgress,
         onNotice,
         // v2.5.12 (bug #35): guest mode (ChatGPT fără cont) → card cu decizie
-        onLoggedOut: (id: string) => this.handleGuestMode(id, signal)
+        onLoggedOut: (id: string) => this.handleGuestMode(id, signal),
+        // v2.5.15 (bug #41): „Chat memory full" → card „New chat & continue"
+        onMemoryFull: (id: string) => this.handleMemoryFull(id, signal)
       };
 
       // v0.4.0: primul mesaj — Auto încearcă lanțul (browser → Ollama) pe rând
@@ -2000,6 +2016,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (this.abortRequested || e?.message === '__ABORTED__') {
         log('aborted during send');
         this.post('stopped', '');
+      } else if (e instanceof DetectedProviderError && e.details.kind === 'memory_full') {
+        // v2.5.15 (bug #41): utilizatorul a ales Stop în cardul „Chat memory
+        // full" (sau cardul nu a putut fi afișat). Chatul plin rămâne plin —
+        // uităm referința, ca următorul mesaj să pornească automat un chat nou.
+        log('memory full — stopped; the next message will start a new chat');
+        await this.conversations.clearBrowserChat().catch(() => {});
+        const label = PROVIDER_LABELS[e.providerId] ?? e.providerId;
+        this.post(
+          'notice',
+          '⏹ Stopped — ' + label + "'s chat is full (context limit). " +
+            'The next message will start a new chat.'
+        );
+        return;
       } else if (e instanceof DetectedProviderError) {
         // v2.5.1: eroare de provider detectată (mesaje gratuite epuizate,
         // rate limit, CAPTCHA) — nu mai arătăm un timeout sec, ci un mesaj
@@ -2426,6 +2455,98 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
       });
     });
+  }
+
+  /* ======================================================================
+   * v2.5.15 (bug #41) — CHAT MEMORY FULL (contextul chatului s-a epuizat)
+   * ChatGPT free (~8k tokens) afișează „Chat memory full — continue in a new
+   * chat" și nu mai răspunde; fără detecție, bucla agentică trimitea nudge-uri
+   * până la timeout. Cardul de mai jos întreabă utilizatorul; pe „New chat &
+   * continue", base.ts deschide un chat nou, retrimite mesajul curent cu un
+   * handoff din istoricul conversației și continuă bucla acolo.
+   * ==================================================================== */
+
+  /** Întreabă utilizatorul (card) și întoarce decizia + handoff-ul de context. */
+  private async handleMemoryFull(
+    providerId: string,
+    signal: AbortSignal
+  ): Promise<{ action: 'continue'; prefix?: string } | { action: 'cancel' }> {
+    const label = PROVIDER_LABELS[providerId] ?? providerId;
+    // fără webview nu putem întreba nimic — oprim cu mesajul tipizat
+    if (!this.view) return { action: 'cancel' };
+    const choice = await this.askMemoryFull(label, signal);
+    if (choice !== 'continue') return { action: 'cancel' };
+    return { action: 'continue', prefix: this.buildMemoryFullHandoff(label) };
+  }
+
+  /** Cardul din chat cu 2 opțiuni; Stop (abort) echivalează cu Stop. */
+  private askMemoryFull(
+    label: string,
+    signal: AbortSignal
+  ): Promise<'continue' | 'cancel'> {
+    return new Promise((resolve) => {
+      this.memoryFullDecision = resolve;
+      this.post(
+        'memory_full',
+        '⚠️ ' + label + ' reached its chat context limit ("Chat memory full") ' +
+          'and stopped answering.\n' +
+          'Freekit can start a new chat and continue the task there — the new ' +
+          'chat gets a short handoff from this conversation.'
+      );
+      void waitForAbort(signal).then(() => {
+        if (this.memoryFullDecision === resolve) {
+          this.memoryFullDecision = undefined;
+          resolve('cancel');
+        }
+      });
+    });
+  }
+
+  /**
+   * Handoff compact pentru chatul nou: sarcina inițială + ultimii pași ai
+   * conversației (tool call-urile devin „action: <tool> <target>", ca JSON-ul
+   * brut să nu umple din nou contextul). Evită intenționat frazele-detectoare
+   * („chat memory full"), ca mesajul reluat să nu fie confundat cu bannerul.
+   */
+  private buildMemoryFullHandoff(label: string): string {
+    try {
+      const msgs = this.conversations.getActive()?.messages ?? [];
+      if (!msgs.length) return '';
+      const clip = (s: string, max: number): string => {
+        const t = String(s ?? '').replace(/\s+/g, ' ').trim();
+        return t.length > max ? t.slice(0, max) + '…' : t;
+      };
+      const lines: string[] = [];
+      const task = msgs.find((m) => m.role === 'user');
+      if (task) lines.push('Original task: ' + clip(task.text, 1000));
+      const recap: string[] = [];
+      for (const m of msgs.slice(-10)) {
+        const call = m.role === 'assistant' ? this.parseToolCall(m.text) : null;
+        if (call) {
+          const target =
+            typeof call.args?.target === 'string'
+              ? ' ' + clip(call.args.target, 80)
+              : '';
+          recap.push('ASSISTANT → action: ' + call.tool + target);
+        } else {
+          recap.push(
+            (m.role === 'user' ? 'USER: ' : 'ASSISTANT: ') + clip(m.text, 350)
+          );
+        }
+      }
+      if (recap.length) lines.push('Conversation so far:\n' + recap.join('\n'));
+      const body = clip(lines.join('\n\n'), 4000);
+      return (
+        '[Freekit handoff — the previous ' + label + ' chat ran out of context, ' +
+        'so the task continues in this new chat.]\n\n' +
+        body +
+        '\n\n[End of handoff — continue the task from where it left off; ' +
+        'the next message contains the pending step.]'
+      );
+    } catch (e: any) {
+      log('memory-full handoff build failed: ' + (e?.message ?? String(e)));
+      return '';
+    }
   }
 
   /**

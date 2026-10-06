@@ -15,6 +15,8 @@ export interface ProviderError {
     | 'rate_limit'
     | 'captcha'
     | 'model_missing'
+    /** v2.5.15 (bug #41): contextul chatului s-a epuizat (ChatGPT „Chat memory full"). */
+    | 'memory_full'
     | 'unknown';
   message: string;
   resetTime?: string;
@@ -57,6 +59,18 @@ export function ollamaModelMissing(
 }
 
 /**
+ * v2.5.15 (bug #41): textul afișat de ChatGPT când contextul chatului s-a
+ * epuizat („Chat memory full — continue in a new chat", „memory limit
+ * reached"). Folosit atât de detecția din `detectProviderError` (scanul de
+ * pagină), cât și direct de `sendAndWait` pe textul citit din răspuns.
+ */
+export function isMemoryFullText(text: string): boolean {
+  return /chat memory full|continue in a new chat|memory limit reached/i.test(
+    String(text ?? '')
+  );
+}
+
+/**
  * v2.5.1: detectează erorile cunoscute în textul brut (răspuns extras din DOM
  * sau textul paginii). Întoarce `null` dacă nu recunoaște nicio eroare.
  */
@@ -65,6 +79,14 @@ export function detectProviderError(
   providerId: string
 ): ProviderError | null {
   if (!rawText) return null;
+
+  // v2.5.15 (bug #41): contextul chatului s-a epuizat (ChatGPT free ~8k
+  // tokens). Bannerul nu intră în selectorii de răspuns, deci fără detecție
+  // agentic loop-ul continua să trimită nudges într-un chat care nu mai poate
+  // răspunde, până la timeout.
+  if (isMemoryFullText(rawText)) {
+    return { kind: 'memory_full', message: 'Chat context limit reached.' };
+  }
 
   // v2.5.11 (bug #25): Ollama — modelul cerut nu e instalat.
   // Corpul răspunsului: `{"error":"model \"x\" not found, try pulling it first"}`.
@@ -159,6 +181,12 @@ export function providerErrorMessage(
       return (
         name +
         ' requires CAPTCHA verification ("I\'m not a robot"). Solve it in the Chrome window, then retry.'
+      );
+    case 'memory_full':
+      return (
+        name +
+        ' reached its context limit ("Chat memory full"), so it stopped answering. ' +
+        'Start a new chat and continue the task there.'
       );
     case 'model_missing':
       return (

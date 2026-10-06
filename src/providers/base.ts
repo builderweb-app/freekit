@@ -22,6 +22,7 @@ import { autoAcceptPopups } from '../popups';
 import {
   DetectedProviderError,
   detectProviderError,
+  isMemoryFullText,
   ProviderError
 } from '../providerErrors';
 
@@ -33,6 +34,9 @@ const HEAL_CHECKPOINTS = [4000, 9000, 20000, 40000];
 /** v0.8.0: bugetul total de așteptare + pragul de stabilitate a textului. */
 const HARD_TIMEOUT_MS = 150_000;
 const STABLE_MS = 2000;
+
+/** v2.5.15 (bug #41): câte continuări „new chat" acceptăm per mesaj. */
+const MAX_MEMORY_FULL_RESTARTS = 3;
 
 /** Comparație tolerantă la spații (folosită ca să nu confundăm mesajul nostru). */
 const normalize = (text: string) => text.replace(/\s+/g, ' ').trim();
@@ -861,6 +865,45 @@ export async function sendAndWait(
   // v0.8.0: setările de humanizare (citite o dată per mesaj)
   const human = humanSettings();
 
+  /**
+   * v2.5.15 (bug #41): compune mesajul în composer și îl trimite (Enter).
+   * Extras ca să fie refolosit la continuarea într-un chat nou după „Chat
+   * memory full" — comportamentul e identic cu blocul inline de dinainte.
+   */
+  const composeAndSend = async (text: string): Promise<Locator> => {
+    const box = await findInput(page, providerId, label, 15000);
+    await clickInput(page, box);
+
+    // v2.5.14 (bug #39): un mesaj trunchiat de site lasă restul ca DRAFT în
+    // composer; următoarea trimitere l-ar lipi la mesajul nou (context poluat —
+    // dovedit live pe ChatGPT). Golim înainte de tastare.
+    await clearComposer(page, box, label);
+
+    // v0.8.0: tastare "umană" (evenimente reale de tastatură); v2.0.6: mesajele
+    // lungi tastează natural doar începutul, restul se lipește — vezi humanType.
+    try {
+      if (human.typing) {
+        await humanType(page, text, {}, signal);
+      } else {
+        await page.keyboard.insertText(text);
+      }
+    } catch (e: any) {
+      if ((e?.message ?? String(e)) === '__ABORTED__') {
+        // nu lăsa text parțial în căsuța de input după anulare
+        await clearInputBestEffort(page);
+      }
+      throw e;
+    }
+    await sleep(400);
+
+    // v2.5.14 (bug #39): verificăm că în composer e EXACT mesajul, înainte de
+    // Enter — altfel (trunchiere/draft/paste pierdut) îl relipim dintr-o bucată.
+    await ensureComposerHasMessage(page, box, text, label, cfg.onNotice);
+
+    await page.keyboard.press('Enter');
+    return box;
+  };
+
   let input = await findInput(page, providerId, label, 15000);
   // v2.5.12 (bug #35): ChatGPT fără cont păstrează composerul funcțional
   // (guest mode), deci findInput reușește și verificarea de login din el
@@ -869,43 +912,13 @@ export async function sendAndWait(
   if (cfg.onLoggedOut && (await detectLoggedOut(page, providerId))) {
     const decision = await cfg.onLoggedOut(providerId);
     if (decision !== 'continue') throw new Error('__ABORTED__');
-    // după login pagina se poate reîncărca → re-resolve composerul
-    input = await findInput(page, providerId, label, 15000);
   }
-  await clickInput(page, input);
-
-  // v2.5.14 (bug #39): un mesaj trunchiat de site lasă restul ca DRAFT în
-  // composer; următoarea trimitere l-ar lipi la mesajul nou (context poluat —
-  // dovedit live pe ChatGPT). Golim înainte de tastare.
-  await clearComposer(page, input, label);
-
-  // v0.8.0: tastare "umană" (evenimente reale de tastatură); v2.0.6: mesajele
-  // lungi tastează natural doar începutul, restul se lipește — vezi humanType.
-  try {
-    if (human.typing) {
-      await humanType(page, message, {}, signal);
-    } else {
-      await page.keyboard.insertText(message);
-    }
-  } catch (e: any) {
-    if ((e?.message ?? String(e)) === '__ABORTED__') {
-      // nu lăsa text parțial în căsuța de input după anulare
-      await clearInputBestEffort(page);
-    }
-    throw e;
-  }
-  await sleep(400);
-
-  // v2.5.14 (bug #39): verificăm că în composer e EXACT mesajul, înainte de
-  // Enter — altfel (trunchiere/draft/paste pierdut) îl relipim dintr-o bucată.
-  await ensureComposerHasMessage(page, input, message, label, cfg.onNotice);
-
-  await page.keyboard.press('Enter');
+  input = await composeAndSend(message);
   log(label + ': message sent, waiting for the response...');
 
   // v0.8.0: MutationObserver — "liniștea" din DOM încheie așteptarea instant;
   // cu setarea oprită rămâne polling-ul clasic la 500ms.
-  const observerOk = human.observer ? await installMutationTracker(page) : false;
+  let observerOk = human.observer ? await installMutationTracker(page) : false;
   const aborted = signal ? waitForAbort(signal) : undefined;
 
   let previousText = '';
@@ -917,9 +930,102 @@ export async function sendAndWait(
   // v2.5.12 FIX (bug #36): true după ce am văzut un răspuns NOU (count crescut
   // sau text schimbat) — folosit de „rescue" ca să accepte și un răspuns identic.
   let sawNewResponse = false;
-  const started = Date.now();
+  let started = Date.now();
+  // v2.5.15 (bug #41): textul trimis efectiv în chat (poate include prefixul de
+  // handoff după o continuare) — gardele de ecou se raportează la el.
+  let sentText = message;
+  let memoryFullRestarts = 0;
 
-  while (Date.now() - started < HARD_TIMEOUT_MS) {
+  /**
+   * v2.5.15 (bug #41): „Chat memory full" — contextul chatului s-a epuizat și
+   * providerul nu mai răspunde. Întreabă utilizatorul (cardul din chat); la
+   * „continue" deschide un chat nou, retrimite mesajul curent cu prefixul de
+   * handoff primit de la chatView și resetează sentinelele, ca bucla agentică
+   * să continue acolo. La „cancel" aruncă eroarea tipizată (mesaj clar în chat).
+   */
+  const restartInNewChat = async (): Promise<void> => {
+    memoryFullRestarts++;
+    const decision =
+      cfg.onMemoryFull && memoryFullRestarts <= MAX_MEMORY_FULL_RESTARTS
+        ? await cfg.onMemoryFull(providerId)
+        : ({ action: 'cancel' } as const);
+    if (decision.action !== 'continue') {
+      throw new DetectedProviderError(providerId, {
+        kind: 'memory_full',
+        message: 'Chat context limit reached.'
+      });
+    }
+    const prefix = decision.prefix?.trim();
+    log(label + ': chat memory full — starting a new chat and resending the pending message');
+    cfg.onNotice?.(
+      '🆕 ' + label + ' reached its context limit — continuing in a new chat.'
+    );
+    await newChatVia(page, providerId, label);
+    sentText = prefix ? prefix + '\n\n' + message : message;
+    input = await composeAndSend(sentText);
+    // chat nou → sentinelele repornesc (alt DOM, altă numărătoare de răspunsuri)
+    beforeText = await getLastResponseText(page, responseSelectors);
+    beforeCount = await countAssistantResponses(page, responseSelectors);
+    previousText = '';
+    sawNewResponse = false;
+    lastChangeAt = Date.now();
+    enterRetried = false;
+    healIndex = 0;
+    lastErrorCheckpoint = 0;
+    started = Date.now();
+    if (human.observer) observerOk = await installMutationTracker(page);
+    log(label + ': message sent in the new chat, waiting for the response...');
+  };
+
+  for (;;) {
+    // v2.5.15 (bug #41): bugetul de așteptare s-a consumat → RESCUE + scanul
+    // final de erori. O continuare într-un chat nou (memory full) resetează
+    // `started` și reia bucla.
+    if (Date.now() - started >= HARD_TIMEOUT_MS) {
+      // RESCUE: ultima șansă — extragere generică, ca să nu blocăm utilizatorul
+      const rescuedRaw = await getLastResponseText(
+        page,
+        selectors.candidates(providerId, 'response'),
+        true
+      );
+      const rescued = stripEchoedUserMessage(rescuedRaw, sentText);
+      if (rescued !== rescuedRaw) {
+        log(label + ': stripped echoed user message from AI reply (rescue)');
+      }
+      if (
+        rescued &&
+        rescued.length >= 20 &&
+        (sawNewResponse || rescued !== beforeText) &&
+        !isEchoOf(rescued, sentText)
+      ) {
+        log(label + ': RESCUE generic, ' + rescued.length + ' chars');
+        // v2.5.1: și textul de la „rescue” poate fi un mesaj de eroare al site-ului
+        const detected = detectProviderError(rescued, providerId);
+        if (detected?.kind === 'memory_full') {
+          await restartInNewChat();
+          continue;
+        }
+        if (detected) throwProviderError(providerId, detected, page);
+        // v1.7.1: thinking-ul modelului (best-effort, înainte de return)
+        await emitThinking(page, providerId, sentText, cfg, label);
+        return rescued;
+      }
+
+      // v2.5.1: înainte de timeout-ul sec, verificăm dacă pagina afișează o eroare
+      // cunoscută (banner care nu intră în selectorii de răspuns) — ex: limita de
+      // mesaje gratuite la Claude/ChatGPT.
+      const pageError = await detectProviderErrorOnPage(page, providerId, sentText);
+      if (pageError?.kind === 'memory_full') {
+        await restartInNewChat();
+        continue;
+      }
+      if (pageError) throwProviderError(providerId, pageError, page);
+
+      throw new Error(
+        'Timeout: no stable response from ' + label + ' after 150s.'
+      );
+    }
+
     if (observerOk) {
       await waitStep(page, { quietMs: 900, maxWaitMs: 2500, abort: aborted });
     } else {
@@ -942,13 +1048,13 @@ export async function sendAndWait(
           log(label + ': response selectors work, waiting for the stream');
         }
       } else {
-        const healed = await healSlot(page, providerId, 'response', message);
+        const healed = await healSlot(page, providerId, 'response', sentText);
         if (healed) {
           const probe = await getLastResponseText(
             page,
             selectors.candidates(providerId, 'response')
           );
-          if (probe && isEchoOf(probe, message)) {
+          if (probe && isEchoOf(probe, sentText)) {
             log(label + ': repair rejected (it caught our message) — falling back to JSON');
             selectors.forget(providerId, 'response');
           } else {
@@ -966,7 +1072,13 @@ export async function sendAndWait(
     // clar, în loc să așteptăm 150s pentru un timeout sec.
     if (healIndex > lastErrorCheckpoint) {
       lastErrorCheckpoint = healIndex;
-      const pageError = await detectProviderErrorOnPage(page, providerId, message);
+      const pageError = await detectProviderErrorOnPage(page, providerId, sentText);
+      // v2.5.15 (bug #41): context epuizat („Chat memory full") — nu e o eroare
+      // terminală: întrebăm dacă reluăm într-un chat nou.
+      if (pageError?.kind === 'memory_full') {
+        await restartInNewChat();
+        continue;
+      }
       if (pageError) throwProviderError(providerId, pageError, page);
     }
 
@@ -988,6 +1100,13 @@ export async function sendAndWait(
     const currentText = await getLastResponseText(page, responseSelectors);
     if (!currentText) continue;
 
+    // v2.5.15 (bug #41): bannerul „Chat memory full" (ChatGPT) poate ajunge în
+    // textul citit — contextul e epuizat, așteptarea normală nu mai poate reuși.
+    if (isMemoryFullText(currentText)) {
+      await restartInNewChat();
+      continue;
+    }
+
     // v2.5.12 FIX (bug #36): „răspuns nou" = a apărut o bulă în plus în DOM
     // (count mai mare) SAU textul diferă de cel de dinainte de trimitere. Cu
     // doar textul ca sentinelă, un răspuns IDENTIC cu precedentul (exact același
@@ -999,7 +1118,7 @@ export async function sendAndWait(
     // v2.5.3 FIX 7: providerii care ecouază promptul (DeepSeek) trimit
     // „<mesaj user> \n TOOL: …” — tăiem prefixul ecou ÎNAINTE de isEchoOf, ca
     // tool call-ul de după el să nu mai fie respins (și pierdut) ca ecou.
-    const visible = stripEchoedUserMessage(currentText, message);
+    const visible = stripEchoedUserMessage(currentText, sentText);
     if (visible !== currentText) {
       log(label + ': stripped echoed user message from AI reply');
     }
@@ -1007,7 +1126,7 @@ export async function sendAndWait(
 
     // v0.8.0: ecoul propriului mesaj nu e răspuns — nu îl declarăm "stabil".
     // v0.9.3: extins cu sufixele de acțiuni (Kimi „Edit/Copy/Share”) — vezi isEchoOf.
-    if (isEchoOf(visible, message)) continue;
+    if (isEchoOf(visible, sentText)) continue;
 
     // FAZA III (E): progres vizibil — trimitem și textul parțial (throttled).
     if (
@@ -1038,9 +1157,13 @@ export async function sendAndWait(
         // v2.5.1: răspunsul „stabil” poate fi de fapt mesajul de eroare al
         // site-ului (ex: „You are out of free messages until 6:20 PM.”).
         const detected = detectProviderError(visible, providerId);
+        if (detected?.kind === 'memory_full') {
+          await restartInNewChat();
+          continue;
+        }
         if (detected) throwProviderError(providerId, detected, page);
         // v1.7.1: thinking-ul modelului (best-effort, înainte de return)
-        await emitThinking(page, providerId, message, cfg, label);
+        await emitThinking(page, providerId, sentText, cfg, label);
         return visible;
       }
     } else {
@@ -1048,41 +1171,6 @@ export async function sendAndWait(
       lastChangeAt = Date.now();
     }
   }
-
-  // RESCUE: ultima șansă — extragere generică, ca să nu blocăm utilizatorul
-  const rescuedRaw = await getLastResponseText(
-    page,
-    selectors.candidates(providerId, 'response'),
-    true
-  );
-  const rescued = stripEchoedUserMessage(rescuedRaw, message);
-  if (rescued !== rescuedRaw) {
-    log(label + ': stripped echoed user message from AI reply (rescue)');
-  }
-  if (
-    rescued &&
-    rescued.length >= 20 &&
-    (sawNewResponse || rescued !== beforeText) &&
-    !isEchoOf(rescued, message)
-  ) {
-    log(label + ': RESCUE generic, ' + rescued.length + ' chars');
-    // v2.5.1: și textul de la „rescue” poate fi un mesaj de eroare al site-ului
-    const detected = detectProviderError(rescued, providerId);
-    if (detected) throwProviderError(providerId, detected, page);
-    // v1.7.1: thinking-ul modelului (best-effort, înainte de return)
-    await emitThinking(page, providerId, message, cfg, label);
-    return rescued;
-  }
-
-  // v2.5.1: înainte de timeout-ul sec, verificăm dacă pagina afișează o eroare
-  // cunoscută (banner care nu intră în selectorii de răspuns) — ex: limita de
-  // mesaje gratuite la Claude/ChatGPT.
-  const pageError = await detectProviderErrorOnPage(page, providerId, message);
-  if (pageError) throwProviderError(providerId, pageError, page);
-
-  throw new Error(
-    'Timeout: no stable response from ' + label + ' after 150s.'
-  );
 }
 
 /* =========================================================================

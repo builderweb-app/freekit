@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.5.15
+
+- FIX (bug #41): **ChatGPT free „Chat memory full" was not detected — the agentic loop kept sending nudges into a chat that could not answer any more** (live-reported after 5-10 tool calls on the ~8k-token free context: banner „Chat memory full — continue in a new chat", no reply, loop running to timeout). The banner text („chat memory full" / „continue in a new chat" / „memory limit reached") is now recognized both on the response text and in the page scan (`memory_full` kind in `src/providerErrors.ts`), so the wait stops at detection instead of a silent 150 s timeout.
+- FIX (bug #41): **the detected context limit now offers a way to continue** — a card with **💬 New chat & continue** / **🌐 Show Browser** / **⏹ Stop**. „New chat & continue" opens a fresh browser chat, re-sends the pending step prefixed with a compact handoff (original task + recent steps from the conversation history, size-capped so the new chat does not fill up immediately) and resumes the agentic loop there (sentinels, checkpoints and the wait budget are reset; max 3 restarts per message). „Stop" clears the remembered browser chat, so the next message starts a new chat automatically.
+- Version bump to 2.5.15.
+
 ## v2.5.14
 
 - FIX (bug #39): **ChatGPT sent truncated messages and polluted the next one.** Live-proven: on chatgpt.com an isolated `insertText('\n')` in the composer acts as Enter, and `humanType` typed the natural head (30-50 chars) straight across the first line break - so the message was submitted at the first newline, the rest stayed in the composer as a **draft** and got prepended to the next message (the 771-char retry nudge arrived as only its 38-char first line; the following nudge was sent as leftover + full nudge, so the model saw garbled instructions). The natural head now stops **before the first `\r`/`\n`** and the whole remainder is pasted in one `insertText`.

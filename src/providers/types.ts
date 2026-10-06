@@ -15,6 +15,17 @@ export interface SendOptions {
    * mai departe, 'cancel' = anulează trimiterea. Fără el, nu se întreabă nimic.
    */
   onLoggedOut?: (providerId: string) => Promise<'continue' | 'cancel'>;
+  /**
+   * v2.5.15 (bug #41): chatul web și-a atins limita de context (ChatGPT
+   * „Chat memory full"). chatView întreabă utilizatorul (card: New chat &
+   * continue / Show Browser / Stop). Pe 'continue', sendAndWait deschide un
+   * chat nou și retrimite mesajul curent, prefixat cu `prefix` (handoff-ul
+   * construit de chatView din istoricul conversației), apoi continuă
+   * așteptarea răspunsului; pe 'cancel' aruncă eroarea tipizată.
+   */
+  onMemoryFull?: (
+    providerId: string
+  ) => Promise<{ action: 'continue'; prefix?: string } | { action: 'cancel' }>;
 }
 
 /**

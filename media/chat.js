@@ -117,6 +117,8 @@ function setVerboseUi(enabled) {
 let pendingEl = null;
 // v2.5.12 (bug #35): cardul „guest mode" activ (ChatGPT fără cont)
 let guestCardEl = null;
+// v2.5.15 (bug #41): cardul „chat memory full" activ (contextul s-a epuizat)
+let memoryFullCardEl = null;
 let busy = false;
 let stick = true; // true = suntem lipiți de capătul listei
 
@@ -488,6 +490,56 @@ function addGuestModeCard(text) {
   card.appendChild(row);
   messages.appendChild(card);
   guestCardEl = card;
+  scrollAfterAppend();
+}
+
+// v2.5.15 (bug #41): card „chat memory full" — ChatGPT free (~8k tokens) nu
+// mai răspunde după 5-10 tool calls; utilizatorul alege între a continua
+// într-un chat nou (cu handoff) și a se opri. Textul vine din host (textContent).
+function removeMemoryFullCard() {
+  if (memoryFullCardEl) {
+    memoryFullCardEl.remove();
+    memoryFullCardEl = null;
+  }
+}
+
+function addMemoryFullCard(msg) {
+  removeMemoryFullCard();
+  const card = document.createElement('div');
+  card.className = 'notice memory-full';
+
+  const msgEl = document.createElement('div');
+  msgEl.className = 'memory-full-text';
+  msgEl.textContent = msg.text || 'Chat context limit reached.';
+
+  const row = document.createElement('div');
+  row.className = 'memory-full-actions';
+
+  const decide = (label, choice, cls) => {
+    const b = document.createElement('button');
+    b.className = cls;
+    b.textContent = label;
+    b.onclick = () => {
+      removeMemoryFullCard();
+      vscode.postMessage({ type: 'memory_full_decision', choice });
+    };
+    return b;
+  };
+
+  // Show Browser nu închide cardul (decizia rămâne în așteptare)
+  const show = document.createElement('button');
+  show.className = 'show-chrome-btn';
+  show.textContent = '🌐 Show Browser';
+  show.onclick = () => vscode.postMessage({ type: 'show_chrome' });
+
+  row.appendChild(show);
+  row.appendChild(decide('💬 New chat & continue', 'continue', 'guest-btn'));
+  row.appendChild(decide('⏹ Stop', 'cancel', 'guest-cancel-btn'));
+
+  card.appendChild(msgEl);
+  card.appendChild(row);
+  messages.appendChild(card);
+  memoryFullCardEl = card;
   scrollAfterAppend();
 }
 
@@ -1423,6 +1475,7 @@ function resetChatUi() {
   messages.innerHTML = '';
   pendingEl = null;
   guestCardEl = null; // v2.5.12 (bug #35)
+  memoryFullCardEl = null; // v2.5.15 (bug #41)
   verboseSteps.clear(); // v1.7.1
   fileRows.clear(); // v2.0.1
   setBusy(false);
@@ -2072,6 +2125,7 @@ window.addEventListener('message', (event) => {
   if (msg.type === 'reply') {
     try {
       removeGuestModeCard(); // v2.5.12 (bug #35): răspunsul a sosit, cardul nu mai e necesar
+      removeMemoryFullCard(); // v2.5.15 (bug #41): idem pentru cardul de context
       if (pendingEl) {
         clearPendingTip(); // v2.5.12 (bug #32)
         pendingEl.classList.remove('streaming');
@@ -2087,6 +2141,7 @@ window.addEventListener('message', (event) => {
     }
   } else if (msg.type === 'stopped') {
     removeGuestModeCard(); // v2.5.12 (bug #35): Stop/anulare cu cardul deschis
+    removeMemoryFullCard(); // v2.5.15 (bug #41): Stop/anulare cu cardul deschis
     try {
       if (pendingEl) setPendingText(msg.text || '(stopped)');
     } finally {
@@ -2125,6 +2180,12 @@ window.addEventListener('message', (event) => {
     // v2.5.12 (bug #35): sesiune neautentificată, dar composerul funcționează
     // (ChatGPT guest mode) → card cu 3 opțiuni; trimiterea așteaptă decizia.
     addGuestModeCard(msg.text || '');
+    if (!stick) jumpBtn.hidden = false;
+  } else if (msg.type === 'memory_full') {
+    // v2.5.15 (bug #41): contextul chatului s-a epuizat — card cu decizie
+    // (New chat & continue / Stop); trimiterea așteaptă alegerea utilizatorului,
+    // deci bula în așteptare rămâne (răspunsul se randează în ea după decizie).
+    addMemoryFullCard(msg);
     if (!stick) jumpBtn.hidden = false;
   } else if (msg.type === 'open_model_menu') {
     // v2.5.1 — FIX A: „Switch provider" din cardul de eroare → meniul de modele

@@ -15,7 +15,7 @@ import {
   reliabilityNote,
   ProviderStatusInfo
 } from './providers';
-import { pullOllamaModel } from './providers/ollama';
+import { pullOllamaModel, startOllamaServer } from './providers/ollama';
 import {
   detectHardware,
   fitsThisMachine,
@@ -53,6 +53,7 @@ import {
   looksLikeIntentOnly,
   looksLikeToolRefusal,
   buildOutsideScopeHint,
+  buildRootTsconfigHint,
   checkAutoApproveScope,
   detectTaskScope,
   isPathInScope,
@@ -67,6 +68,7 @@ import {
 } from './toolCallParser';
 import {
   buildCircuitBreakerMessage,
+  buildLoopCircuitBreakerMessage,
   CIRCUIT_BREAKER_THRESHOLD,
   CircuitBreaker,
   EDIT_TOOLS,
@@ -1385,6 +1387,38 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    // v2.5.31 (bug #73): butonul „Restart Ollama" din cardul „stopped
+    // responding" — pornește serverul local (dacă e oprit) și reia ultimul
+    // prompt, ca utilizatorul să nu rămână blocat după o cădere la mijlocul
+    // task-ului.
+    if (msg.type === 'restart_ollama') {
+      if (this.abortController) return; // se generează deja
+      this.post('notice', '🦙 Restarting Ollama…');
+      const res = await startOllamaServer();
+      if (!res.ok) {
+        log('restart ollama failed: ' + (res.error ?? 'unknown'));
+        this.post('notice', {
+          text:
+            '⚠️ Could not start Ollama' +
+            (res.error ? ' (' + res.error + ')' : '') +
+            '. Install it or start it manually with "ollama serve", then retry.',
+          action: 'install_ollama',
+          actionLabel: 'Install Ollama'
+        });
+        return;
+      }
+      this.post('notice', '✅ Ollama is running again — retrying the last prompt.');
+      const retryText = this.lastUserText;
+      if (!retryText) return;
+      await this.handleMessage({
+        type: 'send',
+        text: retryText,
+        msgId: 'auto' + Date.now().toString(36),
+        retry: true
+      });
+      return;
+    }
+
     // v2.0.4: butonul Retry din cardul „login required" — reia ultimul prompt
     // fără să dubleze mesajul în istoric și fără să re-consume atașamentele.
     // v2.5.1 — FIX 2c: același flux deservește și butonul „Retry" din cardul
@@ -1741,6 +1775,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const editLoop = new EditLoopDetector();
       /** Ultimul fișier editat cu succes (hint-urile de eroare, FIX 4). */
       let lastEditedFile = '';
+      /** v2.5.31 (bug #74): ultima eroare a unei unelte (mesajul de buclă). */
+      let lastToolError = '';
       // v2.5.23: pașii executați în acest mesaj (pentru handoff-ul de rotire)
       const recentSteps: string[] = [];
       /**
@@ -1958,6 +1994,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           status: 'running'
         });
 
+        // v2.5.31 FIX (bug #74): nudge-ul de buclă nu oprea modelul — dacă
+        // imediat după nudge urmează TOT același fișier, oprim bucla ÎNAINTE de
+        // a executa încă o editare (a N-a editare a unui fișier deja „nudged"
+        // nu are cum să rezolve eroarea; vezi EditLoopDetector.wasNudged).
+        if (EDIT_TOOLS.has(toolCall.tool)) {
+          const repeated = fileTargetsOf(toolCall).find((f) =>
+            editLoop.wasNudged(f)
+          );
+          if (repeated) {
+            log(
+              'loop detection: ' + repeated +
+                ' edited again right after the strategy nudge — circuit breaker'
+            );
+            circuitBroken = true;
+            const loopMessage = buildLoopCircuitBreakerMessage(
+              repeated,
+              editLoop.count(repeated),
+              lastToolError
+            );
+            this.post('error', loopMessage);
+            await this.appendHistory('assistant', loopMessage);
+            break; // iese din bucla agentică, fără să mai execute editarea
+          }
+        }
+
         // v1.3.0: snapshot pre-editare — starea fișierelor vizate, folosită de
         // rollback-ul automat dacă auto-repair-ul verificării eșuează
         if (AUTO_VERIFY_TOOLS.has(toolCall.tool)) {
@@ -1981,6 +2042,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           result = mcpResult ?? (await executeTool(toolCall, root, log, approve, this.lastUserText));
         }
         log('tool result ok=' + result.ok);
+        // v2.5.31 (bug #74): ultima eroare, pentru mesajul de buclă
+        if (!result.ok) lastToolError = String(result.error ?? '');
 
         // v2.5.25 (bug #62): handoff-ul de rotire duce mai departe fișierele
         // deja citite (conținutul), ca chatul nou să nu ceară re-citirea lor;
@@ -2098,19 +2161,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // v2.5.29 FIX 4 (bug #67): o comandă eșuată (tsc/build) primește context
         // înainte de a pleca la AI — eroarea poate fi în ALT fișier decât cel
         // editat sau în tsconfig.json (include/exclude).
-        const commandHints =
-          toolCall.tool === 'run_command' && !result.ok
-            ? buildCommandErrorHints(
-                toolCall.args.command,
-                result.error ?? '',
-                lastEditedFile || undefined
-              ) +
-              // v2.5.30 FIX 2 (bug #69): dacă erorile sunt în afara scope-ului
-              // task-ului, spunem explicit AI-ului să NU le modifice
-              buildOutsideScopeHint(result.error ?? '', this.taskScope())
-            : '';
-        if (commandHints) {
-          log('command error context added for: ' + toolCall.args.command);
+        let commandHints = '';
+        if (toolCall.tool === 'run_command' && !result.ok) {
+          const scope = this.taskScope();
+          const errOut = result.error ?? '';
+          commandHints =
+            buildCommandErrorHints(
+              toolCall.args.command,
+              errOut,
+              lastEditedFile || undefined
+            ) +
+            // v2.5.30 FIX 2 (bug #69): dacă erorile sunt în afara scope-ului
+            // task-ului, spunem explicit AI-ului să NU le modifice
+            buildOutsideScopeHint(errOut, scope) +
+            // v2.5.31 FIX (bug #72): tsc pornit din root folosește tsconfig.json
+            // din ROOT și ignoră configul din subfolder
+            buildRootTsconfigHint(
+              toolCall.args.command,
+              errOut,
+              scope,
+              this.scopeTsconfigRel(root)
+            );
+          if (commandHints) {
+            log('command error context added for: ' + toolCall.args.command);
+          }
         }
 
         // v2.5.0 — FIX 3: NU mai verificăm după fiecare fișier. Marcăm doar că
@@ -2229,9 +2303,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         );
       } else {
         // v1.3.0: AI-ul s-a oprit cu text final, dar ultima verificare e încă
-        // pe roșu — nu lăsăm proiectul stricat: rollback automat + mesaj
+        // pe roșu — nu lăsăm proiectul stricat: rollback automat + mesaj.
+        // v2.5.31 FIX (bug #75): DOAR dacă în pasul curent s-a scris/editat
+        // ceva — un răspuns doar cu text („final answer" fără scriere) nu mai
+        // declanșează rollback-ul (înainte, o explicație/întrebare a modelului
+        // anula tot ce scrisese mai devreme în mesaj).
         const lvf = this.getLastVerifyFailure();
-        if (this.autoVerifyEnabled(root) && this.verifyRepairs > 0 && lvf) {
+        if (
+          this.autoVerifyEnabled(root) &&
+          this.verifyRepairs > 0 &&
+          lvf &&
+          filesWereModifiedThisTurn
+        ) {
           log('auto-verify: final response while verification is red — rollback');
           const text = this.doRollback(
             root,
@@ -2243,6 +2326,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.appendHistory('assistant', text);
           this.post('reply', text);
         } else {
+          if (this.autoVerifyEnabled(root) && this.verifyRepairs > 0 && lvf) {
+            log(
+              'auto-verify: verification is still red (' + lvf.command +
+                '), but nothing was written in the last step — no rollback'
+            );
+            this.post(
+              'heal',
+              '⚠️ Verification is still failing ("' + lvf.command +
+                '"). The AI stopped without writing a fix in its last step, so ' +
+                'nothing was rolled back — fix the error above or write "continue".'
+            );
+          }
           log('posting final reply, length=' + aiReply.length);
           await this.appendHistory('assistant', aiReply);
           // v2.5.27 (bug #63): în chat calea rămâne cea originală (`.ts`)
@@ -2311,23 +2406,70 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * v2.5.30 (bug #68): textul din care detectăm scope-ul task-ului — PRIMUL
-   * mesaj al utilizatorului din conversația activă (fallback: ultimul prompt).
+   * v2.5.31 (bug #71): textele din care detectăm scope-ul task-ului — mesajele
+   * utilizatorului din conversația activă, de la ULTIMUL spre primul (promptul
+   * curent este ultimul; `lastUserText` e plasa de siguranță pentru retry, când
+   * mesajul nu se mai adaugă în istoric).
    */
-  private taskScopeText(): string {
-    const first = this.conversations
-      .getActive()
-      ?.messages.find((m) => m.role === 'user')?.text;
-    return first || this.lastUserText || '';
+  private taskScopeTexts(): string[] {
+    const texts = (this.conversations.getActive()?.messages ?? [])
+      .filter((m) => m.role === 'user')
+      .map((m) => m.text)
+      .reverse();
+    if (this.lastUserText && texts[0] !== this.lastUserText) {
+      texts.unshift(this.lastUserText);
+    }
+    return texts;
   }
 
   /**
-   * v2.5.30 (bug #68): scope-ul task-ului (folderele/căile menționate în primul
-   * mesaj al utilizatorului). `null` = nu se poate determina ⇒ toate scrierile
-   * cer confirmare.
+   * v2.5.31 (bug #71): scope-ul task-ului = căile menționate de ULTIMUL mesaj
+   * al utilizatorului care conține o cale. Înainte se folosea PRIMUL mesaj, așa
+   * că „Salut" urmat de „Creează X în bootcamp-test/" dădea scope `null` ⇒
+   * auto-approve bloca TOT („bootcamp-test/index.ts is outside task scope (not
+   * detected)"). Acum „Salut" e sărit, iar un mesaj de continuare fără căi
+   * („continue") păstrează scope-ul precedent. `null` = nu se poate determina
+   * ⇒ orice scriere cere confirmare (fail-closed).
    */
   private taskScope(): string[] | null {
-    return detectTaskScope(this.taskScopeText());
+    for (const text of this.taskScopeTexts()) {
+      const scope = detectTaskScope(text);
+      if (scope) return scope;
+    }
+    return null;
+  }
+
+  /**
+   * v2.5.31 (bug #72): folderul scope-ului care are propriul tsconfig.json
+   * (ex: `bootcamp-test/`). Auto-verify rulează tsc DE AICI, pentru că tsc
+   * pornit din root citește tsconfig.json din root și ignoră complet configul
+   * din subfolder — cauza buclei „edit tsconfig.json forever".
+   */
+  private verificationScopeDir(root: string): string | undefined {
+    const scope = this.taskScope();
+    if (!scope || !scope.length) return undefined;
+    const rootNorm = path.resolve(root);
+    for (const rel of scope) {
+      const abs = path.resolve(root, rel);
+      if (abs === rootNorm) continue;
+      if (!abs.startsWith(rootNorm + path.sep)) continue;
+      try {
+        if (!fs.statSync(abs).isDirectory()) continue;
+      } catch {
+        continue; // calea nu există (încă)
+      }
+      if (fs.existsSync(path.join(abs, 'tsconfig.json'))) return abs;
+    }
+    return undefined;
+  }
+
+  /** v2.5.31 (bug #72): `bootcamp-test/tsconfig.json` (relativ la root) sau null. */
+  private scopeTsconfigRel(root: string): string | null {
+    const dir = this.verificationScopeDir(root);
+    if (!dir) return null;
+    return path
+      .relative(root, path.join(dir, 'tsconfig.json'))
+      .replace(/\\/g, '/');
   }
 
   /**
@@ -3195,7 +3337,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   ): Promise<{ suffix: string; rollbackText: string }> {
     if (!this.autoVerifyEnabled(root)) return { suffix: '', rollbackText: '' };
 
-    const vres = await runVerification(root);
+    // v2.5.31 (bug #72): dacă scope-ul are propriul tsconfig.json, verificarea
+    // (tsc --noEmit) rulează DE ACOLO — din root, tsc citea tsconfig.json din
+    // root și ignora complet configul din subfolder.
+    const vres = await runVerification(root, {
+      cwd: this.verificationScopeDir(root)
+    });
     if (!vres.command) {
       log('auto-verify: no verification detected — skipping');
       return { suffix: '', rollbackText: '' };
@@ -3265,12 +3412,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // v2.5.29 FIX 4 (bug #67): context înainte de a trimite eroarea AI-ului —
       // eroarea poate fi în alt fișier decât cel editat sau în tsconfig.json.
       // v2.5.30 FIX 2 (bug #69): + hint când erorile sunt în afara scope-ului.
+      // v2.5.31 FIX (bug #72): + hint „tsc din root ignoră configul din
+      // subfolder" — doar când verificarea a rulat chiar din root (dacă a rulat
+      // în scope, tsconfig-ul din subfolder ESTE folosit, deci hint-ul ar minți).
+      const scope = this.taskScope();
+      const ranInScope =
+        !!vres.cwd && path.resolve(vres.cwd) !== path.resolve(root);
       const verifyHints =
         buildCommandErrorHints(
           vres.command,
           vres.output,
           this.lastEditTargets[this.lastEditTargets.length - 1]
-        ) + buildOutsideScopeHint(vres.output, this.taskScope());
+        ) +
+        buildOutsideScopeHint(vres.output, scope) +
+        (ranInScope
+          ? '\n\nℹ️ tsc ran inside ' +
+            path.relative(root, vres.cwd!).replace(/\\/g, '/') +
+            '/ (it has its own tsconfig.json), so edits to that tsconfig.json DO take effect.'
+          : buildRootTsconfigHint(
+              vres.command,
+              vres.output,
+              scope,
+              this.scopeTsconfigRel(root)
+            ));
       if (verifyHints) {
         log('auto-verify: added error context hints (' + vres.command + ')');
       }

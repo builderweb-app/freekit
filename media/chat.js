@@ -566,15 +566,19 @@ function addProviderErrorCard(msg) {
   // v2.5.11 (bug #24/#25): model Ollama neinstalat → card dedicat, cu buton
   // de descărcare, în locul textului brut „Ollama error: 404 …".
   const isModelMissing = msg.kind === 'model_missing';
+  // v2.5.31 (bug #73): providerul local a căzut la mijlocul task-ului
+  // („fetch failed") → card cu „Restart Ollama".
+  const isDown = msg.kind === 'provider_down';
   const modelId = typeof msg.model === 'string' ? msg.model : '';
   const available = Array.isArray(msg.availableModels) ? msg.availableModels : [];
+  const providerName = PROVIDER_NAMES[msg.providerId] || msg.providerId || 'Provider';
 
   const title = document.createElement('b');
   title.textContent = isModelMissing
     ? '⚠️ Ollama — model not installed'
-    : '⚠️ ' +
-      (PROVIDER_NAMES[msg.providerId] || msg.providerId || 'Provider') +
-      ' unavailable';
+    : isDown
+      ? '⚠️ ' + providerName + ' stopped responding'
+      : '⚠️ ' + providerName + ' unavailable';
 
   const text = document.createElement('div');
   text.className = 'pe-msg';
@@ -605,6 +609,14 @@ function addProviderErrorCard(msg) {
       );
     }
     actions.appendChild(makeBtn('Switch to another model', 'open_model_menu'));
+  } else if (isDown) {
+    // v2.5.31 (bug #73): Ollama a căzut → restart / alt provider / retry
+    // (fără „Show Browser": providerul e local, nu are fereastră Chrome).
+    if (msg.providerId === 'ollama') {
+      actions.appendChild(makeBtn('🦙 Restart Ollama', 'restart_ollama'));
+    }
+    actions.appendChild(makeBtn('Switch provider', 'open_model_menu'));
+    actions.appendChild(makeBtn('Retry', 'retry_message'));
   } else {
     actions.appendChild(makeBtn('Show Browser', 'show_chrome'));
     actions.appendChild(makeBtn('Retry', 'retry_message'));

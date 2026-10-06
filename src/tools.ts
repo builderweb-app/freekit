@@ -450,6 +450,97 @@ export function buildOutsideScopeHint(
   );
 }
 
+/**
+ * v2.5.31 (bug #72): comanda rulează deja în folderul scope-ului (`cd X && …`)?
+ * Căutăm poziția folderului și verificăm doar vecinătatea (fără regex pe cale).
+ */
+function commandRunsInFolder(command: string, folder: string): boolean {
+  const cmd = String(command ?? '').toLowerCase();
+  const dir = String(folder ?? '')
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/\/+$/, '')
+    .toLowerCase();
+  if (!cmd || !dir) return false;
+  const idx = cmd.indexOf(dir);
+  if (idx < 0) return false;
+  const before = cmd.slice(0, idx);
+  const after = cmd.slice(idx + dir.length);
+  return /\bcd\s+["']?$/.test(before) && /^["']?\s*(&&|;)/.test(after);
+}
+
+/** Folderul unei căi de scope (`bootcamp-test` din `bootcamp-test/index.ts`). */
+function scopeFolder(p: string): string {
+  const n = String(p ?? '')
+    .replace(/\\/g, '/')
+    .replace(/\/+$/, '');
+  const i = n.lastIndexOf('/');
+  return i > 0 ? n.slice(0, i) : n;
+}
+
+/**
+ * v2.5.31 FIX (bug #72) — „tsc din root ignoră tsconfig.json din subfolder".
+ * Task în `bootcamp-test/`: AI-ul își făcea acolo un tsconfig.json, dar comanda
+ * `npx tsc --noEmit` rula din root, deci tsc folosea tsconfig.json din ROOT și
+ * ignora configul din subfolder — erorile veniră din configul din root, iar
+ * modelul edita la infinit `bootcamp-test/tsconfig.json` fără niciun efect.
+ * Aici spunem explicit de unde vin erorile și cum se rezolvă. Se aplică doar
+ * comenzilor `tsc` (și nu celor care rulează deja în scope, `cd X && …`).
+ */
+export function buildRootTsconfigHint(
+  command: string,
+  errorOutput: string,
+  scope: string[] | null,
+  scopeTsconfigRel: string | null
+): string {
+  if (!/\btsc\b/i.test(String(command ?? ''))) return '';
+  if (!scope || !scope.length) return '';
+
+  const outside = commandErrorFiles(String(errorOutput ?? '')).filter(
+    (f) => !isPathInScope(f, scope)
+  );
+  if (!outside.length && !scopeTsconfigRel) return '';
+
+  const folder = scopeTsconfigRel
+    ? scopeFolder(scopeTsconfigRel)
+    : scopeFolder(outside[0] ?? scope[0]);
+  if (!folder) return '';
+  if (
+    commandRunsInFolder(command, folder) ||
+    scope.some((s) => commandRunsInFolder(command, s))
+  ) {
+    return '';
+  }
+
+  if (scopeTsconfigRel) {
+    return (
+      '\n\n⚠️ The error comes from the ROOT tsconfig.json, not from ' +
+      folder +
+      '/tsconfig.json — tsc was started from the project root, which ignores the config inside ' +
+      folder +
+      '/.\nFixes: (1) run tsc from inside the scope: `cd ' +
+      folder +
+      ' && npx tsc --noEmit`, (2) OR add "' +
+      folder +
+      '" to "exclude" in the root tsconfig.json.\nDo NOT keep editing ' +
+      folder +
+      '/tsconfig.json — tsc run from the root ignores it.'
+    );
+  }
+
+  return (
+    '\n\n⚠️ tsc was started from the project ROOT and used the ROOT tsconfig.json (not ' +
+    folder +
+    '/) — these errors do not come from your scope (' +
+    scopeLabel(scope) +
+    ').\nFixes: (1) add "' +
+    folder +
+    '" to "exclude" in the root tsconfig.json, or (2) run tsc from inside the scope: `cd ' +
+    folder +
+    ' && npx tsc --noEmit`.\nDo NOT keep editing scope files to silence errors that come from outside the scope.'
+  );
+}
+
 /* =========================================================================
  * v0.2.1 — Anti-spam la scrierea fișierelor
  * Modelul poate scrie fiecare fișier de max 3 ori și poate face max 15

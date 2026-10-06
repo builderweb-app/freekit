@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { Page } from 'playwright';
 import { AIProvider, SendOptions } from './types';
@@ -10,7 +10,9 @@ import { logLine } from '../log';
 import {
   DetectedProviderError,
   detectProviderError,
-  ollamaModelMissing
+  isProviderConnectionError,
+  ollamaModelMissing,
+  providerDown
 } from '../providerErrors';
 
 const log = (msg: string) => logLine('ollama', msg);
@@ -85,6 +87,92 @@ export interface OllamaModelDetails {
   name: string;
   /** Dimensiunea pe disc, în bytes (0 = necunoscută). */
   sizeBytes: number;
+}
+
+/* =========================================================================
+ * v2.5.31 (bug #73) — „fetch failed" mid-task (Ollama moare după ~9 min)
+ * `fetch` către un server local care nu mai răspunde aruncă o eroare de
+ * conexiune (undici: „TypeError: fetch failed" cu cause ECONNREFUSED). Fără
+ * traducerea ei într-o eroare tipizată, chatView vedea o eroare generică și
+ * bucla continua până la STOP manual: aici o transformăm în `provider_down`
+ * (card cu „Restart Ollama") și oferim pornirea serverului dintr-un buton.
+ * ========================================================================= */
+
+/** v2.5.31 (bug #73): API-ul Ollama răspunde? (timeout scurt, fără cache). */
+async function isOllamaReachable(): Promise<boolean> {
+  try {
+    const res = await fetch(`${ollamaBaseUrl()}/api/tags`, {
+      signal: AbortSignal.timeout(3000)
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** v2.5.31 (bug #73): calea binarului `ollama` (candidat standard sau PATH). */
+async function resolveOllamaCliPath(): Promise<string | null> {
+  for (const p of OLLAMA_CLI_CANDIDATES) {
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch {
+      /* ignoră */
+    }
+  }
+  try {
+    const finder = process.platform === 'win32' ? 'where' : 'which';
+    const r = await execFileAsync(finder, ['ollama'], {
+      timeout: 4000,
+      windowsHide: true
+    });
+    const first = String(r.stdout ?? '')
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean)[0];
+    return first || 'ollama';
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * v2.5.31 (bug #73): butonul „Restart Ollama" — pornește `ollama serve` în
+ * fundal (detached) și așteaptă până când API-ul răspunde (max 15 s). Fail-open:
+ * fără binar sau fără răspuns întoarce `ok: false` cu motivul, ca chatView să
+ * îndrume utilizatorul (install / „ollama serve" manual).
+ */
+export async function startOllamaServer(): Promise<{
+  ok: boolean;
+  error?: string;
+}> {
+  if (await isOllamaReachable()) return { ok: true };
+
+  const bin = await resolveOllamaCliPath();
+  if (!bin) {
+    return { ok: false, error: 'the Ollama CLI was not found on this machine' };
+  }
+
+  try {
+    const child = spawn(bin, ['serve'], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true
+    });
+    child.unref();
+    log('started "ollama serve" (pid ' + (child.pid ?? '?') + ')');
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? String(e) };
+  }
+
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 500));
+    if (await isOllamaReachable()) {
+      log('ollama is up at ' + ollamaBaseUrl());
+      return { ok: true };
+    }
+  }
+  return { ok: false, error: 'the server did not answer within 15s' };
 }
 
 /** v2.0.2: modelele instalate, cu dimensiune — afișate în meniul de model. */
@@ -204,8 +292,10 @@ export class OllamaProvider implements AIProvider {
     // Verifică că Ollama rulează
     const ok = await this.isAvailable();
     if (!ok) {
-      throw new Error(
-        'Ollama is not running at ' + this.url + '. Start it with "ollama serve".'
+      // v2.5.31 (bug #73): eroare tipizată → cardul cu „Restart Ollama"
+      throw new DetectedProviderError(
+        'ollama',
+        providerDown('ollama', 'no response', this.url)
       );
     }
     const models = await this.listModels();
@@ -248,20 +338,25 @@ export class OllamaProvider implements AIProvider {
     log('send to ' + model + ', length=' + message.length);
     this.history.push({ role: 'user', content: message });
 
-    const response = await fetch(`${this.url}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        messages: this.history,
-        stream: false,
-        options: {
-          temperature: 0.3,
-          num_ctx: 8192
-        }
-      }),
-      signal
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${this.url}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          messages: this.history,
+          stream: false,
+          options: {
+            temperature: 0.3,
+            num_ctx: 8192
+          }
+        }),
+        signal
+      });
+    } catch (e: any) {
+      throw this.asProviderDown(e, signal);
+    }
 
     if (!response.ok) {
       // Ollama pune detaliul în JSON (ex: model negăsit -> 404)
@@ -293,7 +388,13 @@ export class OllamaProvider implements AIProvider {
       );
     }
 
-    const data = (await response.json()) as any;
+    let data: any;
+    try {
+      data = (await response.json()) as any;
+    } catch (e: any) {
+      // corp întrerupt la mijloc (serverul a murit) → tot eroare de conexiune
+      throw this.asProviderDown(e, signal);
+    }
     const reply = data.message?.content || '';
     // v1.7.1: thinking separat (modele R1 / Qwen3 / etc.) → callback chatView
     const thinking = data.message?.thinking ?? data.message?.reasoning_content;
@@ -317,6 +418,22 @@ export class OllamaProvider implements AIProvider {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * v2.5.31 (bug #73): „fetch failed" / ECONNREFUSED → eroare tipizată
+   * `provider_down` (chatView oprește bucla + card cu „Restart Ollama").
+   * Anularea de către utilizator (Stop) rămâne eroarea originală.
+   */
+  private asProviderDown(e: any, signal?: AbortSignal): any {
+    if (signal?.aborted) return e;
+    if (!isProviderConnectionError(e)) return e;
+    const detail = String(e?.cause?.code ?? e?.message ?? 'fetch failed');
+    log('connection error: ' + detail);
+    return new DetectedProviderError(
+      'ollama',
+      providerDown('ollama', detail, this.url)
+    );
   }
 
   async listModels(): Promise<string[]> {

@@ -26,6 +26,25 @@ export interface VerifyResult {
   output: string;
   command: string;
   duration: number;
+  /**
+   * v2.5.31 (bug #72): folderul din care a rulat verificarea (diferă de root
+   * când scope-ul task-ului are propriul tsconfig.json). chatView îl folosește
+   * ca să nu mai adauge hint-ul „tsc din root ignoră configul din subfolder".
+   */
+  cwd?: string;
+}
+
+/**
+ * v2.5.31 (bug #72): opțiuni de rulare a verificării.
+ */
+export interface VerifyOptions {
+  /**
+   * Folderul din care se rulează `tsc`. Când scope-ul task-ului are propriul
+   * tsconfig.json, tsc TREBUIE rulat de acolo: din root, tsc citește
+   * tsconfig.json din root și ignoră complet configul din subfolder (modelul
+   * edita la infinit `bootcamp-test/tsconfig.json`, fără niciun efect).
+   */
+  cwd?: string;
 }
 
 export interface ProjectType {
@@ -134,10 +153,32 @@ export function verifyCommandString(project: ProjectType): string {
 }
 
 /**
+ * v2.5.31 (bug #72): binarul local `tsc` (din folderul dat sau din root) —
+ * rulat cu `node`, ca `npx tsc` pornit din subfolder să nu instaleze pachetul
+ * greșit și să folosească compilatorul proiectului.
+ */
+function resolveTscBin(fromDir: string, root: string): string | null {
+  for (const base of [fromDir, root]) {
+    const bin = path.join(base, 'node_modules', 'typescript', 'bin', 'tsc');
+    try {
+      if (fs.existsSync(bin)) return bin;
+    } catch {
+      /* ignoră */
+    }
+  }
+  return null;
+}
+
+/**
  * Rulează verificarea proiectului. Întoarce mereu un VerifyResult —
  * `command` gol înseamnă „nicio verificare configurată” (ok: true, no-op).
+ * v2.5.31 (bug #72): cu `opts.cwd` (scope-ul task-ului, care are propriul
+ * tsconfig.json), `tsc --noEmit` rulează din acel folder.
  */
-export async function runVerification(root: string): Promise<VerifyResult> {
+export async function runVerification(
+  root: string,
+  opts?: VerifyOptions
+): Promise<VerifyResult> {
   const project = await detectVerificationCommand(root);
   if (!project) {
     log('nicio verificare configurată pentru acest proiect');
@@ -150,24 +191,51 @@ export async function runVerification(root: string): Promise<VerifyResult> {
   }
 
   const command = verifyCommandString(project);
+  const scopeCwd =
+    opts?.cwd && path.resolve(opts.cwd) !== path.resolve(root)
+      ? opts.cwd
+      : undefined;
+  const tscBin =
+    scopeCwd && project.checkScript === 'tsc --noEmit'
+      ? resolveTscBin(scopeCwd, root)
+      : null;
+  if (scopeCwd && !tscBin) {
+    log(
+      'tsc local negăsit pentru ' + scopeCwd + ' — verificarea rulează din root'
+    );
+  }
+  const cwd = tscBin && scopeCwd ? scopeCwd : root;
+  const label = tscBin
+    ? 'node ' + path.relative(root, tscBin).replace(/\\/g, '/') + ' --noEmit' +
+      ' (in ' + path.relative(root, scopeCwd as string).replace(/\\/g, '/') + ')'
+    : command;
   const start = Date.now();
-  log('rulez verificarea: ' + command);
+  log('rulez verificarea: ' + label);
 
   try {
-    const { stdout, stderr } = await execAsync(command, {
-      cwd: root,
-      timeout: VERIFY_TIMEOUT_MS,
-      maxBuffer: 10 * 1024 * 1024,
-      windowsHide: true
-    });
+    const run =
+      tscBin && scopeCwd
+        ? execFileAsync(process.execPath, [tscBin, '--noEmit'], {
+            cwd: scopeCwd,
+            timeout: VERIFY_TIMEOUT_MS,
+            maxBuffer: 10 * 1024 * 1024,
+            windowsHide: true
+          })
+        : execAsync(command, {
+            cwd: root,
+            timeout: VERIFY_TIMEOUT_MS,
+            maxBuffer: 10 * 1024 * 1024,
+            windowsHide: true
+          });
+    const { stdout, stderr } = await run;
     // v2.5.23: cap+coadă — sumarul erorilor (tsc/build) e la finalul output-ului
     const output = clipPayload(
       String(stdout ?? '') + '\n' + String(stderr ?? ''),
       VERIFY_OUTPUT_MAX
     );
     const duration = Date.now() - start;
-    log('verificare TRECUTĂ în ' + duration + 'ms (' + command + ')');
-    return { ok: true, output, command, duration };
+    log('verificare TRECUTĂ în ' + duration + 'ms (' + label + ')');
+    return { ok: true, output, command: label, duration, cwd };
   } catch (e: any) {
     const output = clipPayload(
       String(e?.stdout ?? '') +
@@ -178,8 +246,8 @@ export async function runVerification(root: string): Promise<VerifyResult> {
       VERIFY_OUTPUT_MAX
     );
     const duration = Date.now() - start;
-    log('verificare EȘUATĂ în ' + duration + 'ms (' + command + ')');
-    return { ok: false, output, command, duration };
+    log('verificare EȘUATĂ în ' + duration + 'ms (' + label + ')');
+    return { ok: false, output, command: label, duration, cwd };
   }
 }
 

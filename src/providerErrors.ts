@@ -17,6 +17,8 @@ export interface ProviderError {
     | 'model_missing'
     /** v2.5.15 (bug #41): contextul chatului s-a epuizat (ChatGPT „Chat memory full"). */
     | 'memory_full'
+    /** v2.5.31 (bug #73): providerul (local) a căzut în timpul sesiunii. */
+    | 'provider_down'
     | 'unknown';
   message: string;
   resetTime?: string;
@@ -37,7 +39,9 @@ const PROVIDER_LABELS: Record<string, string> = {
   deepseek: 'DeepSeek',
   gemini: 'Gemini',
   mistral: 'Mistral',
-  qwen: 'Qwen'
+  qwen: 'Qwen',
+  /** v2.5.31 (bug #73): eticheta providerului local (cardul „stopped responding"). */
+  ollama: 'Ollama'
 };
 
 /**
@@ -56,6 +60,51 @@ export function ollamaModelMissing(
     model: model || undefined,
     availableModels: available
   };
+}
+
+/**
+ * v2.5.31 (bug #73): providerul a căzut în timpul sesiunii („fetch failed" /
+ * ECONNREFUSED după ~9 minute de rulare). chatView oprește bucla agentică și
+ * afișează cardul cu butoanele Restart / Switch provider / Retry.
+ */
+export function providerDown(
+  providerId: string,
+  detail?: string,
+  url?: string
+): ProviderError {
+  const label = PROVIDER_LABELS[providerId] || providerId || 'The provider';
+  return {
+    kind: 'provider_down',
+    message:
+      label +
+      ' stopped responding' +
+      (url ? ' at ' + url : '') +
+      (detail ? ' (' + detail + ')' : '') +
+      '.'
+  };
+}
+
+/**
+ * v2.5.31 (bug #73): eroarea vine din CONEXIUNE (serverul nu mai răspunde), nu
+ * din protocol? Node/undici aruncă „TypeError: fetch failed" cu `cause` de tip
+ * ECONNREFUSED / ECONNRESET / ENOTFOUND; alte medii raportează doar „fetch
+ * error". Anularea de către utilizator (AbortError / abort pe signal) NU intră
+ * aici — vezi apelantul, care verifică `signal.aborted` înainte.
+ */
+export function isProviderConnectionError(err: unknown): boolean {
+  const e: any = err ?? {};
+  if (e?.name === 'AbortError' || e?.code === 'ABORT_ERR') return false;
+  const parts = [
+    typeof e?.message === 'string' ? e.message : '',
+    typeof e?.cause?.message === 'string' ? e.cause.message : '',
+    typeof e?.cause === 'string' ? e.cause : '',
+    typeof e?.code === 'string' ? e.code : '',
+    typeof e?.errno === 'string' ? e.errno : ''
+  ].filter((p) => !!p);
+  const text = parts.length ? parts.join(' | ') : String(err ?? '');
+  return /fetch failed|fetch error|failed to fetch|econnrefused|econnreset|enotfound|etimedout|socket hang up|network error|other side closed|terminated/i.test(
+    text
+  );
 }
 
 /**
@@ -187,6 +236,10 @@ export function providerErrorMessage(
         name +
         ' reached its context limit ("Chat memory full"), so it stopped answering. ' +
         'Start a new chat and continue the task there.'
+      );
+    case 'provider_down':
+      return (
+        e.message + ' Restart ' + name + ' (or switch provider), then retry.'
       );
     case 'model_missing':
       return (

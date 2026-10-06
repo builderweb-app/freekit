@@ -164,6 +164,13 @@ export class EditLoopDetector {
   private totalAttempts = 0;
   /** v2.5.30 (bug #70): câte încercări au vizat fișiere din afara scope-ului. */
   private outsideScopeAttempts = 0;
+  /**
+   * v2.5.31 (bug #74): fișierele care au primit deja nudge-ul de strategie.
+   * Un nudge care nu oprește modelul nu-și atinge scopul: dacă următoarea
+   * încercare de editare e TOT pe un fișier „nudged", apelantul oprește bucla
+   * (circuit breaker direct), în loc să-i mai dea nudge-uri la nesfârșit.
+   */
+  private nudged = new Set<string>();
 
   /**
    * Înregistrează o ÎNCERCARE de editare (reușită sau nu) pe un fișier.
@@ -182,9 +189,20 @@ export class EditLoopDetector {
       count >= EDIT_LOOP_THRESHOLD &&
       (count - EDIT_LOOP_THRESHOLD) % EDIT_LOOP_NUDGE_EVERY === 0
     ) {
+      this.nudged.add(key);
       return { count, nudge: buildEditLoopNudge(file, count) };
     }
     return { count };
+  }
+
+  /**
+   * v2.5.31 (bug #74): fișierul a primit deja nudge-ul de strategie în acest
+   * mesaj? `true` ⇒ următoarea editare a lui declanșează circuit breaker-ul
+   * direct (vezi chatView), nu încă un nudge.
+   */
+  wasNudged(file: string): boolean {
+    const key = editKey(file);
+    return !!key && this.nudged.has(key);
   }
 
   /**
@@ -222,6 +240,8 @@ export class EditLoopDetector {
     this.lastEditedFile = undefined;
     if (!file) return undefined;
     this.attempts.delete(file);
+    // v2.5.31 (bug #74): succes real ⇒ fișierul iese și din lista „nudged"
+    this.nudged.delete(file);
     return file;
   }
 
@@ -236,6 +256,7 @@ export class EditLoopDetector {
     this.lastEditedFile = undefined;
     this.totalAttempts = 0;
     this.outsideScopeAttempts = 0;
+    this.nudged.clear();
   }
 }
 
@@ -257,5 +278,31 @@ export function buildCircuitBreakerMessage(
     '- Break the task into smaller steps (one file at a time)\n' +
     '- Switch to a different provider (⋯ → model chip)\n' +
     '- Check that the file paths exist and are writable'
+  );
+}
+
+/**
+ * v2.5.31 (bug #74): mesajul afișat când circuit breaker-ul de BUCLĂ se
+ * declanșează — modelul a editat din nou un fișier imediat după nudge-ul de
+ * strategie (deci nudge-ul nu l-a oprit).
+ */
+export function buildLoopCircuitBreakerMessage(
+  file: string,
+  count: number,
+  error?: string
+): string {
+  const lastError = String(error ?? '').slice(0, 500);
+  return (
+    '⛔ **Stopped — the AI is stuck in a loop.**\n\n' +
+    '`' + file + '` was edited **' + count +
+    ' times**, and the AI edited it AGAIN right after being told to change ' +
+    'strategy — the edit was not executed.\n' +
+    (lastError
+      ? '\n**Last error:**\n```\n' + lastError + '\n```\n'
+      : '') +
+    '\n**Try:**\n' +
+    '- Write "continue" with a hint (e.g. "the error is in another file")\n' +
+    '- Break the task into smaller steps (one file at a time)\n' +
+    '- Switch to a different provider (⋯ → model chip)'
   );
 }

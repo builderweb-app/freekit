@@ -303,6 +303,7 @@ export function resetWriteLimits(): void {
   fileWriteCounts = new Map();
   writeOpsTotal = 0;
   resetTruncationRetries();
+  resetWriteFailures();
 }
 
 function writeKey(rel: string): string {
@@ -345,6 +346,43 @@ function recordWrite(rel: string): void {
 
 function recordWriteCall(): void {
   writeOpsTotal++;
+}
+
+/* =========================================================================
+ * v2.5.29 FIX 3 (bug #67) — Anti-spam, nivel 2: `write_file` EȘUAT
+ * Anti-spam-ul de mai sus numără scrierile REUȘITE (max 3/fișier). Aici
+ * numărăm EȘECURILE lui `write_file` pe același fișier: la al doilea eșec,
+ * mesajul standard primește un adaos explicit (append ⇒ edit_file cu
+ * OLD_TEXT/NEW_TEXT; înlocuire completă ⇒ UN singur write_file cu tot
+ * conținutul), ca modelul să nu repete aceeași scriere nereușită.
+ * ========================================================================= */
+
+/** Al câtelea eșec pe același fișier primește mesajul suplimentar. */
+export const WRITE_FAILURES_BEFORE_WARNING = 2;
+
+/** Mesajul de nivel 2 ({file} = calea fișierului). */
+export const WRITE_FAILURE_WARNING =
+  '⚠️ write_file failed twice on {file}. If you are trying to append, use ' +
+  'edit_file with OLD_TEXT/NEW_TEXT. If the file needs to be replaced ' +
+  'entirely, send ONE write_file with the full content.';
+
+/** Câte `write_file` au EȘUAT pe fiecare fișier, în mesajul curent. */
+const writeFileFailures = new Map<string, number>();
+
+function resetWriteFailures(): void {
+  writeFileFailures.clear();
+}
+
+/**
+ * Înregistrează un `write_file` eșuat. Întoarce mesajul de nivel 2 exact la al
+ * doilea eșec pe același fișier, altfel null.
+ */
+export function noteWriteFileFailure(rel: string): string | null {
+  const key = writeKey(rel);
+  const count = (writeFileFailures.get(key) ?? 0) + 1;
+  writeFileFailures.set(key, count);
+  if (count !== WRITE_FAILURES_BEFORE_WARNING) return null;
+  return WRITE_FAILURE_WARNING.replace('{file}', rel);
 }
 
 /* =========================================================================
@@ -1139,48 +1177,24 @@ export async function executeTool(
         return await readFile(call.args.path, workspaceRoot, log);
 
       case 'write_file': {
-        // v0.2.1: anti-spam — verificăm ÎNAINTE de cardul de aprobare
-        const limitErr = checkWriteLimit(call.args.path);
-        if (limitErr) return { ok: false, error: limitErr };
-        const newContent = call.args.content as string;
-        // v2.5.6: truncation guard — nu scriem (și nu cerem aprobare pentru)
-        // un fișier scris doar parțial; cerem modelului conținutul COMPLET
-        const truncErr = checkTruncation('write_file', call.args.path, newContent);
-        if (truncErr) {
-          return {
-            ok: false,
-            error: truncErr.error,
-            userNotice: truncErr.userNotice
-          };
-        }
-        // v0.5.0: preview pentru diff-ul nativ (conținut vechi + nou)
-        const oldInfo = await tryReadInfo(call.args.path, workspaceRoot);
-        const diff = makeDiff(call.args.path, oldInfo.content, newContent);
-        // v2.5.6 (bug #10): WARNING ONLY — semnalăm că modelul a scris altceva
-        // decât fragmentele din prompt, dar NU blocăm și NU reîncercăm
-        const divergent = isDivergentFromPrompt(
-          userText,
-          call.args.path,
-          newContent
+        // v2.5.29 FIX 3 (bug #67): al doilea `write_file` eșuat pe același
+        // fișier primește un mesaj suplimentar (append ⇒ edit_file).
+        const wres = await writeFileTool(
+          call.args,
+          workspaceRoot,
+          approve,
+          userText
         );
-        const changes: FileChangePreview[] = [
-          {
-            label: call.args.path,
-            oldContent: oldInfo.content,
-            newContent,
-            isNew: !oldInfo.exists,
-            divergent
+        if (!wres.ok && wres.error !== 'User rejected') {
+          const warn = noteWriteFileFailure(call.args.path);
+          if (warn) {
+            log(
+              'anti-spam level 2: write_file failed twice on ' + call.args.path
+            );
+            return { ...wres, error: String(wres.error ?? '') + '\n\n' + warn };
           }
-        ];
-        if (!(await approve('write_file', call.args.path, diff, changes))) {
-          return { ok: false, error: 'User rejected', divergent };
         }
-        const res = await writeFile(call.args.path, newContent, workspaceRoot);
-        if (res.ok) {
-          recordWrite(call.args.path);
-          recordWriteCall();
-        }
-        return divergent ? { ...res, divergent: true } : res;
+        return wres;
       }
 
       case 'edit_file': {
@@ -1406,6 +1420,57 @@ async function writeFile(
     Buffer.from(content, 'utf8')
   );
   return { ok: true, result: 'Written ' + content.length + ' bytes to ' + rel };
+}
+
+/**
+ * v2.5.29 FIX 3 (bug #67): corpul uneltei `write_file`, extras din `executeTool`
+ * ca să putem adăuga avertismentul de nivel 2 al anti-spam-ului (al doilea
+ * eșec pe același fișier) fără să duplicăm fiecare punct de ieșire.
+ */
+async function writeFileTool(
+  args: Record<string, any>,
+  workspaceRoot: string,
+  approve: ApprovalFn,
+  userText?: string
+): Promise<ToolResult> {
+  // v0.2.1: anti-spam — verificăm ÎNAINTE de cardul de aprobare
+  const limitErr = checkWriteLimit(args.path);
+  if (limitErr) return { ok: false, error: limitErr };
+  const newContent = args.content as string;
+  // v2.5.6: truncation guard — nu scriem (și nu cerem aprobare pentru)
+  // un fișier scris doar parțial; cerem modelului conținutul COMPLET
+  const truncErr = checkTruncation('write_file', args.path, newContent);
+  if (truncErr) {
+    return {
+      ok: false,
+      error: truncErr.error,
+      userNotice: truncErr.userNotice
+    };
+  }
+  // v0.5.0: preview pentru diff-ul nativ (conținut vechi + nou)
+  const oldInfo = await tryReadInfo(args.path, workspaceRoot);
+  const diff = makeDiff(args.path, oldInfo.content, newContent);
+  // v2.5.6 (bug #10): WARNING ONLY — semnalăm că modelul a scris altceva
+  // decât fragmentele din prompt, dar NU blocăm și NU reîncercăm
+  const divergent = isDivergentFromPrompt(userText, args.path, newContent);
+  const changes: FileChangePreview[] = [
+    {
+      label: args.path,
+      oldContent: oldInfo.content,
+      newContent,
+      isNew: !oldInfo.exists,
+      divergent
+    }
+  ];
+  if (!(await approve('write_file', args.path, diff, changes))) {
+    return { ok: false, error: 'User rejected', divergent };
+  }
+  const res = await writeFile(args.path, newContent, workspaceRoot);
+  if (res.ok) {
+    recordWrite(args.path);
+    recordWriteCall();
+  }
+  return divergent ? { ...res, divergent: true } : res;
 }
 
 async function editFile(

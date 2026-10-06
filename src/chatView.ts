@@ -63,7 +63,9 @@ import {
 import {
   buildCircuitBreakerMessage,
   CIRCUIT_BREAKER_THRESHOLD,
-  CircuitBreaker
+  CircuitBreaker,
+  EDIT_TOOLS,
+  EditLoopDetector
 } from './circuitBreaker';
 import {
   formatReadFilesExcerpts,
@@ -87,7 +89,13 @@ import {
   sleep
 } from './providers/base';
 import { DetectedProviderError } from './providerErrors';
-import { runVerification, createPromptCheckpoint, restoreToCheckpoint, Checkpoint } from './verifier';
+import {
+  buildCommandErrorHints,
+  runVerification,
+  createPromptCheckpoint,
+  restoreToCheckpoint,
+  Checkpoint
+} from './verifier';
 import { ConversationStore, ConversationMessage } from './conversations';
 import { detectDirectWrite } from './directWrite';
 import { EditRollback } from './rollback';
@@ -138,6 +146,22 @@ const STRUCTURE_EXCLUDE = new Set([
 ]);
 
 const STRUCTURE_MAX_ENTRIES = 300;
+
+/**
+ * v2.5.29: căile relative vizate de un tool care scrie fișiere (un `write_files`
+ * are mai multe; restul au una singură). Folosit de snapshot-ul de rollback,
+ * de loop detection (bug #67) și de hint-urile de eroare.
+ */
+function fileTargetsOf(call: ToolCall): string[] {
+  if (call.tool === 'write_files') {
+    const files = Array.isArray(call.args?.files) ? call.args.files : [];
+    return files
+      .map((f: any) => (f && typeof f.path === 'string' ? f.path : ''))
+      .filter((p: string) => !!p);
+  }
+  const rel = call.args?.path;
+  return typeof rel === 'string' && rel ? [rel] : [];
+}
 
 // FAZA E: persistență — istoricul conversației (max 100 mesaje, în globalState)
 const HISTORY_KEY = 'freekit.history';
@@ -435,10 +459,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     single: boolean;
     title: string;
     rows: FileChangeRow[];
-    pairs: Array<{ label: string; left: vscode.Uri; right: vscode.Uri }>;
+    pairs: Array<{
+      label: string;
+      labelUri: vscode.Uri;
+      left: vscode.Uri;
+      right: vscode.Uri;
+    }>;
   };
   /** v1.3.0: snapshot-uri pre-editare pentru rollback-ul automat. */
   private edits = new EditRollback();
+  /**
+   * v2.5.29 (bug #67): ultimele fișiere vizate de o editare reușită — folosite
+   * la hint-urile de eroare pentru tsc („eroarea e în alt fișier").
+   */
+  private lastEditTargets: string[] = [];
   /** v1.3.0: câte auto-repair-uri am cerut pentru seria curentă de verificări eșuate. */
   private verifyRepairs = 0;
   /**
@@ -1696,6 +1730,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // Contorul e local mesajului ⇒ un mesaj nou pornește mereu de la 0.
       const circuitBreaker = new CircuitBreaker();
       let circuitBroken = false;
+      // v2.5.29 FIX 2 (bug #67): loop detection — câte ÎNCERCĂRI de editare a
+      // primit fiecare fișier în acest mesaj (vezi circuitBreaker.ts).
+      // Instanța e locală mesajului ⇒ contoarele pornesc de la 0.
+      const editLoop = new EditLoopDetector();
+      /** Ultimul fișier editat cu succes (hint-urile de eroare, FIX 4). */
+      let lastEditedFile = '';
       // v2.5.23: pașii executați în acest mesaj (pentru handoff-ul de rotire)
       const recentSteps: string[] = [];
       /**
@@ -1991,6 +2031,58 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break; // iese din bucla agentică
         }
 
+        // v2.5.29 FIX 2 (bug #67): loop detection per fișier — numără ÎNCERCĂRILE
+        // de editare (reușite sau nu), pentru că succesele (edit_file) intercalate
+        // cu run_command eșuat resetau contorul circuit breaker-ului. La 4
+        // încercări pe același fișier trimitem un nudge de strategie AI-ului.
+        let loopNudge = '';
+        if (EDIT_TOOLS.has(toolCall.tool)) {
+          const targets = fileTargetsOf(toolCall);
+          for (const rel of targets) {
+            const outcome = editLoop.recordAttempt(rel);
+            if (outcome.nudge) {
+              log(
+                'loop detection: file edited ' + outcome.count +
+                  ' times — sending strategy nudge'
+              );
+              loopNudge = outcome.nudge;
+              this.post(
+                'heal',
+                '⚠️ Loop detected: "' + rel + '" was edited ' + outcome.count +
+                  ' times without fixing the error — asking the AI to change strategy.'
+              );
+            }
+            if (result.ok) editLoop.recordEditSuccess(rel);
+          }
+          if (result.ok && targets.length) {
+            lastEditedFile = targets[targets.length - 1];
+          }
+        } else if (toolCall.tool === 'run_command' && result.ok) {
+          // edit reușit + comandă reușită = succes real ⇒ contorul se resetează
+          const reset = editLoop.recordCommandSuccess();
+          if (reset) {
+            log(
+              'loop detection: counter reset for ' + reset +
+                ' (edit + command succeeded)'
+            );
+          }
+        }
+
+        // v2.5.29 FIX 4 (bug #67): o comandă eșuată (tsc/build) primește context
+        // înainte de a pleca la AI — eroarea poate fi în ALT fișier decât cel
+        // editat sau în tsconfig.json (include/exclude).
+        const commandHints =
+          toolCall.tool === 'run_command' && !result.ok
+            ? buildCommandErrorHints(
+                toolCall.args.command,
+                result.error ?? '',
+                lastEditedFile || undefined
+              )
+            : '';
+        if (commandHints) {
+          log('command error context added for: ' + toolCall.args.command);
+        }
+
         // v2.5.0 — FIX 3: NU mai verificăm după fiecare fișier. Marcăm doar că
         // s-a modificat ceva în tura curentă; verificarea (astro check / tsc /
         // build) rulează o singură dată, când AI-ul termină răspunsul complet.
@@ -2060,7 +2152,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
         aiReply = await provider.send(
           page,
-          (handoffPrefix ? handoffPrefix + '\n\n' : '') + resultMessage + selfFix,
+          (handoffPrefix ? handoffPrefix + '\n\n' : '') +
+            resultMessage +
+            selfFix +
+            // v2.5.29 (bug #67): nudge de loop detection + context de eroare
+            (loopNudge ? '\n\n' + loopNudge : '') +
+            commandHints,
           signal,
           followUpOpts
         );
@@ -2972,6 +3069,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.edits.reset();
     this.verifyRepairs = 0;
     this.lastVerifyFailure = undefined;
+    this.lastEditTargets = [];
   }
 
   /**
@@ -2988,15 +3086,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   /** Snapshot (o singură dată per fișier) înainte de prima editare a mesajului. */
   private snapshotEditTargets(call: ToolCall, root: string): void {
-    const rels: string[] = [];
-    if (call.tool === 'write_files') {
-      const files = Array.isArray(call.args?.files) ? call.args.files : [];
-      for (const f of files) {
-        if (f && typeof f.path === 'string' && f.path) rels.push(f.path);
-      }
-    } else if (typeof call.args?.path === 'string' && call.args.path) {
-      rels.push(call.args.path);
-    }
+    const rels = fileTargetsOf(call);
     const rootNorm = path.normalize(root);
     const abs: string[] = [];
     for (const rel of rels) {
@@ -3006,6 +3096,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       abs.push(absPath);
     }
     if (abs.length) this.edits.snapshot(abs);
+    // v2.5.29 (bug #67): ținem minte ultima țintă de editare reușită
+    this.lastEditTargets = rels;
   }
 
   /** Rulează verificarea după un edit → textul pentru AI + (eventual) rollback. */
@@ -3081,13 +3173,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         text: '"' + vres.command + '" failed (' + seconds + 's) — the full error goes to the AI.',
         status: 'done'
       });
+      // v2.5.29 FIX 4 (bug #67): context înainte de a trimite eroarea AI-ului —
+      // eroarea poate fi în alt fișier decât cel editat sau în tsconfig.json.
+      const verifyHints = buildCommandErrorHints(
+        vres.command,
+        vres.output,
+        this.lastEditTargets[this.lastEditTargets.length - 1]
+      );
+      if (verifyHints) {
+        log('auto-verify: added error context hints (' + vres.command + ')');
+      }
       return {
         suffix:
           '\n\n❌ VERIFICATION FAILED (auto-repair attempt ' + attempt + '/' +
           MAX_VERIFY_REPAIRS + ') — command: ' + vres.command + ' (' + seconds + 's)\n' +
           '--- OUTPUT ---\n' + vres.output.trim() + '\n--- END OUTPUT ---\n' +
           '⟳ AUTO-REPAIR (' + attempt + '/' + MAX_VERIFY_REPAIRS +
-          '): your last edit broke the project. Read the error output above, find the ROOT CAUSE and fix it with edit_file / write_file. Do NOT run the verification command yourself and do NOT reply with a final answer yet — after your fix the system re-runs verification automatically.',
+          '): your last edit broke the project. Read the error output above, find the ROOT CAUSE and fix it with edit_file / write_file. Do NOT run the verification command yourself and do NOT reply with a final answer yet — after your fix the system re-runs verification automatically.' +
+          verifyHints,
         rollbackText: ''
       };
     }
@@ -4267,6 +4370,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const stamp = Date.now() + '-' + ++reviewSeq;
     const pairs: Array<{
       label: string;
+      /**
+       * v2.5.29 FIX 1 (bug #66): `vscode.changes` validează resourceList ca
+       * [URI, URI?, URI?][] — primul element e o URECHE (calea afișată), nu un
+       * string. Cu string, comanda e respinsă cu „Invalid argument
+       * 'resourceList'" și diff-ul multi-fișier nu se deschide deloc.
+       */
+      labelUri: vscode.Uri;
       left: vscode.Uri;
       right: vscode.Uri;
     }> = [];
@@ -4281,8 +4391,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const rightPath = path.join(tmpDir, stamp + '-' + i + '-new-' + base);
         fs.writeFileSync(leftPath, c.oldContent, 'utf8');
         fs.writeFileSync(rightPath, c.newContent, 'utf8');
+        // eticheta = calea reală din workspace (doar pentru afișare; fișierul
+        // nu e citit de VS Code, conținutul vine din perechea old/new)
+        const absLabel = path.isAbsolute(c.label)
+          ? c.label
+          : path.resolve(root, c.label);
         pairs.push({
           label: c.label,
+          labelUri: vscode.Uri.file(absLabel),
           left: vscode.Uri.file(leftPath),
           right: vscode.Uri.file(rightPath)
         });
@@ -4330,11 +4446,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         );
       } else {
         // multi-diff (un singur editor cu toate fișierele)
-        const resources = pairs.map((p) => [p.label, p.left, p.right]);
+        // v2.5.29 FIX 1 (bug #66): label-ul din resourceList TREBUIE să fie un
+        // vscode.Uri (VS Code verifică `URI.isUri(label)`); cu string comanda
+        // eșua cu „Invalid argument 'resourceList'" și cădeam pe cardul din chat.
+        const resources: Array<[vscode.Uri, vscode.Uri, vscode.Uri]> =
+          pairs.map((p) => [p.labelUri, p.left, p.right]);
         await vscode.commands.executeCommand(
           'vscode.changes',
           title,
           resources
+        );
+        log(
+          'diff review multi-file: ' + pairs.length + ' files, resourceList valid'
         );
       }
     } catch (e: any) {

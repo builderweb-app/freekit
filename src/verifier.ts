@@ -184,6 +184,90 @@ export async function runVerification(root: string): Promise<VerifyResult> {
 }
 
 /* =========================================================================
+ * v2.5.29 FIX 4 (bug #67) — context la erorile de comandă (tsc / build)
+ * Când o comandă de verificare eșuează (ex. `npx tsc --noEmit`), modelul
+ * primește output-ul complet — dar de multe ori editează la nesfârșit același
+ * fișier, deși eroarea e în ALT fișier sau în tsconfig. Aici detectăm, din
+ * output, fișierele menționate și dacă eroarea e de configurare, ca să putem
+ * adăuga un hint explicit înainte de a trimite eroarea AI-ului.
+ * ========================================================================= */
+
+/** `src/a.ts(12,5)` (tsc) sau `src/a.ts:12:5` (alte unelte). */
+const ERROR_FILE_RE =
+  /(?:^|[\s'"`(])([\w@.\-\\/]+\.[A-Za-z][\w]{0,5})(?:\(\d+\s*,\s*\d+\)|:\d+(?::\d+)?)/gm;
+
+/** Cale normalizată pentru comparații (separatori uniformi, fără `./`). */
+function normalizeErrorPath(p: string): string {
+  return String(p ?? '')
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/^~\//, '')
+    .trim()
+    .toLowerCase();
+}
+
+/** Căile de fișier menționate de output-ul unei comenzi (unice, în ordine). */
+export function commandErrorFiles(output: string): string[] {
+  const text = String(output ?? '');
+  const re = new RegExp(ERROR_FILE_RE.source, 'gm');
+  const files: string[] = [];
+  const seen = new Set<string>();
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const key = normalizeErrorPath(m[1]);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    files.push(m[1]);
+  }
+  return files;
+}
+
+/** Eroarea pare de CONFIGURARE (tsconfig / include / exclude / rootDir)? */
+export function looksLikeTsconfigError(output: string): boolean {
+  const text = String(output ?? '');
+  return (
+    /tsconfig/i.test(text) ||
+    /no inputs were found in config file/i.test(text) ||
+    /rootdir/i.test(text) ||
+    (/\binclude\b/i.test(text) && /\bexclude\b/i.test(text))
+  );
+}
+
+/**
+ * Blocul de hint-uri adăugat la eroarea unei comenzi trimise AI-ului:
+ *  - eroarea e în ALT fișier decât cel editat ultima dată;
+ *  - eroarea e de configurare → verifică include/exclude din tsconfig.json.
+ * Întoarce '' când nu e nimic de adăugat (comportamentul de dinainte rămâne).
+ */
+export function buildCommandErrorHints(
+  command: string,
+  output: string,
+  editedFile?: string
+): string {
+  const text = String(output ?? '');
+  if (!text.trim()) return '';
+
+  const hints: string[] = [];
+  const edited = editedFile ? normalizeErrorPath(editedFile) : '';
+  if (edited) {
+    const others = commandErrorFiles(text).filter(
+      (f) => normalizeErrorPath(f) !== edited
+    );
+    if (others.length) {
+      hints.push(
+        'The error is in ' + others[0] + ', not in the file you edited.'
+      );
+    }
+  }
+  if (looksLikeTsconfigError(text)) {
+    hints.push('Check tsconfig.json include/exclude.');
+  }
+
+  if (!hints.length) return '';
+  return '\n\nHINT from "' + command + '":\n- ' + hints.join('\n- ');
+}
+
+/* =========================================================================
  * v1.4.0 — CHECKPOINT GIT PER PROMPT + RESTORE CU UN CLICK
  * Înainte de fiecare mesaj trimis, chatView creează un checkpoint git:
  * dacă working tree-ul e dirty, commit-uiește tot (mesaj-marker

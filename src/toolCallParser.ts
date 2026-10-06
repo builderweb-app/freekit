@@ -310,6 +310,18 @@ function collectCandidates(text: string): string[] {
   return out;
 }
 
+/**
+ * v2.5.28 (bug #65): `write_files` trimis cu array-ul direct ca `args`
+ * (`{"action":"write_files","args":[{"path":"...","content":"..."}]}`) — o
+ * formă pe care modelul o produce natural, dar care era respinsă cu „args.files
+ * is missing". O normalizăm la `{ files: [...] }`; restul uneltelor rămân
+ * neatinse.
+ */
+function normalizeWriteFilesArgs(tool: string, args: any): any {
+  if (tool === 'write_files' && Array.isArray(args)) return { files: args };
+  return args;
+}
+
 /** Normalizează obiectul parsat la {tool, args} (inclusiv forma legacy „action"). */
 function normalizeToolCall(parsed: any): ToolCall | null {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -318,12 +330,16 @@ function normalizeToolCall(parsed: any): ToolCall | null {
 
   if (typeof parsed.tool === 'string') {
     if (parsed.args && typeof parsed.args === 'object') {
-      return { tool: parsed.tool, args: parsed.args };
+      return {
+        tool: parsed.tool,
+        args: normalizeWriteFilesArgs(parsed.tool, parsed.args)
+      };
     }
 
     if (typeof parsed.action === 'string') {
       const { tool, action, ...rest } = parsed;
-      return { tool: `${tool}_${action}`, args: rest };
+      const name = `${tool}_${action}`;
+      return { tool: name, args: normalizeWriteFilesArgs(name, rest) };
     }
 
     return { tool: parsed.tool, args: {} };
@@ -335,6 +351,10 @@ function normalizeToolCall(parsed: any): ToolCall | null {
     const { action, args, ...rest } = parsed;
     if (args && typeof args === 'object' && !Array.isArray(args)) {
       return { tool: action, args };
+    }
+    // v2.5.28 (bug #65): args ca array direct (write_files) → args.files
+    if (Array.isArray(args)) {
+      return { tool: action, args: normalizeWriteFilesArgs(action, args) };
     }
     return { tool: action, args: rest };
   }

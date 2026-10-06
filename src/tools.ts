@@ -738,7 +738,9 @@ use the JSON format:
 8. git_status(), git_diff(file?), git_log(n?), git_commit(message, files?),
    git_branch(action, name?), git_revert(commit)
 9. read_files(paths) - batch read (max 12)
-10. write_files(files) - batch write (one approval)
+10. write_files(files) - batch write (one approval). args.files is MANDATORY —
+    the array of files is nested INSIDE args.files, never passed as args itself:
+    {"action":"write_files","args":{"files":[{"path":"a.ts","content":"..."},{"path":"b.ts","content":"..."}]}}
 11. project_info() - detected project info
 12. search_semantic(query) - semantic code search (if indexed)
 13. open_workspace(path) - open folder in new window
@@ -842,7 +844,7 @@ Tools:
 7. run_npm(action, script) — "install" or a script name from package.json
 8. git(action, ...) — "status", "diff", "log", "commit" (message, add?), "branch" (name?), "revert" (commit), "restore" (path)
 9. read_files(paths) — batch read: up to 12 files in ONE call
-10. write_files(files) — array of {"path": "...", "content": "..."}; ONE call for ALL files
+10. write_files(files) — ONE call for ALL files: {"tool": "write_files", "args": {"files": [{"path": "a.ts", "content": "..."}, {"path": "b.ts", "content": "..."}]}} — args.files is MANDATORY (the array goes INSIDE args.files, never as args directly)
 11. project_info()
 12. search_semantic(query) — find code by MEANING (e.g. "where do we validate login"); works only if the workspace was indexed (command "Freekit: Index Workspace")
 
@@ -1857,7 +1859,10 @@ async function writeFilesBatch(
   if (!files.length) {
     return {
       ok: false,
-      error: 'write_files: args.files is missing (array of {"path","content"})'
+      error:
+        'write_files: args.files is missing or empty. Expected ' +
+        '{"action":"write_files","args":{"files":[{"path":"...","content":"..."}]}} ' +
+        '(one item per file; the array goes INSIDE args.files).'
     };
   }
   if (files.length > MAX_BATCH_WRITE_FILES) {

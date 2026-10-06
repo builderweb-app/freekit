@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.5.16
+
+- FIX (bug #43): **tool-protocol refusals in new wordings were accepted as final answers.** The v2.5.14 detection missed formulations like EN „the tools you specified are not available in this session" / „I can't access the workspace" / „not available in my current environment" and RO „Nu pot executa modificarea în workspace-ul VS Code din această conversație: instrumentele read_file / edit_file / run_npm / git_* pe care le-ai specificat nu sunt disponibile în mediul meu actual." / „Nu am acces la fișiere" / „Nu pot citi fișiere". `looksLikeToolRefusal` now checks a list of EN/RO patterns (`TOOL_REFUSAL_RES`) covering tools/connectors unavailable, missing workspace/project/file access, „cannot execute/modify/edit", „don't have the ability/tools", and the Romanian equivalents; detection still gets the one-shot `TOOL_REFUSAL_NUDGE` instead of posting the refusal as the answer.
+- Version bump to 2.5.16.
+
 ## v2.5.15
 
 - FIX (bug #41): **ChatGPT free „Chat memory full" was not detected — the agentic loop kept sending nudges into a chat that could not answer any more** (live-reported after 5-10 tool calls on the ~8k-token free context: banner „Chat memory full — continue in a new chat", no reply, loop running to timeout). The banner text („chat memory full" / „continue in a new chat" / „memory limit reached") is now recognized both on the response text and in the page scan (`memory_full` kind in `src/providerErrors.ts`), so the wait stops at detection instead of a silent 150 s timeout.

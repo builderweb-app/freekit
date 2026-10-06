@@ -838,13 +838,15 @@ export function looksLikeIntentOnly(reply: string): boolean {
 
 /* =========================================================================
  * v2.5.14 (bug #38) — REFUZ AL PROTOCOLULUI DE UNELTE
+ * v2.5.16 (bug #43) — variante EN/RO suplimentare
  * Modelul răspunde uneori ca un chat obișnuit în loc să execute protocolul:
  * „the VS Code workspace tools you specified are not available in this
- * session", „I can't safely modify the project without access to the
- * workspace". Cauza tipică: sesiunea providerului nu era complet autentificată
- * când a plecat mesajul. Un astfel de refuz NU se afișează ca răspuns final:
- * îi cerem explicit, o singură dată, să trimită tool call-ul (uneltele rulează
- * în clientul VS Code, nu la model).
+ * session", „Nu pot executa modificarea în workspace-ul VS Code din această
+ * conversație: instrumentele … nu sunt disponibile în mediul meu actual".
+ * Cauza tipică: sesiunea providerului nu era complet autentificată când a
+ * plecat mesajul. Un astfel de refuz NU se afișează ca răspuns final: îi cerem
+ * explicit, o singură dată, să trimită tool call-ul (uneltele rulează în
+ * clientul VS Code, nu la model).
  * ========================================================================= */
 
 /** v2.5.14 (bug #38): câte reluări facem când modelul refuză protocolul (max 1). */
@@ -852,11 +854,29 @@ export const MAX_REFUSAL_RETRIES = 1;
 
 /**
  * Refuzuri tipice: unelte/workspace indisponibile, fără acces la proiect.
+ * v2.5.16 (bug #43): formulările variază mult de la un model la altul
+ * („tools you specified are not available", „not available in my current
+ * environment", „Nu pot executa…", „instrumentele … nu sunt disponibile") —
+ * fiecare variantă EN/RO are pattern-ul ei.
  * Doar pentru răspunsuri scurte (un refuz real e scurt) — nu prindem
  * explicații lungi și legitime despre unelte.
  */
-const TOOL_REFUSAL_RE =
-  /not available in this session|(?:tools?|connectors?)[^.!?\n]{0,60}(?:are |is )?not (?:available|mounted)|(?:workspace|project|repo(?:sitory)?) files?[^.!?\n]{0,20}not (?:mounted|available|accessible|attached)|(?:can['’]?t|cannot|can not|unable to)[^.!?\n]{0,40}(?:access|modify|use|open|read)[^.!?\n]{0,40}(?:workspace|project|files?|repo(?:sitory)?)|(?:don['’]?t|do not|doesn['’]?t) have (?:any )?access to[^.!?\n]{0,30}(?:workspace|project|files?|repo)|nu am acces (?:la|în)|(?:unelte(?:le)?|instrumentele)[^.!?\n]{0,40}(?:nu sunt|indisponibil)/i;
+const TOOL_REFUSAL_RES: RegExp[] = [
+  // EN — unelte/workspace indisponibile sau lipsa accesului
+  /(?:tools?|connectors?)[^.!?\n]{0,60}(?:are |is )?(?:not|aren['’]?t) (?:available|mounted)/i,
+  /not available (?:in (?:this|my)|here)/i,
+  /(?:cannot|can['’]?t|can not|unable to)[^.!?\n]{0,40}\b(?:access|execute|modify|edit|use|open|read|write)\b[^.!?\n]{0,40}\b(?:workspace|project|files?|repo(?:sitory)?)/i,
+  /(?:don['’]?t|do not|doesn['’]?t) have (?:any )?access to/i,
+  /(?:can['’]?t|cannot|can not)\s+(?:read|write|edit)\s+files?/i,
+  /(?:don['’]?t|do not)\s+(?:have|possess)\s+(?:any\s+|the\s+)?(?:ability|tools?)/i,
+  /(?:workspace|project|repo(?:sitory)?) files?[^.!?\n]{0,20}not (?:mounted|available|accessible|attached)/i,
+  // RO — aceleași situații, formulări românești
+  /nu pot\s+(?:executa|accesa|modifica)/i,
+  /(?:unelte(?:le)?|instrumentele)[\s\S]{0,200}nu sunt disponibile/i,
+  /nu am acces\s+(?:la|[îi]n)/i,
+  /nu pot\s+(?:citi|scrie|edita)\s+fi(?:ș|s)iere/i,
+  /nu sunt disponibile [îi]n mediul meu/i
+];
 
 /** true când răspunsul e un REFUZ al protocolului de unelte (nu un răspuns final). */
 export function looksLikeToolRefusal(reply: string): boolean {
@@ -864,7 +884,7 @@ export function looksLikeToolRefusal(reply: string): boolean {
   if (!text || text.length > 1500) return false;
   // e o ÎNCERCARE de tool call, nu un refuz — are fluxul lui (malformed)
   if (/\{\s*["']tool["']\s*:/.test(text)) return false;
-  return TOOL_REFUSAL_RE.test(text);
+  return TOOL_REFUSAL_RES.some((re) => re.test(text));
 }
 
 /** Nudge trimis când modelul refuză protocolul (v2.5.14, bug #38). */

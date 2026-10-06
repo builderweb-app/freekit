@@ -54,6 +54,7 @@ import {
   looksLikeToolRefusal,
   buildOutsideScopeHint,
   buildRootTsconfigHint,
+  buildUnixCommandHint,
   checkAutoApproveScope,
   detectTaskScope,
   isPathInScope,
@@ -63,6 +64,7 @@ import {
   MALFORMED_TOOL_CALL_ERROR,
   MALFORMED_TOOL_CALL_NUDGE,
   MAX_MALFORMED_RETRIES,
+  drainParserLogs,
   looksLikeToolCallAttempt,
   parseToolCallText
 } from './toolCallParser';
@@ -2161,6 +2163,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // v2.5.29 FIX 4 (bug #67): o comandă eșuată (tsc/build) primește context
         // înainte de a pleca la AI — eroarea poate fi în ALT fișier decât cel
         // editat sau în tsconfig.json (include/exclude).
+        // v2.5.32 (bug #76): + hint TS6059 (tsconfig.json separat în subfolder);
+        // v2.5.32 (bug #78): + hint Unix → Windows pentru comenzi Unix.
         let commandHints = '';
         if (toolCall.tool === 'run_command' && !result.ok) {
           const scope = this.taskScope();
@@ -2169,7 +2173,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             buildCommandErrorHints(
               toolCall.args.command,
               errOut,
-              lastEditedFile || undefined
+              lastEditedFile || undefined,
+              scope
             ) +
             // v2.5.30 FIX 2 (bug #69): dacă erorile sunt în afara scope-ului
             // task-ului, spunem explicit AI-ului să NU le modifice
@@ -2181,7 +2186,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               errOut,
               scope,
               this.scopeTsconfigRel(root)
-            );
+            ) +
+            // v2.5.32 FIX (bug #78): rm/ls/cp/mv/cat/touch/mkdir -p nu există pe Windows
+            buildUnixCommandHint(toolCall.args.command);
           if (commandHints) {
             log('command error context added for: ' + toolCall.args.command);
           }
@@ -3422,7 +3429,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         buildCommandErrorHints(
           vres.command,
           vres.output,
-          this.lastEditTargets[this.lastEditTargets.length - 1]
+          this.lastEditTargets[this.lastEditTargets.length - 1],
+          scope
         ) +
         buildOutsideScopeHint(vres.output, scope) +
         (ranInScope
@@ -4964,6 +4972,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // v2.5.27 (bug #63): log-ul traducerilor `.ts.txt` → `.ts` (parserul le
     // pune în coadă, aici ajung în Output → Freekit)
     for (const msg of drainAliasLogs()) log(msg);
+    // v2.5.32 (bug #79): log-ul reconstrucțiilor de TAB din comenzi
+    for (const msg of drainParserLogs()) log(msg);
     return call;
   }
 

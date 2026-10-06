@@ -2,6 +2,63 @@ import type { ToolCall } from './tools';
 import { mapToolCallAliases, queueAliasLog } from './tsAlias';
 
 /* =========================================================================
+ * v2.5.32 FIX (bug #79) — TAB într-o cale din comandă (bug de parser)
+ * `"del bootcamp-test\test.ts"` e JSON INVALID-valid: `\t` e interpretat ca
+ * TAB, deci comanda ajunge la execuție ca `del bootcamp-test<TAB>est.ts` —
+ * fișierul nu există și comanda eșuează („cannot find the file"). Aici
+ * reconstruim secvența originală: TAB-ul ține locul lui `\` + `t` (separator +
+ * litera „t" înghițită de escape), deci TAB → `\t` pe Windows, `t` precedat de
+ * `/` pe Unix (`/test.ts`).
+ * ========================================================================= */
+
+/** Log-urile parserului (drenate de chatView, ca la tsAlias). */
+const pendingLogs: string[] = [];
+const loggedMessages = new Set<string>();
+
+function queueParserLog(msg: string): void {
+  if (loggedMessages.has(msg)) return;
+  loggedMessages.add(msg);
+  pendingLogs.push(msg);
+}
+
+/** Mesajele de log acumulate de parser (le golește). */
+export function drainParserLogs(): string[] {
+  return pendingLogs.splice(0, pendingLogs.length);
+}
+
+/**
+ * v2.5.32 FIX (bug #79): reconstruiește TAB-urile suspecte dintr-o comandă.
+ * Un TAB precedat de un caracter non-alb e aproape sigur un `\t` din JSON
+ * (indentarea cu TAB, adică TAB la început de segment, rămâne neatinsă).
+ */
+export function reconstructCommandTabs(command: string): string {
+  const text = String(command ?? '');
+  if (!text.includes('\t')) return text;
+  const sep = process.platform === 'win32' ? '\\' : '/';
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch !== '\t') {
+      out += ch;
+      continue;
+    }
+    const prev = i > 0 ? text[i - 1] : '';
+    out += prev && !/\s/.test(prev) ? sep + 't' : ch;
+  }
+  return out;
+}
+
+/** Aplică reconstrucția TAB-urilor pe `args.command` (dacă există). */
+function withCommandTabsFixed(call: ToolCall): ToolCall {
+  const args = call.args as Record<string, any> | undefined;
+  if (!args || typeof args.command !== 'string') return call;
+  const fixed = reconstructCommandTabs(args.command);
+  if (fixed === args.command) return call;
+  queueParserLog('parser: reconstructed tab in command: ' + fixed);
+  return { tool: call.tool, args: { ...args, command: fixed } };
+}
+
+/* =========================================================================
  * v2.4.8 — Extractor robust de tool call
  * Parser-ul vechi (chatView.parseToolCall) presupunea că răspunsul întreg e
  * JSON-ul tool call-ului: orice text în plus (proză, fence markdown) sau un
@@ -631,14 +688,14 @@ export function parseMarkerToolCall(text: string): ToolCall | null {
     if (!MARKER_TOOLS.has(tool)) return null;
     if (tool === 'write_file') {
       const call = parseWriteFileMarkers(lines, i + 1);
-      return call ? withResolvedPaths(call) : null;
+      return call ? withCommandTabsFixed(withResolvedPaths(call)) : null;
     }
     if (tool === 'edit_file') {
       const call = parseEditFileMarkers(lines, i + 1);
-      return call ? withResolvedPaths(call) : null;
+      return call ? withCommandTabsFixed(withResolvedPaths(call)) : null;
     }
     const call = parseWriteFilesMarkers(lines, i + 1);
-    return call ? withResolvedPaths(call) : null;
+    return call ? withCommandTabsFixed(withResolvedPaths(call)) : null;
   }
   return null;
 }
@@ -669,7 +726,7 @@ export function parseToolCallText(text: string): ToolCall | null {
     const parsed = tryParseJsonObject(candidate);
     if (!parsed) continue;
     const call = normalizeToolCall(parsed);
-    if (call) return withResolvedPaths(call);
+    if (call) return withCommandTabsFixed(withResolvedPaths(call));
   }
 
   return null;

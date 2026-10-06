@@ -173,7 +173,10 @@ function resolveTscBin(fromDir: string, root: string): string | null {
  * Rulează verificarea proiectului. Întoarce mereu un VerifyResult —
  * `command` gol înseamnă „nicio verificare configurată” (ok: true, no-op).
  * v2.5.31 (bug #72): cu `opts.cwd` (scope-ul task-ului, care are propriul
- * tsconfig.json), `tsc --noEmit` rulează din acel folder.
+ * tsconfig.json), `tsc --noEmit` rulează pentru configul din acel folder.
+ * v2.5.32 (bug #77): detecția e AUTOMATĂ și explicită — când
+ * `<scope>/tsconfig.json` există, comanda devine
+ * `tsc --noEmit -p <scope>/tsconfig.json` (log: „using scoped tsconfig”).
  */
 export async function runVerification(
   root: string,
@@ -195,38 +198,56 @@ export async function runVerification(
     opts?.cwd && path.resolve(opts.cwd) !== path.resolve(root)
       ? opts.cwd
       : undefined;
-  const tscBin =
+
+  // v2.5.32 FIX (bug #77): tsconfig.json propriu în folderul scope-ului →
+  // verificarea folosește EXACT acel config (`-p`). Fără `-p`, tsc pornit din
+  // root citește tsconfig.json din ROOT și ignoră complet configul din subfolder.
+  const scopedPath =
     scopeCwd && project.checkScript === 'tsc --noEmit'
-      ? resolveTscBin(scopeCwd, root)
+      ? path.join(scopeCwd, 'tsconfig.json')
       : null;
-  if (scopeCwd && !tscBin) {
+  const scoped =
+    scopedPath && fs.existsSync(scopedPath) ? scopedPath : null;
+  const scopedRel = scoped
+    ? path.relative(root, scoped).replace(/\\/g, '/')
+    : '';
+  if (scoped) log('verify: using scoped tsconfig at ' + scopedRel);
+
+  const tscBin = scoped ? resolveTscBin(scopeCwd as string, root) : null;
+  if (scoped && !tscBin) {
     log(
-      'tsc local negăsit pentru ' + scopeCwd + ' — verificarea rulează din root'
+      'tsc local negăsit pentru ' + (scopeCwd as string) +
+        ' — folosesc ' + project.packageManager + ' cu configul din scope'
     );
   }
-  const cwd = tscBin && scopeCwd ? scopeCwd : root;
-  const label = tscBin
-    ? 'node ' + path.relative(root, tscBin).replace(/\\/g, '/') + ' --noEmit' +
-      ' (in ' + path.relative(root, scopeCwd as string).replace(/\\/g, '/') + ')'
+  const cwd = scoped ? (scopeCwd as string) : root;
+  const label = scoped
+    ? (tscBin
+        ? 'node ' + path.relative(root, tscBin).replace(/\\/g, '/') +
+          ' --noEmit -p ' + scopedRel
+        : command + ' -p ' + scopedRel)
     : command;
   const start = Date.now();
   log('rulez verificarea: ' + label);
 
   try {
     const run =
-      tscBin && scopeCwd
-        ? execFileAsync(process.execPath, [tscBin, '--noEmit'], {
-            cwd: scopeCwd,
-            timeout: VERIFY_TIMEOUT_MS,
-            maxBuffer: 10 * 1024 * 1024,
-            windowsHide: true
-          })
-        : execAsync(command, {
+      scoped && tscBin
+        ? execFileAsync(process.execPath, [tscBin, '--noEmit', '-p', scoped], {
             cwd: root,
             timeout: VERIFY_TIMEOUT_MS,
             maxBuffer: 10 * 1024 * 1024,
             windowsHide: true
-          });
+          })
+        : execAsync(
+            scoped ? command + ' -p "' + scoped + '"' : command,
+            {
+              cwd: root,
+              timeout: VERIFY_TIMEOUT_MS,
+              maxBuffer: 10 * 1024 * 1024,
+              windowsHide: true
+            }
+          );
     const { stdout, stderr } = await run;
     // v2.5.23: cap+coadă — sumarul erorilor (tsc/build) e la finalul output-ului
     const output = clipPayload(
@@ -305,12 +326,15 @@ export function looksLikeTsconfigError(output: string): boolean {
  * Blocul de hint-uri adăugat la eroarea unei comenzi trimise AI-ului:
  *  - eroarea e în ALT fișier decât cel editat ultima dată;
  *  - eroarea e de configurare → verifică include/exclude din tsconfig.json.
+ *  - v2.5.32 (bug #76): TS6059 → tsconfig.json separat în subfolder, nu editarea
+ *    la infinit a tsconfig.json din ROOT.
  * Întoarce '' când nu e nimic de adăugat (comportamentul de dinainte rămâne).
  */
 export function buildCommandErrorHints(
   command: string,
   output: string,
-  editedFile?: string
+  editedFile?: string,
+  scope?: string[] | null
 ): string {
   const text = String(output ?? '');
   if (!text.trim()) return '';
@@ -327,12 +351,76 @@ export function buildCommandErrorHints(
       );
     }
   }
-  if (looksLikeTsconfigError(text)) {
+  if (looksLikeTs6059(text)) {
+    // v2.5.32 FIX (bug #76): „Check tsconfig.json include/exclude" e un sfat
+    // GREȘIT aici — omul edita root tsconfig.json la nesfârșit.
+    hints.push(buildTs6059Hint(text, scope));
+  } else if (looksLikeTsconfigError(text)) {
     hints.push('Check tsconfig.json include/exclude.');
   }
 
   if (!hints.length) return '';
   return '\n\nHINT from "' + command + '":\n- ' + hints.join('\n- ');
+}
+
+/* =========================================================================
+ * v2.5.32 FIX (bug #76) — hint TS6059 (rootDir + subfolder)
+ * `error TS6059: File 'C:/x/bootcamp-test/index.ts' is not under 'rootDir'
+ * 'C:/x/src'.` înseamnă că tsc a folosit tsconfig.json din ROOT (are `rootDir`
+ * setat) și a exclus fișierele din subfolder. Modelul „repara" asta editând la
+ * infinit tsconfig.json din root (sau pe cel din subfolder, fără efect când
+ * comanda pornește din root). Hint-ul spune fix ce trebuie făcut: tsconfig.json
+ * separat în subfolder + `tsc -p <subfolder>/tsconfig.json`.
+ * ========================================================================= */
+
+/** `File 'C:/x/bootcamp-test/index.ts' is not under 'rootDir'` (primul path). */
+const TS6059_FILE_RE = /TS6059:[^\n]*?\bFile\s+['"]([^'"]+)['"]/i;
+
+/** Eroarea asta e TS6059? */
+export function looksLikeTs6059(output: string): boolean {
+  return /TS6059/.test(String(output ?? ''));
+}
+
+/**
+ * Folderul (relativ, cu `/`) în care trebuie creat tsconfig.json: întâi căutăm
+ * o intrare din scope în calea din eroare, altfel părintele fișierului.
+ */
+function ts6059Folder(output: string, scope?: string[] | null): string {
+  const m = TS6059_FILE_RE.exec(String(output ?? ''));
+  const file = m ? String(m[1]).replace(/\\/g, '/') : '';
+  const lower = file.toLowerCase();
+  if (scope && scope.length) {
+    for (const s of scope) {
+      const n = String(s ?? '')
+        .replace(/\\/g, '/')
+        .replace(/^\.\//, '')
+        .replace(/\/+$/, '');
+      if (!n) continue;
+      const i = lower.indexOf(n.toLowerCase());
+      if (i >= 0) return file.slice(i, i + n.length);
+    }
+  }
+  const parts = file.split('/').filter(Boolean);
+  if (parts.length >= 2) return parts[parts.length - 2];
+  return '<scope>';
+}
+
+/** Hint-ul TS6059 (vezi secțiunea de mai sus). */
+export function buildTs6059Hint(
+  output: string,
+  scope?: string[] | null
+): string {
+  const folder = ts6059Folder(output, scope);
+  return (
+    'TS6059 means ROOT tsconfig.json has \'rootDir\' set and excludes files outside it.\n' +
+    'BEST FIX: create a separate tsconfig.json inside ' +
+    folder +
+    '/ and run:\n' +
+    '  npx tsc --noEmit -p ' +
+    folder +
+    '/tsconfig.json\n' +
+    'Do NOT keep editing the ROOT tsconfig.json.'
+  );
 }
 
 /* =========================================================================

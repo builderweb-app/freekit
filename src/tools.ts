@@ -338,34 +338,101 @@ function normalizeScopePath(p: string): string {
     .toLowerCase();
 }
 
+/** Ultimul segment al unei căi (`a/b/c.ts` → `c.ts`). */
+function scopeBasename(p: string): string {
+  const n = String(p ?? '');
+  const i = n.lastIndexOf('/');
+  return i >= 0 ? n.slice(i + 1) : n;
+}
+
+/** Intrarea pare FIȘIER (ultimul segment are o extensie cunoscută), nu folder. */
+function looksLikeFileEntry(p: string): boolean {
+  return new RegExp('\\.(?:' + SCOPE_FILE_EXTS + ')$', 'i').test(
+    scopeBasename(p)
+  );
+}
+
 /**
  * v2.5.30 FIX 1 (bug #68): scope-ul task-ului = folderele / căile menționate
  * explicit în text (de regulă primul mesaj al utilizatorului). Întoarce o listă
  * normalizată de căi, sau `null` când nu se poate determina niciuna.
+ *
+ * v2.5.32 FIX (bug #80): scope-ul era prea permisiv — „repară erorile din
+ * bootcamp-test/" + fișierele enumerate în prompt dădeau scope
+ * `[bootcamp-test, index.ts, utils.ts, test.js, test.ts, changelog.md, …]`,
+ * adică TOATE fișierele cu acel nume din proiect (auto-approve scria oriunde).
+ * Acum: dacă textul menționează un FOLDER, scope-ul e redus la folderul
+ * rădăcină (`bootcamp-test/` → `bootcamp-test`) și numele de fișiere FĂRĂ cale
+ * (`index.ts`, `test.ts`, `changelog.md`, `package.json`, `tsconfig.json`) sunt
+ * ignorate — sunt fișierele din folderul deja inclus, nu ținte separate.
  */
 export function detectTaskScope(userText: string): string[] | null {
   const text = String(userText ?? '');
   if (!text.trim()) return null;
-  const found: string[] = [];
+
+  const folderRoots: string[] = [];
+  const filePaths: string[] = [];
+  const bareNames: string[] = [];
   const seen = new Set<string>();
-  const add = (raw: string) => {
-    if (SCOPE_URL_LIKE_RE.test(raw)) return;
-    const n = normalizeScopePath(raw);
-    if (!n || n === '.' || n === '..' || n === '/') return;
-    if (seen.has(n)) return;
+  const pushUnique = (list: string[], n: string) => {
+    if (!n || seen.has(n)) return;
     seen.add(n);
-    found.push(n);
+    list.push(n);
   };
-  for (const source of [
-    SCOPE_SLASH_PATH_RE,
-    SCOPE_TRAILING_FOLDER_RE,
-    SCOPE_FILE_RE,
-    SCOPE_DOTFILE_RE
-  ]) {
+
+  // 1. căi cu separator (`bootcamp-test/index.ts`, `bootcamp-test/src`) și
+  //    foldere cu bară finală (`bootcamp-test/`)
+  for (const source of [SCOPE_SLASH_PATH_RE, SCOPE_TRAILING_FOLDER_RE]) {
     const re = new RegExp(source.source, 'g');
     let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) add(m[1]);
+    while ((m = re.exec(text)) !== null) {
+      const raw = m[1];
+      if (SCOPE_URL_LIKE_RE.test(raw)) continue;
+      const n = normalizeScopePath(raw);
+      if (!n || n === '.' || n === '..' || n === '/') continue;
+      if (looksLikeFileEntry(n)) {
+        pushUnique(filePaths, n);
+      } else {
+        // folder: păstrăm doar segmentul rădăcină (`bootcamp-test/src` → `bootcamp-test`)
+        const rootSeg = n.split('/')[0];
+        if (rootSeg && rootSeg !== '.' && rootSeg !== '..') {
+          pushUnique(folderRoots, rootSeg);
+        }
+      }
+    }
   }
+
+  // 2. nume de fișiere fără cale (ignorate când există un folder rădăcină)
+  for (const source of [SCOPE_FILE_RE, SCOPE_DOTFILE_RE]) {
+    const re = new RegExp(source.source, 'g');
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const raw = m[1];
+      if (SCOPE_URL_LIKE_RE.test(raw)) continue;
+      const n = normalizeScopePath(raw);
+      if (!n || n === '.' || n === '..' || n === '/') continue;
+      // „index.ts" extras din „bootcamp-test/index.ts" nu e o țintă separată
+      const base = scopeBasename(n);
+      if (
+        folderRoots.includes(base) ||
+        filePaths.some((f) => scopeBasename(f) === base)
+      ) {
+        continue;
+      }
+      pushUnique(bareNames, n);
+    }
+  }
+
+  const found = folderRoots.slice();
+  for (const f of filePaths) {
+    // căile deja acoperite de un folder rădăcină nu se mai adaugă separat
+    if (folderRoots.some((r) => f === r || f.startsWith(r + '/'))) continue;
+    found.push(f);
+  }
+  if (!folderRoots.length) {
+    for (const b of bareNames) found.push(b);
+  }
+
   return found.length ? found : null;
 }
 
@@ -538,6 +605,61 @@ export function buildRootTsconfigHint(
     '" to "exclude" in the root tsconfig.json, or (2) run tsc from inside the scope: `cd ' +
     folder +
     ' && npx tsc --noEmit`.\nDo NOT keep editing scope files to silence errors that come from outside the scope.'
+  );
+}
+
+/* =========================================================================
+ * v2.5.32 FIX (bug #78) — comenzi Unix pe Windows
+ * Modelul (antrenat pe Unix) rulează `rm -rf bootcamp-test`, `ls`, `cp`, `mv`,
+ * `cat <file>`, `touch`, `mkdir -p` pe Windows: comanda eșuează cu „not
+ * recognized as an internal or external command", iar modelul reîncearcă
+ * aceeași comandă până se termină încercările. La eșecul unei `run_command`
+ * adăugăm un hint explicit cu echivalentele Windows (sau Node), ca modelul să
+ * treacă direct la varianta corectă.
+ * ========================================================================= */
+
+/** Comenzi care NU există în cmd/PowerShell (echivalente greșite). */
+const UNIX_ONLY_COMMAND_RE = /^(?:sudo\s+)?(rm|ls|cp|mv|cat|touch)\b/i;
+
+/** `mkdir -p <dir>` / `mkdir --parents <dir>` (POSIX; pe Windows nu trebuie). */
+const MKDIR_PARENTS_RE = /^(?:sudo\s+)?mkdir\s+(?:-[A-Za-z]*p[A-Za-z]*|--parents)\b/i;
+
+/**
+ * Prima comandă din fiecare segment al liniei (`cd x && rm y` → `rm y`).
+ * Separatorii de shell (`&&`, `||`, `;`, `|`, linie nouă) încep mereu o
+ * comandă nouă; restul segmentelor sunt ignorate dacă nu încep cu una.
+ */
+function commandSegments(command: string): string[] {
+  return String(command ?? '')
+    .split(/&&|\|\||[;|\n\r]/)
+    .map((s) => s.trim().replace(/^["']+/, '').trim())
+    .filter(Boolean);
+}
+
+/**
+ * v2.5.32 FIX (bug #78): hint-ul Unix → Windows pentru o comandă eșuată.
+ * Întoarce '' pe non-Windows sau când comanda nu folosește utilitare Unix.
+ */
+export function buildUnixCommandHint(command: string): string {
+  if (process.platform !== 'win32') return '';
+  const found = new Set<string>();
+  for (const segment of commandSegments(command)) {
+    const m = UNIX_ONLY_COMMAND_RE.exec(segment);
+    if (m) {
+      found.add(m[1].toLowerCase());
+      continue;
+    }
+    if (MKDIR_PARENTS_RE.test(segment)) found.add('mkdir -p');
+  }
+  if (!found.size) return '';
+  return (
+    '\n\n⚠️ You are on Windows: ' +
+    [...found].join(', ') +
+    ' is a Unix command, not available in cmd/PowerShell (this is why the command failed).\n' +
+    'Use instead: del <file> (rm), dir (ls), copy (cp), move (mv), type (cat), ' +
+    'echo. > <file> (touch), mkdir (mkdir -p creates the parents anyway).\n' +
+    "OR use Node: require('fs').unlinkSync('<file>'), require('fs').mkdirSync('<dir>', { recursive: true }), " +
+    "require('fs').readFileSync('<file>', 'utf8')."
   );
 }
 

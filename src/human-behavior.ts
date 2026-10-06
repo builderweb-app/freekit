@@ -15,8 +15,9 @@ const log = (msg: string) => logLine('human', msg);
  *   freekit.humanBehavior (implicit true) — mouse/scroll
  *
  * v2.0.6: caracterele sunt tastate cu evenimente reale de tastatură
- * (keydown/keypress/keyup), nu lipite cu `insertText`. Mesajele peste 200 de
- * caractere tastează natural doar primele 30-50 (vezi `humanType`).
+ * (keydown/keypress/keyup), nu lipite cu `insertText`. Mesajele lungi tastează
+ * natural doar începutul (vezi `humanType`); peste `MAX_TOTAL_NATURAL` se
+ * lipește totul dintr-o bucată, fără nicio tastare naturală.
  * ========================================================================= */
 
 export interface HumanTypingOptions {
@@ -36,14 +37,18 @@ const DEFAULT_OPTIONS: HumanTypingOptions = {
 };
 
 /**
- * v2.0.6: până la acest prag mesajul se tastează integral „natural”; peste el
- * (prompturi uriașe) doar începutul, restul fiind lipit dintr-o singură bucată.
+ * v2.5.21 (bug #52 + #53): câte caractere de la începutul unui mesaj se tastează
+ * „natural”. Capul tastat nu ajută la nimic peste câteva zeci de caractere.
  */
-export const NATURAL_TYPING_MAX_CHARS = 200;
+export const NATURAL_TYPING_MAX_CHARS = 100;
 
-/** v2.0.6: câte caractere de la începutul unui mesaj lung se tastează natural. */
-const NATURAL_HEAD_MIN_CHARS = 30;
-const NATURAL_HEAD_MAX_CHARS = 50;
+/**
+ * v2.5.21 (bug #52 + #53): peste acest prag mesajul NU se mai tastează natural
+ * deloc — se lipește dintr-o singură bucată (`insertText`). Payload-urile mari
+ * (tool calls de zeci de mii de caractere) pierdeau minute întregi tastând un
+ * cap „uman” de câteva zeci de caractere înainte de lipirea restului.
+ */
+export const MAX_TOTAL_NATURAL = 1000;
 
 /**
  * Tastează text ca un om: delay aleatoriu, pauze la punctuație, burst-uri ocazionale.
@@ -51,8 +56,12 @@ const NATURAL_HEAD_MAX_CHARS = 50;
  *
  * v2.0.6: caracterele trec prin `page.keyboard.type()`, deci Chrome primește
  * evenimente REALE de keydown/keypress/keyup (anti-detect-ul care numără doar
- * `insertText` nu mai vede o lipire instantă). Mesajele lungi rămân rapide:
- * se tastează natural doar primele 30-50 de caractere, restul se lipește.
+ * `insertText` nu mai vede o lipire instantă). Mesajele lungi rămân rapide.
+ *
+ * v2.5.21 (bug #52 + #53): payload-urile mari (peste `MAX_TOTAL_NATURAL`) se
+ * lipesc direct, fără nicio tastare naturală — un cap „uman” de câteva zeci de
+ * caractere pe un mesaj de 40k adăuga doar întârziere. Sub prag se tastează
+ * natural doar primele `NATURAL_TYPING_MAX_CHARS` caractere, restul lipit.
  *
  * v2.5.14 (bug #39): tastarea „naturală” se oprește ÎNAINTE de primul \r/\n —
  * pe ChatGPT un `insertText('\n')` izolat echivalează cu Enter: mesajul pleca
@@ -69,10 +78,16 @@ export async function humanType(
   const opts = { ...DEFAULT_OPTIONS, ...options };
   if (!text) return;
 
-  const naturalHead =
-    text.length <= NATURAL_TYPING_MAX_CHARS
-      ? text.length
-      : randInt(NATURAL_HEAD_MIN_CHARS, Math.min(NATURAL_HEAD_MAX_CHARS, text.length));
+  // v2.5.21 (bug #52 + #53): mesajele uriașe se lipesc dintr-o bucată — 0 tastare.
+  if (text.length > MAX_TOTAL_NATURAL) {
+    if (signal?.aborted) throw new Error('__ABORTED__');
+    const t0 = Date.now();
+    await page.keyboard.insertText(text);
+    log('pasted ' + text.length + ' chars in ' + (Date.now() - t0) + 'ms (large message — human typing skipped)');
+    return;
+  }
+
+  const naturalHead = Math.min(NATURAL_TYPING_MAX_CHARS, text.length);
   // v2.5.14 (bug #39): niciodată \r sau \n în capul tastat „natural”.
   const firstBreak = text.search(/[\r\n]/);
   const headLength =
@@ -86,8 +101,9 @@ export async function humanType(
   if (headLength < text.length) {
     if (signal?.aborted) throw new Error('__ABORTED__');
     const rest = text.slice(headLength);
+    const t0 = Date.now();
     await page.keyboard.insertText(rest);
-    log('pasted the remaining ' + rest.length + ' chars');
+    log('pasted the remaining ' + rest.length + ' chars in ' + (Date.now() - t0) + 'ms');
   }
 
   log('typing finished');

@@ -1,6 +1,13 @@
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import { logLine } from './log';
+import {
+  MAX_CHARS_PER_FILE,
+  MAX_CHARS_TOTAL,
+  MAX_LINES_PER_FILE,
+  clipPayload,
+  truncateContent
+} from './payload';
 
 const log = (msg: string) => logLine('attachments', msg);
 
@@ -89,8 +96,14 @@ export async function describePath(
  * Pregătirea conținutului pentru mesajul trimis AI-ului
  * ========================================================================= */
 
-const MAX_PER_FILE = 30000;
-const MAX_TOTAL = 150000;
+/* v2.5.23 (bug #54): bugetul de atașamente era 30k/fișier și 150k total — un
+ * paste uriaș procesat minute întregi de web app. Aliniat la bugetul comun
+ * (6000/fișier, 12000 total), cu trunchiere cap+coadă. */
+const MAX_PER_FILE = MAX_CHARS_PER_FILE;
+const MAX_TOTAL = MAX_CHARS_TOTAL;
+/** Sub acest rest de buget nu mai are sens să includem conținut — marcăm SKIPPED. */
+const MIN_PER_FILE = 1500;
+const SKIPPED_NOTE = '[SKIPPED: payload limit reached]';
 const FOLDER_MAX_ENTRIES = 200;
 
 const FOLDER_EXCLUDE = new Set([
@@ -111,18 +124,24 @@ export async function prepareAttachments(
 ): Promise<PreparedAttachments> {
   const parts: string[] = [];
   const uploads: string[] = [];
-  let budget = MAX_TOTAL;
+  let used = 0;
+  /** Restul de buget disponibil (niciodată negativ). */
+  const remaining = () => Math.max(0, MAX_TOTAL - used);
 
   for (const a of atts) {
     try {
       if (a.kind === 'folder') {
         const listing = await folderTree(a.absPath);
-        const chunk = truncateTo(
+        if (remaining() < MIN_PER_FILE) {
+          parts.push('--- FOLDER: ' + a.relPath + '/ ---\n' + SKIPPED_NOTE);
+          continue;
+        }
+        const chunk = clipPayload(
           '--- FOLDER: ' + a.relPath + '/ ---\n' + listing +
             '\n(listing folder — folosește read_file / read_files pentru conținut)',
-          Math.min(20000, Math.max(2000, budget))
+          Math.min(MAX_PER_FILE, remaining())
         );
-        budget -= chunk.length;
+        used += chunk.length;
         parts.push(chunk);
       } else if (a.kind === 'text') {
         const content = await readTextSafe(a.absPath);
@@ -134,18 +153,19 @@ export async function prepareAttachments(
           );
           continue;
         }
-        const cap = Math.min(MAX_PER_FILE, Math.max(2000, budget));
-        const clipped =
-          content.length > cap
-            ? content.slice(0, cap) +
-              '\n[...trunchiat, ' +
-              (content.length - cap) +
-              ' caractere omise...]'
-            : content;
+        if (remaining() < MIN_PER_FILE) {
+          parts.push('--- FILE: ' + a.relPath + ' ---\n' + SKIPPED_NOTE);
+          continue;
+        }
+        const clipped = truncateContent(
+          content,
+          MAX_LINES_PER_FILE,
+          Math.min(MAX_PER_FILE, remaining())
+        );
         const chunk =
           '--- FILE: ' + a.relPath + ' (' + content.length + ' bytes) ---\n' +
           '```' + langFor(a.relPath) + '\n' + clipped + '\n```';
-        budget -= chunk.length;
+        used += chunk.length;
         parts.push(chunk);
       } else {
         // image / binary → upload real în chatul web
@@ -163,11 +183,9 @@ export async function prepareAttachments(
     }
   }
 
-  let block = parts.join('\n\n');
-  if (block.length > MAX_TOTAL) {
-    block = block.slice(0, MAX_TOTAL) + '\n[...bloc de atașamente trunchiat...]';
-  }
-  return { block, uploads };
+  // plasă de siguranță: chiar dacă un element a depășit bugetul (ex. antetul
+  // lung al unui fișier), blocul final rămâne în buget (cap+coadă).
+  return { block: clipPayload(parts.join('\n\n'), MAX_TOTAL), uploads };
 }
 
 async function readTextSafe(abs: string): Promise<string | null> {
@@ -227,9 +245,4 @@ const LANG_MAP: Record<string, string> = {
 
 function langFor(p: string): string {
   return LANG_MAP[path.extname(p).toLowerCase()] || '';
-}
-
-function truncateTo(text: string, cap: number): string {
-  if (text.length <= cap) return text;
-  return text.slice(0, cap) + '\n[...trunchiat...]';
 }

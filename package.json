@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.5.22",
+  "version": "2.5.23",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -213,6 +213,13 @@
           "type": "number",
           "default": 20,
           "description": "Total time budget (minutes) for one message in the agentic loop."
+        },
+        "freekit.newChatAfterToolCalls": {
+          "type": "number",
+          "default": 4,
+          "minimum": 0,
+          "maximum": 40,
+          "markdownDescription": "Starts a **new web chat** (with a short handoff of the task and the recent steps) after this many tool results have been pasted into the **same** browser chat. A large tool payload makes ChatGPT/Claude/Gemini process every later message slowly, and the accumulated context can hit the site's „Chat memory full” limit — a fresh chat keeps the paste small and fast. **0** disables the rotation (the chat is only restarted when the site reports a full context)."
         },
         "freekit.autoVerify": {
           "type": "boolean",

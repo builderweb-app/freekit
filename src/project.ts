@@ -2,6 +2,7 @@ import * as path from 'path';
 import * as fs from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { MAX_CHARS_TOTAL, clipPayload } from './payload';
 
 const execFileAsync = promisify(execFile);
 
@@ -227,14 +228,16 @@ export async function runProgram(
       stdout = String(r.stdout ?? '');
       stderr = String(r.stderr ?? '');
     }
+    // v2.5.23 (bug #54): bugetul comun de payload (cap+coadă) — output-ul brut
+    // al comenzilor ajunge la AI fie direct (git), fie prin formatCommandOutcome.
     const output = stdout + (stderr ? '\n[stderr]\n' + stderr : '');
     return {
       ok: true,
       code: 0,
-      output: output.slice(0, 20000),
+      output: clipPayload(output, MAX_CHARS_TOTAL),
       timedOut: false,
-      stdout: stdout.slice(0, 20000),
-      stderr: stderr.slice(0, 20000),
+      stdout: clipPayload(stdout, MAX_CHARS_TOTAL),
+      stderr: clipPayload(stderr, MAX_CHARS_TOTAL),
       duration: Date.now() - started
     };
   } catch (e: any) {
@@ -249,10 +252,10 @@ export async function runProgram(
     return {
       ok: false,
       code,
-      output: String(output).slice(0, 20000),
+      output: clipPayload(String(output), MAX_CHARS_TOTAL),
       timedOut,
-      stdout: stdout.slice(0, 20000),
-      stderr: stderr.slice(0, 20000),
+      stdout: clipPayload(stdout, MAX_CHARS_TOTAL),
+      stderr: clipPayload(stderr, MAX_CHARS_TOTAL),
       duration: Date.now() - started
     };
   }

@@ -3,6 +3,7 @@ import * as path from 'path';
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import { logLine } from './log';
+import { clipPayload } from './payload';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -159,22 +160,23 @@ export async function runVerification(root: string): Promise<VerifyResult> {
       maxBuffer: 10 * 1024 * 1024,
       windowsHide: true
     });
-    const output = (
-      String(stdout ?? '') +
-      '\n' +
-      String(stderr ?? '')
-    ).slice(0, VERIFY_OUTPUT_MAX);
+    // v2.5.23: cap+coadă — sumarul erorilor (tsc/build) e la finalul output-ului
+    const output = clipPayload(
+      String(stdout ?? '') + '\n' + String(stderr ?? ''),
+      VERIFY_OUTPUT_MAX
+    );
     const duration = Date.now() - start;
     log('verificare TRECUTĂ în ' + duration + 'ms (' + command + ')');
     return { ok: true, output, command, duration };
   } catch (e: any) {
-    const output = (
+    const output = clipPayload(
       String(e?.stdout ?? '') +
-      '\n' +
-      String(e?.stderr ?? '') +
-      '\n' +
-      (e?.message ?? String(e))
-    ).slice(0, VERIFY_OUTPUT_MAX);
+        '\n' +
+        String(e?.stderr ?? '') +
+        '\n' +
+        (e?.message ?? String(e)),
+      VERIFY_OUTPUT_MAX
+    );
     const duration = Date.now() - start;
     log('verificare EȘUATĂ în ' + duration + 'ms (' + command + ')');
     return { ok: false, output, command, duration };

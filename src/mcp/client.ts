@@ -2,6 +2,7 @@ import { spawn, ChildProcess } from 'child_process';
 // IMPORTANT: `vscode` doar ca TIP — la runtime se cere lazy (require) în
 // loadConfig(), ca modulul să poată fi încărcat și în teste Node.
 import type * as vscode from 'vscode';
+import { MAX_CHARS_TOTAL, clipPayload } from '../payload';
 
 const log = (msg: string) => console.log('[Freekit][mcp]', msg);
 
@@ -152,7 +153,8 @@ function hardKill(pid: number | undefined): void {
   }
 }
 
-const TEXT_MAX = 20000;
+// v2.5.23 (bug #54): bugetul comun de payload către AI (cap+coadă).
+const TEXT_MAX = MAX_CHARS_TOTAL;
 
 /** Transformă rezultatul brut tools/call în text + flag de eroare. */
 export function formatToolCallResult(result: any): McpToolCallResult {
@@ -182,7 +184,7 @@ export function formatToolCallResult(result: any): McpToolCallResult {
       parts.push(String(result));
     }
   }
-  const text = parts.join('\n\n').slice(0, TEXT_MAX);
+  const text = clipPayload(parts.join('\n\n'), TEXT_MAX);
   return { text, isError: result?.isError === true, raw: result };
 }
 

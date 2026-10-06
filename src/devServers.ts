@@ -1,6 +1,7 @@
 import type * as vscode from 'vscode';
 import * as path from 'path';
 import { logLine } from './log';
+import { MAX_CHARS_TOTAL, clipPayload } from './payload';
 
 /* =========================================================================
  * v1.8.1 — COMENZI LONG-RUNNING (dev/serve/watch) → TERMINAL VS CODE VIZIBIL
@@ -170,7 +171,8 @@ export const SHELL_INTEGRATION_WAIT_MS = 4000;
 /** Ctrl+C la oprire → cât se așteaptă ieșirea grațioasă înainte de dispose. */
 export const STOP_KILL_MS = 2500;
 const MAX_CAPTURE = 48 * 1024;
-const MAX_RESULT_TEXT = 16000;
+// v2.5.23 (bug #54): output-ul trimis AI-ului respectă bugetul comun de payload.
+const MAX_RESULT_TEXT = MAX_CHARS_TOTAL;
 
 export interface DevServerStartResult {
   /** true = procesul încă rulează după perioada de grație (server pornit). */
@@ -369,7 +371,8 @@ function removeEntry(e: DevServerEntry): void {
 }
 
 function clip(text: string, max = MAX_RESULT_TEXT): string {
-  return text.length > max ? text.slice(0, max) + '\n[...trunchiat...]' : text;
+  // v2.5.23: cap+coadă (erorile de pornire pot fi la finalul blocului compilat)
+  return clipPayload(text, max);
 }
 
 function isLocalUrl(url: string): boolean {
@@ -725,5 +728,5 @@ export function formatDevServerStartResult(
   lines.push(
     'Next: continue with your task or reply with the final answer. The user can stop the server with Ctrl+C in its terminal or with the VS Code command "Freekit: Stop Dev Servers".'
   );
-  return lines.join('\n').slice(0, 20000);
+  return clipPayload(lines.join('\n'), MAX_CHARS_TOTAL);
 }

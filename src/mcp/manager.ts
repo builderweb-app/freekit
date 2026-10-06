@@ -2,6 +2,7 @@ import type * as vscode from 'vscode';
 import { McpClient, McpServerConfig, McpTool } from './client';
 import type { ApprovalFn, ToolCall, ToolResult } from '../tools';
 import { logLine } from '../log';
+import { MAX_CHARS_TOTAL, clipPayload } from '../payload';
 
 const log = (msg: string) => logLine('mcp', msg);
 
@@ -32,7 +33,8 @@ const MAX_PROMPT_TOOLS = 60;
 const MAX_PROMPT_CHARS = 6500;
 const LOCAL_MAX_PROMPT_TOOLS = 25;
 const LOCAL_MAX_PROMPT_CHARS = 2800;
-const TOOL_RESULT_MAX = 20000;
+// v2.5.23 (bug #54): bugetul comun de payload către AI (cap+coadă).
+const TOOL_RESULT_MAX = MAX_CHARS_TOTAL;
 const RELOAD_DEBOUNCE_MS = 800;
 
 function sanitizeId(s: string): string {
@@ -208,7 +210,7 @@ export class McpManager {
         toolName: entry.toolName,
         args
       });
-      const text = (res.text || '(no result)').slice(0, TOOL_RESULT_MAX);
+      const text = clipPayload(res.text || '(no result)', TOOL_RESULT_MAX);
       if (res.isError) {
         return {
           ok: false,

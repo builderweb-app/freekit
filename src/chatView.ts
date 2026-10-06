@@ -101,6 +101,14 @@ const log = (msg: string) => logLine('chat', msg);
 // FAZA III (E): bucla agentică — 40 de pași per mesaj
 const MAX_ITERATIONS = 40;
 
+/**
+ * v2.5.23: câte rezultate de unealtă se lipesc în ACELAȘI chat web înainte de a
+ * porni proactiv un chat nou (cu handoff). Fiecare rezultat e un paste mare;
+ * contextul acumulat face web app-ul din ce în ce mai lent la procesare, deci
+ * ținem conversația mică. 0 = dezactivat (vezi freekit.newChatAfterToolCalls).
+ */
+const DEFAULT_NEW_CHAT_AFTER_TOOL_CALLS = 4;
+
 // FAZA II (A): limita de atașamente simultane
 const MAX_ATTACHMENTS = 20;
 
@@ -150,6 +158,14 @@ export function hello() {
 }
 \`\`\`
 END_CONTENT`;
+
+/**
+ * v2.5.23: chatul nou primit la o rotire proactivă e complet gol (fără
+ * SYSTEM_PROMPT), deci handoff-ul îi reamintește protocolul de unelte. Nu
+ * reluăm tot promptul: scopul rotirii e ca paste-ul să rămână mic (vezi
+ * MAX_CHARS_TOTAL din src/payload.ts).
+ */
+const ROTATION_PROTOCOL_REMINDER = `Tool protocol (this chat is new and has no system prompt yet): answer EVERY step with EXACTLY ONE tool call — a single-line JSON {"tool":"NAME","args":{...}} (read_file, read_files, list_files, search_files, search_semantic, run_command, run_npm, git_*, project_info), or the marker format below for write_file / edit_file / write_files. No introductions, no explanations. When the task is fully done, answer with plain text.`;
 
 // v1.7.1: verbose mode — pașii AI afișați în chat (persistat în globalState)
 const VERBOSE_KEY = 'freekit.verboseMode';
@@ -358,6 +374,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * (continuăm într-un chat nou sau ne oprim).
    */
   private memoryFullDecision?: (choice: 'continue' | 'cancel') => void;
+  /**
+   * v2.5.23: câte rezultate de unealtă au fost lipite în chatul web CURENT
+   * (numărătoarea ține per conversație de browser, nu per mesaj VS Code — la
+   * reluarea unui chat salvat contextul e deja acolo). La atingerea pragului
+   * `freekit.newChatAfterToolCalls` pornim un chat nou cu handoff.
+   */
+  private chatToolSteps = 0;
   /** v0.2.1: aprobă automat toate operațiile care necesită confirmare. */
   private autoApprove = false;
   /** v0.4.0: guard anti-suprapunere pentru verificarea de status. */
@@ -1653,6 +1676,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // Contorul e local mesajului ⇒ un mesaj nou pornește mereu de la 0.
       const circuitBreaker = new CircuitBreaker();
       let circuitBroken = false;
+      // v2.5.23: pașii executați în acest mesaj (pentru handoff-ul de rotire)
+      const recentSteps: string[] = [];
       while (iterations < MAX_ITERATIONS && !this.abortRequested) {
         // v0.3.0 (P0.6): verificăm bugetul de timp înainte de fiecare pas
         if (Date.now() > deadline) {
@@ -1961,12 +1986,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           ? 'TOOL_RESULT for ' + toolCall.tool + ':\n' + result.result
           : 'TOOL_ERROR for ' + toolCall.tool + ':\n' + result.error;
 
+        // v2.5.23: pașii recenți (în memorie) pentru handoff-ul de rotire
+        recentSteps.push(
+          vSummary + ' — ' + (result.ok ? 'ok' : 'failed')
+        );
+
+        // v2.5.23: înainte de a lipi încă un rezultat, verificăm dacă chatul
+        // web a acumulat destule paste-uri: peste prag pornim un chat nou (cu
+        // handoff), ca web app-ul să nu devină lent și să nu ajungă la „Chat
+        // memory full". Rotirea e best-effort — dacă eșuează, continuăm în
+        // chatul curent.
+        const handoffPrefix = await this.maybeRotateChat(
+          provider,
+          page,
+          signal,
+          recentSteps
+        );
+        if (handoffPrefix) recentSteps.length = 0;
+
         aiReply = await provider.send(
           page,
-          resultMessage + selfFix,
+          (handoffPrefix ? handoffPrefix + '\n\n' : '') + resultMessage + selfFix,
           signal,
           followUpOpts
         );
+        // chat nou → salvăm URL-ul lui, ca mesajele următoare să continue acolo
+        if (handoffPrefix) {
+          await this.rememberBrowserChat(provider, page, undefined);
+        }
         log('follow-up reply length: ' + aiReply.length);
       }
 
@@ -2030,6 +2077,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // uităm referința, ca următorul mesaj să pornească automat un chat nou.
         log('memory full — stopped; the next message will start a new chat');
         await this.conversations.clearBrowserChat().catch(() => {});
+        this.chatToolSteps = 0; // v2.5.23: următorul mesaj deschide un chat nou
         const label = PROVIDER_LABELS[e.providerId] ?? e.providerId;
         this.post(
           'notice',
@@ -2264,6 +2312,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // așteptăm autentificarea, apoi reluăm de la sine.
     await this.runWithLoginAssist(label, page, signal, () => provider.open(page));
     await this.runWithLoginAssist(label, page, signal, () => provider.newChat(page));
+    // v2.5.23: chat nou → numărătoarea de pași ai acestui chat pornește de la 0
+    this.chatToolSteps = 0;
   }
 
   /**
@@ -2484,7 +2534,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!this.view) return { action: 'cancel' };
     const choice = await this.askMemoryFull(label, signal);
     if (choice !== 'continue') return { action: 'cancel' };
-    return { action: 'continue', prefix: this.buildMemoryFullHandoff(label) };
+    // v2.5.23: chat nou (deschis de base.ts) → numărătoarea de pași repornește
+    this.chatToolSteps = 0;
+    return {
+      action: 'continue',
+      prefix: this.buildChatHandoff(label, 'memory-full')
+    };
   }
 
   /** Cardul din chat cu 2 opțiuni; Stop (abort) echivalează cu Stop. */
@@ -2515,11 +2570,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * conversației (tool call-urile devin „action: <tool> <target>", ca JSON-ul
    * brut să nu umple din nou contextul). Evită intenționat frazele-detectoare
    * („chat memory full"), ca mesajul reluat să nu fie confundat cu bannerul.
+   *
+   * v2.5.23: `reason === 'rotation'` = chat nou PROACTIV (contextul acumulat
+   * încetinește web app-ul), `'memory-full'` = chatul chiar a ajuns la limită.
+   * La rotire primim și pașii recenți (numai în memorie — tool call-urile nu
+   * ajung în istoric până la răspunsul final).
    */
-  private buildMemoryFullHandoff(label: string): string {
+  private buildChatHandoff(
+    label: string,
+    reason: 'memory-full' | 'rotation',
+    recentSteps: string[] = []
+  ): string {
     try {
       const msgs = this.conversations.getActive()?.messages ?? [];
-      if (!msgs.length) return '';
+      if (!msgs.length && !recentSteps.length) return '';
       const clip = (s: string, max: number): string => {
         const t = String(s ?? '').replace(/\s+/g, ' ').trim();
         return t.length > max ? t.slice(0, max) + '…' : t;
@@ -2527,6 +2591,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const lines: string[] = [];
       const task = msgs.find((m) => m.role === 'user');
       if (task) lines.push('Original task: ' + clip(task.text, 1000));
+      if (recentSteps.length) {
+        lines.push(
+          'Steps already done in the previous chat:\n' +
+            recentSteps.slice(-8).map((s) => '- ' + clip(s, 200)).join('\n')
+        );
+      }
       const recap: string[] = [];
       for (const m of msgs.slice(-10)) {
         const call = m.role === 'assistant' ? this.parseToolCall(m.text) : null;
@@ -2544,17 +2614,97 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       if (recap.length) lines.push('Conversation so far:\n' + recap.join('\n'));
       const body = clip(lines.join('\n\n'), 4000);
+      const header =
+        reason === 'memory-full'
+          ? '[Freekit handoff — the previous ' + label + ' chat ran out of context, ' +
+            'so the task continues in this new chat.]'
+          : '[Freekit handoff — the previous ' + label + ' chat was getting long, ' +
+            'so the task continues in this new chat to keep it fast.]';
       return (
-        '[Freekit handoff — the previous ' + label + ' chat ran out of context, ' +
-        'so the task continues in this new chat.]\n\n' +
+        header +
+        '\n\n' +
         body +
+        (reason === 'rotation'
+          ? '\n\n' + ROTATION_PROTOCOL_REMINDER + '\n\n' + MARKER_FORMAT_EXAMPLE
+          : '') +
         '\n\n[End of handoff — continue the task from where it left off; ' +
         'the next message contains the pending step.]'
       );
     } catch (e: any) {
-      log('memory-full handoff build failed: ' + (e?.message ?? String(e)));
+      log('chat handoff build failed: ' + (e?.message ?? String(e)));
       return '';
     }
+  }
+
+  /* ======================================================================
+   * v2.5.23 — ROTIRE PROACTIVĂ A CHATULUI WEB (payload mic = răspuns rapid)
+   * Fiecare rezultat de unealtă e un paste mare. După N pași lipiți în ACELAȘI
+   * chat web (setarea `freekit.newChatAfterToolCalls`, implicit 4), contextul
+   * acumulat încetinește web app-ul și poate duce la „Chat memory full".
+   * Deschidem proactiv un chat nou și întoarcem handoff-ul cu care se
+   * prefixează următorul mesaj (rezultatul pasului curent), ca taskul să
+   * continue acolo. Best-effort: dacă pornirea eșuează, continuăm în chatul
+   * curent (fără să pierdem pasul).
+   * ==================================================================== */
+  private async maybeRotateChat(
+    provider: AIProvider,
+    page: Page | undefined,
+    signal: AbortSignal,
+    recentSteps: string[]
+  ): Promise<string> {
+    const limit = this.newChatAfterToolCalls();
+    // doar providerii web au un chat de rotit (Ollama nu are browser)
+    if (limit <= 0 || !page || provider.local) return '';
+    this.chatToolSteps++;
+    if (this.chatToolSteps < limit) return '';
+    const label = PROVIDER_LABELS[provider.name] ?? provider.name;
+    const prov = provider;
+    const pg = page;
+    log(
+      label + ': ' + this.chatToolSteps + ' tool results in this chat — ' +
+        'starting a fresh chat (threshold ' + limit + ')'
+    );
+    this.post(
+      'notice',
+      '🆕 ' + label + ': ' + this.chatToolSteps + ' tool results pasted in this ' +
+        'chat — continuing in a new chat (with handoff) to keep it fast.'
+    );
+    this.postVerboseStep({
+      kind: 'decision',
+      title: 'Fresh chat (after ' + this.chatToolSteps + ' tool calls)',
+      text:
+        'The web chat accumulated ' + this.chatToolSteps + ' tool payloads — ' +
+        'opening a new chat and continuing there with a short handoff, so the web app stays fast.',
+      status: 'done'
+    });
+    try {
+      await this.runWithLoginAssist(label, pg, signal, () => prov.newChat(pg));
+      // chat nou → numărătoarea repornește (handoff-ul e returnat apelantului)
+      this.chatToolSteps = 0;
+      return this.buildChatHandoff(label, 'rotation', recentSteps);
+    } catch (e: any) {
+      if (this.abortRequested || e?.message === '__ABORTED__') throw e;
+      log('fresh chat rotation failed: ' + (e?.message ?? String(e)));
+      this.post(
+        'notice',
+        '⚠️ ' + label + ': could not start a new chat (' +
+          String(e?.message ?? e) + ') — continuing in the current chat.'
+      );
+      // nu reîncercăm la FIECARE pas (spam de notificări) — reîncercăm după
+      // încă `limit` rezultate lipite în chatul curent
+      this.chatToolSteps = 0;
+      return '';
+    }
+  }
+
+  /** Setarea `freekit.newChatAfterToolCalls` (0 = rotirea e dezactivată). */
+  private newChatAfterToolCalls(): number {
+    const raw = vscode.workspace
+      .getConfiguration('freekit')
+      .get<number>('newChatAfterToolCalls', DEFAULT_NEW_CHAT_AFTER_TOOL_CALLS);
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) return DEFAULT_NEW_CHAT_AFTER_TOOL_CALLS;
+    return Math.floor(n);
   }
 
   /**
@@ -3099,6 +3249,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // v2.5.10 (bug #20): istoricul a fost tăiat ⇒ și browserul pornește un
       // chat nou (altfel AI-ul ar vedea în continuare mesajele „șterse”).
       await this.conversations.clearBrowserChat();
+      this.chatToolSteps = 0; // v2.5.23: chat nou în browser
       this.postConversations();
       this.rerenderActive();
       this.view?.webview.postMessage({
@@ -3205,6 +3356,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.conversations.clearActive();
     // v2.5.10 (bug #20): Clear ⇒ următorul mesaj începe un chat NOU în browser
     await this.conversations.clearBrowserChat();
+    this.chatToolSteps = 0; // v2.5.23: chat nou în browser
     this.attachments = [];
     this.postAttachments();
     this.postConversations();
@@ -3225,6 +3377,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     log('conversation switched → ' + id + ' (' + conv.messages.length + ' messages)');
+    // v2.5.23: altă conversație ⇒ alt chat (posibil alt browser chat) — rotirea
+    // pornește numărătoarea de la zero, nu moștenește pașii celeilalte.
+    this.chatToolSteps = 0;
     this.postConversations();
     this.rerenderActive();
   }
@@ -3243,6 +3398,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     const conv = await this.conversations.create('New conversation');
     log('conversation created: ' + conv.id);
+    this.chatToolSteps = 0; // v2.5.23: conversație nouă ⇒ numărătoare nouă
     this.post('heal', '🆕 New conversation — the previous one stays in the list (dropdown).');
     this.postConversations();
     this.rerenderActive();
@@ -3375,6 +3531,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.conversations.truncateBefore(messageId);
     // v2.5.10 (bug #20): prompt editat ⇒ context nou și în browser
     await this.conversations.clearBrowserChat();
+    this.chatToolSteps = 0; // v2.5.23: chat nou în browser
     log('edit prompt ' + messageId + ' → „' + text.slice(0, 60) + '”');
     this.postConversations();
 

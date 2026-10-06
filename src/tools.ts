@@ -17,6 +17,13 @@ import {
   startDevServer
 } from './devServers';
 import { formatSearchResults, isSemanticEnabled } from './indexer';
+import {
+  MAX_CHARS_PER_FILE,
+  MAX_CHARS_TOTAL,
+  MAX_LINES_PER_FILE,
+  clipPayload,
+  truncateContent
+} from './payload';
 import { RESTRICTED_TOOL_ERROR } from './trust';
 
 // Pending approvals: id -> resolver
@@ -168,10 +175,13 @@ function formatCommandOutcome(
     const note = attempt > 1 ? ' — ✓ fixed after ' + attempt + ' attempts' : '';
     return {
       ok: true,
-      result: (
+      // v2.5.23: buget de payload (cap+coadă) — un build verbos nu mai trimite
+      // 20k caractere către web app (răspuns lent la toate modelele).
+      result: clipPayload(
         '✓ ' + toolLabel + ': ' + command + ' (exit 0, ' + seconds + 's' + note + ')\n' +
-        res.combined
-      ).slice(0, 20000),
+          res.combined,
+        MAX_CHARS_TOTAL
+      ),
       commandRun: {
         command,
         attempt,
@@ -205,27 +215,30 @@ function formatCommandOutcome(
       '3) Re-run the SAME command to verify the fix.\n' +
       'Never re-run a failing command before changing code.';
 
+  // v2.5.23: fiecare stream pe buget de fișier, mesajul final pe buget total —
+  // cap+coadă, ca directivele de la început și ultimele erori să supraviețuiască.
   const parts: string[] = [];
   if (res.stdout.trim()) {
-    parts.push('--- STDOUT ---\n' + res.stdout.trim().slice(0, 12000));
+    parts.push('--- STDOUT ---\n' + clipPayload(res.stdout.trim(), MAX_CHARS_PER_FILE));
   }
   if (res.stderr.trim()) {
-    parts.push('--- STDERR ---\n' + res.stderr.trim().slice(0, 12000));
+    parts.push('--- STDERR ---\n' + clipPayload(res.stderr.trim(), MAX_CHARS_PER_FILE));
   }
   if (!parts.length) {
-    parts.push((res.combined.trim() || '(no output)').slice(0, 12000));
+    parts.push(clipPayload(res.combined.trim() || '(no output)', MAX_CHARS_PER_FILE));
   }
 
   return {
     ok: false,
-    error: (
+    error: clipPayload(
       '✗ ' + toolLabel + ': ' + command + '\n' +
       'COMMAND FAILED — exit ' + res.exitCode +
       (res.exitCode === 124 ? ' [TIMEOUT — the process was stopped]' : '') +
       ', ' + seconds + 's (' + attemptTag + ')\n\n' +
       (note ? note + '\n\n' : '') +
-      directive + '\n\n' + parts.join('\n\n')
-    ).slice(0, 24000),
+      directive + '\n\n' + parts.join('\n\n'),
+      MAX_CHARS_TOTAL
+    ),
     commandRun: {
       command,
       attempt,
@@ -1305,17 +1318,29 @@ async function editFile(
   return { ok: true, result: 'Edited ' + rel };
 }
 
+// v2.5.23: un director cu mii de intrări (ex. `out/`, `node_modules/`) nu mai
+// poate trimite un listing uriaș către AI.
+const MAX_LIST_ENTRIES = 1000;
+
 async function listFiles(rel: string, root: string): Promise<ToolResult> {
   const abs = safePath(rel, root);
   const entries = await vscode.workspace.fs.readDirectory(
     vscode.Uri.file(abs)
   );
-  const out = entries
+  const shown = entries.slice(0, MAX_LIST_ENTRIES);
+  let out = shown
     .map(([name, type]) =>
       type === vscode.FileType.Directory ? name + '/' : name
     )
     .join('\n');
-  return { ok: true, result: out || '(empty dir)' };
+  if (entries.length > shown.length) {
+    out +=
+      '\n… (' + (entries.length - shown.length) + ' more entries not shown)';
+  }
+  return {
+    ok: true,
+    result: clipPayload(out, MAX_CHARS_TOTAL) || '(empty dir)'
+  };
 }
 
 async function runCommand(command: string): Promise<ToolResult> {
@@ -1617,9 +1642,10 @@ async function searchSemanticTool(
   }
   const text = await formatSearchResults(root, q);
   if (text.startsWith('Semantic search error:')) {
-    return { ok: false, error: text };
+    return { ok: false, error: clipPayload(text, MAX_CHARS_TOTAL) };
   }
-  return { ok: true, result: text };
+  // v2.5.23: fragmentele semantice au un buget de payload (cap+coadă).
+  return { ok: true, result: clipPayload(text, MAX_CHARS_TOTAL) };
 }
 
 /* =========================================================================
@@ -1629,51 +1655,10 @@ async function searchSemanticTool(
 const MAX_BATCH_WRITE_FILES = 20;
 const MAX_BATCH_READ_FILES = 12;
 
-/* =========================================================================
- * v2.5.22 (bug #54) — PAYLOAD PREA MARE → TOATE MODELELE RĂSPUND LENT
- * Un `read_files` putea întoarce ~40k caractere; web app-ul (ChatGPT/Claude/
- * Gemini) procesează foarte lent un asemenea paste (2+ min, indiferent de
- * model). Trunchiem inteligent: păstrăm începutul ȘI sfârșitul fișierului
- * (capul are declarațiile/import-urile, coada are încheierea logică), cu un
- * marker la mijloc, plus un buget total pe batch.
- * ========================================================================= */
-const MAX_LINES_PER_FILE = 500;
-const MAX_CHARS_PER_FILE = 6000;
-const MAX_CHARS_TOTAL = 12000;
-
-/**
- * Trunchiază un fișier păstrând ~60% din cap și ~30% din coadă (cu marker la
- * mijloc). Se aplică întâi limita de linii, apoi cea de caractere — un fișier
- * cu multe linii poate depăși bugetul de caractere chiar după tăierea liniilor;
- * markerul final cumulează ce s-a omis („N lines + M chars”).
- */
-function truncateContent(text: string, maxLines: number, maxChars: number): string {
-  const lines = text.split('\n');
-  const notes: string[] = [];
-  let head = text;
-  let tail = '';
-  if (lines.length > maxLines) {
-    const headCount = Math.floor(maxLines * 0.6);
-    const tailCount = Math.max(1, Math.floor(maxLines * 0.3));
-    notes.push(lines.length - headCount - tailCount + ' lines');
-    head = lines.slice(0, headCount).join('\n');
-    tail = lines.slice(-tailCount).join('\n');
-  }
-  let out =
-    tail === ''
-      ? head
-      : head + '\n\n... [truncated ' + notes.join(' + ') + '] ...\n\n' + tail;
-  if (out.length > maxChars) {
-    const headChars = Math.floor(maxChars * 0.6);
-    const tailChars = Math.max(1, Math.floor(maxChars * 0.3));
-    notes.push(out.length - headChars - tailChars + ' chars');
-    out =
-      out.slice(0, headChars) +
-      '\n\n... [truncated ' + notes.join(' + ') + '] ...\n\n' +
-      out.slice(-tailChars);
-  }
-  return out;
-}
+/* v2.5.22 (bug #54) / v2.5.23: bugetul de payload stă acum în src/payload.ts
+ * (MAX_LINES_PER_FILE / MAX_CHARS_PER_FILE / MAX_CHARS_TOTAL + truncateContent),
+ * ca să fie folosit de TOATE uneltele care întorc text către AI, nu doar de
+ * read_file / read_files. */
 
 async function readFilesBatch(
   args: Record<string, any>,
@@ -1896,6 +1881,9 @@ async function writeFilesBatch(
   };
 }
 
+const MAX_SEARCH_MATCHES = 100;
+const MAX_SEARCH_LINE = 400;
+
 async function searchFiles(
   pattern: string,
   root: string
@@ -1936,7 +1924,8 @@ async function searchFiles(
                   ':' +
                   (i + 1) +
                   ': ' +
-                  line.trim()
+                  // v2.5.23: o linie minificată poate avea 100k+ caractere
+                  line.trim().slice(0, MAX_SEARCH_LINE)
               );
             }
           });
@@ -1953,10 +1942,14 @@ async function searchFiles(
 
   await walk(root);
 
+  // v2.5.23: buget de payload pe rezultatul căutării (cap+coadă).
   return {
     ok: true,
     result:
-      results.slice(0, 100).join('\n').slice(0, 6000) || '(no matches)'
+      clipPayload(
+        results.slice(0, MAX_SEARCH_MATCHES).join('\n'),
+        MAX_CHARS_TOTAL
+      ) || '(no matches)'
   };
 }
 
@@ -1988,10 +1981,14 @@ async function gitTool(
         '-b',
         '--untracked-files=all'
       ]);
-      if (!r.ok) return { ok: false, error: r.output };
+      if (!r.ok) return { ok: false, error: clipPayload(r.output, MAX_CHARS_TOTAL) };
+      // v2.5.23: buget de payload și pe git (status/diff/log pot fi uriașe)
       return {
         ok: true,
-        result: 'git status:\n' + (r.output.trim() || '(clean)')
+        result: clipPayload(
+          'git status:\n' + (r.output.trim() || '(clean)'),
+          MAX_CHARS_TOTAL
+        )
       };
     }
 
@@ -2003,8 +2000,11 @@ async function gitTool(
         cmdArgs.push('--', String(args.path).replace(/\\/g, '/'));
       }
       const r = await run(cmdArgs);
-      if (!r.ok) return { ok: false, error: r.output };
-      return { ok: true, result: r.output.trim() || '(no changes)' };
+      if (!r.ok) return { ok: false, error: clipPayload(r.output, MAX_CHARS_TOTAL) };
+      return {
+        ok: true,
+        result: clipPayload(r.output.trim() || '(no changes)', MAX_CHARS_TOTAL)
+      };
     }
 
     case 'log': {
@@ -2013,8 +2013,11 @@ async function gitTool(
         100
       );
       const r = await run(['log', '--oneline', '--no-color', '-n', String(n)]);
-      if (!r.ok) return { ok: false, error: r.output };
-      return { ok: true, result: r.output.trim() || '(no commits)' };
+      if (!r.ok) return { ok: false, error: clipPayload(r.output, MAX_CHARS_TOTAL) };
+      return {
+        ok: true,
+        result: clipPayload(r.output.trim() || '(no commits)', MAX_CHARS_TOTAL)
+      };
     }
 
     case 'commit': {
@@ -2039,7 +2042,7 @@ async function gitTool(
         }
       }
       const r = await run(['commit', '-m', message]);
-      if (!r.ok) return { ok: false, error: r.output };
+      if (!r.ok) return { ok: false, error: clipPayload(r.output, MAX_CHARS_TOTAL) };
       return { ok: true, result: r.output.trim() };
     }
 
@@ -2059,18 +2062,20 @@ async function gitTool(
         if (!r.ok && /already exists/i.test(r.output)) {
           r = await run(['checkout', name]);
         }
-        if (!r.ok) return { ok: false, error: r.output };
+        if (!r.ok) return { ok: false, error: clipPayload(r.output, MAX_CHARS_TOTAL) };
         return { ok: true, result: r.output.trim() };
       }
       const cur = await run(['branch', '--show-current']);
       const list = await run(['branch', '--list', '-vv']);
       return {
         ok: true,
-        result:
+        result: clipPayload(
           'current: ' +
-          (cur.output.trim() || '?') +
-          '\n' +
-          (list.output.trim() || '(no branches)')
+            (cur.output.trim() || '?') +
+            '\n' +
+            (list.output.trim() || '(no branches)'),
+          MAX_CHARS_TOTAL
+        )
       };
     }
 
@@ -2094,7 +2099,7 @@ async function gitTool(
       );
       if (!approved) return rejected;
       const r = await run(['revert', '--no-edit', commit]);
-      if (!r.ok) return { ok: false, error: r.output };
+      if (!r.ok) return { ok: false, error: clipPayload(r.output, MAX_CHARS_TOTAL) };
       return { ok: true, result: r.output.trim() };
     }
 
@@ -2117,7 +2122,7 @@ async function gitTool(
         '--',
         path.relative(root, abs).replace(/\\/g, '/')
       ]);
-      if (!r.ok) return { ok: false, error: r.output };
+      if (!r.ok) return { ok: false, error: clipPayload(r.output, MAX_CHARS_TOTAL) };
       return { ok: true, result: 'Restored: ' + rel };
     }
 

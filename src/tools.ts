@@ -1262,15 +1262,11 @@ async function readFile(rel: string, root: string): Promise<ToolResult> {
   const abs = safePath(rel, root);
   const content = await vscode.workspace.fs.readFile(vscode.Uri.file(abs));
   const text = Buffer.from(content).toString('utf8');
-  const MAX = 8000;
-  const truncated =
-    text.length > MAX
-      ? text.slice(0, MAX) +
-        '\n\n[...truncat, ' +
-        (text.length - MAX) +
-        ' caractere omise...]'
-      : text;
-  return { ok: true, result: truncated };
+  // v2.5.22 (bug #54): trunchiere head+tail, nu doar capul (vezi truncateContent).
+  return {
+    ok: true,
+    result: truncateContent(text, MAX_LINES_PER_FILE, MAX_CHARS_PER_FILE)
+  };
 }
 
 async function writeFile(
@@ -1632,8 +1628,52 @@ async function searchSemanticTool(
 
 const MAX_BATCH_WRITE_FILES = 20;
 const MAX_BATCH_READ_FILES = 12;
-const READ_PER_FILE = 6000;
-const READ_TOTAL = 40000;
+
+/* =========================================================================
+ * v2.5.22 (bug #54) — PAYLOAD PREA MARE → TOATE MODELELE RĂSPUND LENT
+ * Un `read_files` putea întoarce ~40k caractere; web app-ul (ChatGPT/Claude/
+ * Gemini) procesează foarte lent un asemenea paste (2+ min, indiferent de
+ * model). Trunchiem inteligent: păstrăm începutul ȘI sfârșitul fișierului
+ * (capul are declarațiile/import-urile, coada are încheierea logică), cu un
+ * marker la mijloc, plus un buget total pe batch.
+ * ========================================================================= */
+const MAX_LINES_PER_FILE = 500;
+const MAX_CHARS_PER_FILE = 6000;
+const MAX_CHARS_TOTAL = 12000;
+
+/**
+ * Trunchiază un fișier păstrând ~60% din cap și ~30% din coadă (cu marker la
+ * mijloc). Se aplică întâi limita de linii, apoi cea de caractere — un fișier
+ * cu multe linii poate depăși bugetul de caractere chiar după tăierea liniilor;
+ * markerul final cumulează ce s-a omis („N lines + M chars”).
+ */
+function truncateContent(text: string, maxLines: number, maxChars: number): string {
+  const lines = text.split('\n');
+  const notes: string[] = [];
+  let head = text;
+  let tail = '';
+  if (lines.length > maxLines) {
+    const headCount = Math.floor(maxLines * 0.6);
+    const tailCount = Math.max(1, Math.floor(maxLines * 0.3));
+    notes.push(lines.length - headCount - tailCount + ' lines');
+    head = lines.slice(0, headCount).join('\n');
+    tail = lines.slice(-tailCount).join('\n');
+  }
+  let out =
+    tail === ''
+      ? head
+      : head + '\n\n... [truncated ' + notes.join(' + ') + '] ...\n\n' + tail;
+  if (out.length > maxChars) {
+    const headChars = Math.floor(maxChars * 0.6);
+    const tailChars = Math.max(1, Math.floor(maxChars * 0.3));
+    notes.push(out.length - headChars - tailChars + ' chars');
+    out =
+      out.slice(0, headChars) +
+      '\n\n... [truncated ' + notes.join(' + ') + '] ...\n\n' +
+      out.slice(-tailChars);
+  }
+  return out;
+}
 
 async function readFilesBatch(
   args: Record<string, any>,
@@ -1651,20 +1691,28 @@ async function readFilesBatch(
 
   const limited = paths.slice(0, MAX_BATCH_READ_FILES);
   const sections: string[] = [];
+  let total = 0;
   for (const rel of limited) {
     try {
       const abs = safePath(rel, root);
       const content = Buffer.from(
         await vscode.workspace.fs.readFile(vscode.Uri.file(abs))
       ).toString('utf8');
-      const clipped =
-        content.length > READ_PER_FILE
-          ? content.slice(0, READ_PER_FILE) +
-            '\n[...truncated, ' +
-            (content.length - READ_PER_FILE) +
-            ' characters omitted...]'
-          : content;
+      const clipped = truncateContent(
+        content,
+        MAX_LINES_PER_FILE,
+        MAX_CHARS_PER_FILE
+      );
+      // v2.5.22 (bug #54): buget total pe batch — fișierele care nu mai încap
+      // se sar (nu se trimit la model), ca payload-ul să rămână mic.
+      if (total + clipped.length > MAX_CHARS_TOTAL) {
+        sections.push(
+          '--- FILE: ' + rel + ' ---\n[SKIPPED: payload limit reached]'
+        );
+        continue;
+      }
       sections.push('--- FILE: ' + rel + ' ---\n' + clipped);
+      total += clipped.length;
     } catch (e: any) {
       sections.push(
         '--- FILE: ' + rel + ' ---\n(error: ' + (e?.message ?? String(e)) + ')'
@@ -1673,9 +1721,6 @@ async function readFilesBatch(
   }
 
   let out = sections.join('\n\n');
-  if (out.length > READ_TOTAL) {
-    out = out.slice(0, READ_TOTAL) + '\n[...truncated...]';
-  }
   if (paths.length > limited.length) {
     out +=
       '\n\n(' +

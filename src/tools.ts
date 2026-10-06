@@ -25,6 +25,7 @@ import {
   truncateContent
 } from './payload';
 import { RESTRICTED_TOOL_ERROR } from './trust';
+import { commandErrorFiles } from './verifier';
 import {
   TS_ALIAS_NOTE,
   isTypeScriptPath,
@@ -284,6 +285,170 @@ export type ApprovalFn = (
   /** v0.5.0: preview per fișier pentru diff-ul nativ (opțional). */
   changes?: FileChangePreview[]
 ) => Promise<boolean>;
+
+/* =========================================================================
+ * v2.5.30 FIX 1 (bug #68) — Scope-limited auto-approve
+ * Auto-approve aproba ORICE scriere, inclusiv în codul extensiei (src/*) și în
+ * fișierele critice de configurare, deși task-ul era „repară erorile din
+ * bootcamp-test/". Aici detectăm scope-ul task-ului din PRIMUL mesaj al
+ * utilizatorului (folderele / fișierele menționate explicit) și verificăm dacă
+ * o cale e în acel scope. În afara scope-ului, chatView cere confirmare
+ * manuală chiar dacă auto-approve e ON. Scope nedeterminat ⇒ null ⇒ orice
+ * fișier e tratat ca în afara scope-ului (fail-closed).
+ * ========================================================================= */
+
+/** Căile care modifică fișiere (target-ul aprobării = o cale de fișier). */
+export const FILE_WRITE_TOOLS: ReadonlySet<string> = new Set([
+  'write_file',
+  'write_files',
+  'edit_file'
+]);
+
+/** Extensiile considerate „fișier" la scanarea textului task-ului. */
+const SCOPE_FILE_EXTS =
+  'ts|tsx|mts|cts|js|jsx|mjs|cjs|json|jsonc|md|mdx|astro|html|htm|css|scss|' +
+  'sass|less|py|pyi|go|rs|java|kt|kts|rb|php|vue|svelte|yaml|yml|toml|ini|' +
+  'txt|sh|bash|ps1|bat|cmd|cs|c|cc|cpp|h|hpp|sql|xml|svg|lock|env';
+
+/** `bootcamp-test/src/a.ts`, `./src/x/y`, `src/chatView.ts` etc. */
+const SCOPE_SLASH_PATH_RE =
+  /(?:^|[\s"'`(\[<,])((?:\.{1,2}\/)?[\w.@~+-]+(?:\/[\w.@~+-]+)+)/g;
+/** Folder cu bară finală: `bootcamp-test/`, `src/`, `.git/`. */
+const SCOPE_TRAILING_FOLDER_RE =
+  /(?:^|[\s"'`(\[<,])((?:\.{1,2}\/|[\w.@~+-]+\/))(?=[\s"'`)\]}>,.;:!?]|$)/g;
+/** Fișier cu extensie cunoscută, fără folder: `tsconfig.json`, `package.json`. */
+const SCOPE_FILE_RE = new RegExp(
+  '(?:^|[\\s"\'`(\\[<,])([\\w.@~+-]+\\.(?:' + SCOPE_FILE_EXTS + '))\\b',
+  'g'
+);
+/** Dotfile: `.gitignore`, `.vscodeignore`, `.env`. */
+const SCOPE_DOTFILE_RE = /(?:^|[\s"'`(\[<,])(\.[\w-]+)\b/g;
+
+/** Token care pare URL (domeniu), nu cale de proiect. */
+const SCOPE_URL_LIKE_RE =
+  /^(?:[\w-]+\.)+(?:com|org|net|io|dev|ai|app|co|me|edu|gov)(?:\/|$)/i;
+
+/** Normalizează o cale pentru comparații (separatori, `./`, bară finală, caz). */
+function normalizeScopePath(p: string): string {
+  return String(p ?? '')
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/\/+$/, '')
+    .replace(/\s+$/, '')
+    .toLowerCase();
+}
+
+/**
+ * v2.5.30 FIX 1 (bug #68): scope-ul task-ului = folderele / căile menționate
+ * explicit în text (de regulă primul mesaj al utilizatorului). Întoarce o listă
+ * normalizată de căi, sau `null` când nu se poate determina niciuna.
+ */
+export function detectTaskScope(userText: string): string[] | null {
+  const text = String(userText ?? '');
+  if (!text.trim()) return null;
+  const found: string[] = [];
+  const seen = new Set<string>();
+  const add = (raw: string) => {
+    if (SCOPE_URL_LIKE_RE.test(raw)) return;
+    const n = normalizeScopePath(raw);
+    if (!n || n === '.' || n === '..' || n === '/') return;
+    if (seen.has(n)) return;
+    seen.add(n);
+    found.push(n);
+  };
+  for (const source of [
+    SCOPE_SLASH_PATH_RE,
+    SCOPE_TRAILING_FOLDER_RE,
+    SCOPE_FILE_RE,
+    SCOPE_DOTFILE_RE
+  ]) {
+    const re = new RegExp(source.source, 'g');
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) add(m[1]);
+  }
+  return found.length ? found : null;
+}
+
+/**
+ * v2.5.30 FIX 1 (bug #68): calea `file` e în scope? O intrare de scope acoperă
+ * fișierul însuși și tot ce e sub el (`scope/folder/…`). Scope `null`/gol ⇒
+ * `false` (nu se poate confirma ⇒ cerem confirmare).
+ */
+export function isPathInScope(
+  file: string,
+  scope: string[] | null | undefined
+): boolean {
+  if (!scope || !scope.length) return false;
+  const f = normalizeScopePath(file);
+  if (!f) return false;
+  for (const s of scope) {
+    const n = normalizeScopePath(s);
+    if (!n) continue;
+    if (f === n || f.startsWith(n + '/')) return true;
+  }
+  return false;
+}
+
+export interface ScopeCheck {
+  /** true ⇒ confirmarea manuală e obligatorie (unul sau mai multe fișiere ies din scope). */
+  blocked: boolean;
+  /** Căile din afara scope-ului task-ului. */
+  outside: string[];
+}
+
+/**
+ * v2.5.30 FIX 1 (bug #68): verifică dacă auto-approve poate acoperi operația.
+ * Doar scrierile de fișiere sunt verificate; comenzile/git nu au o cale țintă
+ * de urmărit aici. Dacă nu se poate determina lista de fișiere (fără `changes`
+ * și fără target de cale), operația e blocată (fail-closed).
+ */
+export function checkAutoApproveScope(
+  tool: string,
+  target: string,
+  changes: FileChangePreview[] | undefined,
+  scope: string[] | null
+): ScopeCheck {
+  if (!FILE_WRITE_TOOLS.has(tool)) return { blocked: false, outside: [] };
+  const files =
+    changes && changes.length
+      ? changes.map((c) => c.label).filter((l) => !!l)
+      : target
+        ? [target]
+        : [];
+  if (!files.length) return { blocked: true, outside: [] };
+  const outside = files.filter((f) => !isPathInScope(f, scope));
+  return { blocked: outside.length > 0, outside };
+}
+
+/** Eticheta scope-ului pentru log/notificări. */
+export function scopeLabel(scope: string[] | null | undefined): string {
+  return scope && scope.length ? scope.join(', ') : 'not detected';
+}
+
+/**
+ * v2.5.30 FIX 2 (bug #69): când o comandă (tsc/build) eșuează, fișierele din
+ * eroare pot fi în AFARA scope-ului task-ului (ex: task în bootcamp-test/, dar
+ * erorile rămase în src/). Adăugăm un hint explicit ca modelul să NU modifice
+ * acele fișiere și să raporteze blocajul în loc să improvizeze.
+ */
+export function buildOutsideScopeHint(
+  errorOutput: string,
+  scope: string[] | null
+): string {
+  const outside = commandErrorFiles(errorOutput).filter(
+    (f) => !isPathInScope(f, scope)
+  );
+  if (!outside.length) return '';
+  const shown = outside.slice(0, 5).join(', ');
+  return (
+    '\n\n⚠️ The errors are in ' +
+    shown +
+    '. Do NOT modify these files — they are outside your task scope (' +
+    scopeLabel(scope) +
+    '). If the task cannot be completed without modifying them, STOP and ' +
+    'report the issue.'
+  );
+}
 
 /* =========================================================================
  * v0.2.1 — Anti-spam la scrierea fișierelor

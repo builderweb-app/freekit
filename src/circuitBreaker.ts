@@ -62,6 +62,47 @@ export class CircuitBreaker {
  * nudge de strategie (vezi buildEditLoopNudge).
  * ========================================================================= */
 
+/**
+ * v2.5.30 FIX 3 (bug #70) — Loop detection CROSS-FILE (contor global)
+ * Contorul per fișier de mai jos rata bucla reală: modelul edita tsconfig.json
+ * de 4 ori (prins de nudge), apoi trecea pe selectors.ts ⇒ contorul fișierului
+ * nou pornea de la 0 și șirul de editări continua nevăzut. Aici numărăm
+ * TOTALUL încercărilor de scriere/editare din mesaj, indiferent de fișier: de
+ * la GLOBAL_LOOP_THRESHOLD, dacă printre ele sunt și fișiere din AFARA
+ * scope-ului task-ului, trimitem un nudge global de oprire.
+ */
+
+/** Câte scrieri/editări în TOTAL (orice fișier) declanșează nudge-ul global. */
+export const GLOBAL_LOOP_THRESHOLD = 8;
+/** Nudge-ul global se repetă din 2 în 2 peste prag (nu la fiecare pas). */
+export const GLOBAL_LOOP_NUDGE_EVERY = 2;
+
+export interface GlobalLoopOutcome {
+  /** Totalul scrierilor/editărilor din mesajul curent (orice fișier). */
+  total: number;
+  /** Câte dintre ele au vizat fișiere din afara scope-ului task-ului. */
+  outsideScope: number;
+  /** Setat doar când s-a atins pragul — nudge-ul global pentru AI. */
+  nudge?: string;
+}
+
+/** Nudge-ul global trimis AI-ului când scrie prea multe fișiere (multe în afara scope-ului). */
+export function buildGlobalLoopNudge(
+  count: number,
+  scope: string[] | null
+): string {
+  const scopeLabel =
+    scope && scope.length ? scope.join(', ') : '(not detected — ask the user)';
+  return (
+    '⚠️ You have written/edited ' +
+    count +
+    ' files in this message, many outside the task scope.\n' +
+    'STOP. Re-read the task. Only modify files inside ' +
+    scopeLabel +
+    '. If you cannot complete the task, report the blocker and stop.'
+  );
+}
+
 /** Câte încercări de editare pe ACELAȘI fișier declanșează nudge-ul. */
 export const EDIT_LOOP_THRESHOLD = 4;
 /** Nudge-ul se repetă din 2 în 2 încercări peste prag (nu la fiecare pas). */
@@ -104,8 +145,9 @@ export function buildEditLoopNudge(file: string, count: number): string {
 }
 
 /**
- * Contor de încercări de editare per fișier. O instanță = o buclă agentică
- * (un mesaj nou ⇒ instanță nouă ⇒ contoarele pornesc de la 0).
+ * Contor de încercări de editare per fișier + contor GLOBAL cross-file
+ * (v2.5.30, bug #70). O instanță = o buclă agentică (un mesaj nou ⇒ instanță
+ * nouă ⇒ contoarele pornesc de la 0).
  *
  * Reset:
  *  - mesaj nou (instanță nouă / `reset()`);
@@ -118,11 +160,22 @@ export class EditLoopDetector {
   private attempts = new Map<string, number>();
   /** Ultimul fișier editat CU SUCCES (pentru regula de „succes real"). */
   private lastEditedFile?: string;
+  /** v2.5.30 (bug #70): totalul încercărilor din mesaj (orice fișier). */
+  private totalAttempts = 0;
+  /** v2.5.30 (bug #70): câte încercări au vizat fișiere din afara scope-ului. */
+  private outsideScopeAttempts = 0;
 
-  /** Înregistrează o ÎNCERCARE de editare (reușită sau nu) pe un fișier. */
-  recordAttempt(file: string): EditLoopOutcome {
+  /**
+   * Înregistrează o ÎNCERCARE de editare (reușită sau nu) pe un fișier.
+   * `inScope` (opțional) spune dacă fișierul e în scope-ul task-ului; când
+   * lipsește sau e `false`, încercarea intră în contorul global de „din afara
+   * scope-ului" (scope nedeterminat ⇒ tratăm ca în afara scope-ului).
+   */
+  recordAttempt(file: string, inScope?: boolean): EditLoopOutcome {
     const key = editKey(file);
     if (!key) return { count: 0 };
+    this.totalAttempts++;
+    if (inScope !== true) this.outsideScopeAttempts++;
     const count = (this.attempts.get(key) ?? 0) + 1;
     this.attempts.set(key, count);
     if (
@@ -132,6 +185,26 @@ export class EditLoopDetector {
       return { count, nudge: buildEditLoopNudge(file, count) };
     }
     return { count };
+  }
+
+  /**
+   * v2.5.30 (bug #70): starea contorului GLOBAL (cross-file). Întoarce
+   * nudge-ul de oprire doar când totalul a atins pragul ȘI există încercări în
+   * afara scope-ului (o progresie normală, toată în scope, nu e blocată).
+   */
+  globalOutcome(scope: string[] | null): GlobalLoopOutcome {
+    const outcome: GlobalLoopOutcome = {
+      total: this.totalAttempts,
+      outsideScope: this.outsideScopeAttempts
+    };
+    if (
+      this.totalAttempts >= GLOBAL_LOOP_THRESHOLD &&
+      this.outsideScopeAttempts > 0 &&
+      (this.totalAttempts - GLOBAL_LOOP_THRESHOLD) % GLOBAL_LOOP_NUDGE_EVERY === 0
+    ) {
+      outcome.nudge = buildGlobalLoopNudge(this.totalAttempts, scope);
+    }
+    return outcome;
   }
 
   /** Editare REUȘITĂ — reținem fișierul pentru regula de „succes real". */
@@ -161,6 +234,8 @@ export class EditLoopDetector {
   reset(): void {
     this.attempts.clear();
     this.lastEditedFile = undefined;
+    this.totalAttempts = 0;
+    this.outsideScopeAttempts = 0;
   }
 }
 

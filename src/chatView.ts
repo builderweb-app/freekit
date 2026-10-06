@@ -51,7 +51,12 @@ import {
   MAX_REFUSAL_RETRIES,
   TOOL_REFUSAL_NUDGE,
   looksLikeIntentOnly,
-  looksLikeToolRefusal
+  looksLikeToolRefusal,
+  buildOutsideScopeHint,
+  checkAutoApproveScope,
+  detectTaskScope,
+  isPathInScope,
+  scopeLabel
 } from './tools';
 import {
   MALFORMED_TOOL_CALL_ERROR,
@@ -2038,8 +2043,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         let loopNudge = '';
         if (EDIT_TOOLS.has(toolCall.tool)) {
           const targets = fileTargetsOf(toolCall);
+          const scope = this.taskScope();
           for (const rel of targets) {
-            const outcome = editLoop.recordAttempt(rel);
+            // v2.5.30 FIX 1/3 (bug #68/#70): dacă scrierea țintește în afara
+            // scope-ului task-ului, încercarea intră în contorul global
+            const outcome = editLoop.recordAttempt(rel, isPathInScope(rel, scope));
             if (outcome.nudge) {
               log(
                 'loop detection: file edited ' + outcome.count +
@@ -2053,6 +2061,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               );
             }
             if (result.ok) editLoop.recordEditSuccess(rel);
+          }
+          // v2.5.30 FIX 3 (bug #70): contor GLOBAL cross-file — AI-ul ocolea
+          // nudge-ul per fișier trecând pe alt fișier (contorul se reseta).
+          const global = editLoop.globalOutcome(scope);
+          if (global.nudge) {
+            log(
+              'loop detection (global): ' + global.total +
+                ' writes/edits in this message, ' + global.outsideScope +
+                ' outside task scope (' + scopeLabel(scope) + ') — sending stop nudge'
+            );
+            this.post(
+              'heal',
+              '⚠️ Loop detected (cross-file): ' + global.total +
+                ' files written/edited in this message, many outside the task scope (' +
+                scopeLabel(scope) + ') — asking the AI to stop and re-read the task.'
+            );
+            loopNudge = loopNudge
+              ? loopNudge + '\n\n' + global.nudge
+              : global.nudge;
           }
           if (result.ok && targets.length) {
             lastEditedFile = targets[targets.length - 1];
@@ -2077,7 +2104,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 toolCall.args.command,
                 result.error ?? '',
                 lastEditedFile || undefined
-              )
+              ) +
+              // v2.5.30 FIX 2 (bug #69): dacă erorile sunt în afara scope-ului
+              // task-ului, spunem explicit AI-ului să NU le modifice
+              buildOutsideScopeHint(result.error ?? '', this.taskScope())
             : '';
         if (commandHints) {
           log('command error context added for: ' + toolCall.args.command);
@@ -2281,6 +2311,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * v2.5.30 (bug #68): textul din care detectăm scope-ul task-ului — PRIMUL
+   * mesaj al utilizatorului din conversația activă (fallback: ultimul prompt).
+   */
+  private taskScopeText(): string {
+    const first = this.conversations
+      .getActive()
+      ?.messages.find((m) => m.role === 'user')?.text;
+    return first || this.lastUserText || '';
+  }
+
+  /**
+   * v2.5.30 (bug #68): scope-ul task-ului (folderele/căile menționate în primul
+   * mesaj al utilizatorului). `null` = nu se poate determina ⇒ toate scrierile
+   * cer confirmare.
+   */
+  private taskScope(): string[] | null {
+    return detectTaskScope(this.taskScopeText());
+  }
+
+  /**
    * v2.5.7 (bug #13): callback-ul de aprobare al fluxului normal de unelte —
    * extras într-o metodă ca să fie refolosit și de „direct write mode”
    * (respectă auto-approve ON/OFF și cardurile de diff).
@@ -2294,6 +2344,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     ): Promise<boolean> => {
       // v0.2.1: auto-approve activ → fără card, aprobat imediat
       if (this.autoApprove) {
+        // v2.5.30 FIX 1 (bug #68): auto-approve e LIMITAT la scope-ul
+        // task-ului — scrierile în afara scope-ului (ex: src/ când task-ul e
+        // în bootcamp-test/) cer confirmare manuală chiar cu auto-approve ON.
+        const scope = this.taskScope();
+        const scopeCheck = checkAutoApproveScope(tool, target, changes, scope);
+        if (scopeCheck.blocked) {
+          log(
+            'auto-approve blocked: ' +
+              (scopeCheck.outside.join(', ') || target) +
+              ' is outside task scope (' +
+              scopeLabel(scope) +
+              ') — asking user'
+          );
+          this.post(
+            'notice',
+            '🛡️ Auto-approve blocked: ' +
+              (scopeCheck.outside.join(', ') || target) +
+              ' is outside the task scope (' +
+              scopeLabel(scope) +
+              ') — manual confirmation required.'
+          );
+          // cardul clasic de aprobare: securizat, auto-approve-ul nu-l ocolește
+          return this.askApproval(tool, target, diff, changes);
+        }
         log('auto-approved: ' + tool + ' → ' + target);
         // v2.5.6 (bug #10): fără card, utilizatorul nu vede avertismentul de
         // divergență — îl anunțăm aici, ca să nu rămână cu un fișier greșit
@@ -2355,20 +2429,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         log('diff review fallback to chat card: ' + tool + ' → ' + target);
       }
 
-      return new Promise((resolve) => {
-        const id = newApprovalId();
-        pendingApprovals.set(id, resolve);
-        this.view?.webview.postMessage({
-          type: 'approval_request',
-          id,
-          tool,
-          path: target,
-          diff,
-          // v2.5.6 (bug #10): cardul clasic arată avertismentul de divergență
-          divergent: (changes ?? []).some((c) => c.divergent)
-        });
-      });
+      return this.askApproval(tool, target, diff, changes);
     };
+  }
+
+  /**
+   * v2.5.30 (bug #68): cardul CLASIC de aprobare din chat (fără diff nativ).
+   * Extras ca metodă ca să poată fi folosit și de calea de blocare a
+   * auto-approve (scriere în afara scope-ului task-ului), unde nici diff
+   * review-ul nu are voie să aprobe automat.
+   */
+  private askApproval(
+    tool: string,
+    target: string,
+    diff: string,
+    changes?: FileChangePreview[]
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
+      const id = newApprovalId();
+      pendingApprovals.set(id, resolve);
+      this.view?.webview.postMessage({
+        type: 'approval_request',
+        id,
+        tool,
+        path: target,
+        diff,
+        // v2.5.6 (bug #10): cardul clasic arată avertismentul de divergență
+        divergent: (changes ?? []).some((c) => c.divergent)
+      });
+    });
   }
 
   private currentProviderId(): string {
@@ -3175,11 +3264,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       });
       // v2.5.29 FIX 4 (bug #67): context înainte de a trimite eroarea AI-ului —
       // eroarea poate fi în alt fișier decât cel editat sau în tsconfig.json.
-      const verifyHints = buildCommandErrorHints(
-        vres.command,
-        vres.output,
-        this.lastEditTargets[this.lastEditTargets.length - 1]
-      );
+      // v2.5.30 FIX 2 (bug #69): + hint când erorile sunt în afara scope-ului.
+      const verifyHints =
+        buildCommandErrorHints(
+          vres.command,
+          vres.output,
+          this.lastEditTargets[this.lastEditTargets.length - 1]
+        ) + buildOutsideScopeHint(vres.output, this.taskScope());
       if (verifyHints) {
         log('auto-verify: added error context hints (' + vres.command + ')');
       }

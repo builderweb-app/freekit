@@ -271,7 +271,7 @@ Every MCP call shows an **approval card** (server, tool and arguments) before it
 npm install
 npm run compile        # tsc → out/
 npx @vscode/vsce package
-code --install-extension freekit-2.5.23.vsix --force
+code --install-extension freekit-2.5.24.vsix --force
 ```
 
 Press <kbd>F5</kbd> for an Extension Development Host.

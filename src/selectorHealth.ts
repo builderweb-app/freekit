@@ -73,9 +73,23 @@ function trimTrailingSlash(pathname: string): string {
 }
 
 /**
+ * v2.5.23 (bug #61): căile de autentificare ale providerilor — pe ele NU există
+ * elementele aplicației, deci nu sunt „pagina aplicației" nici măcar când
+ * `appUrl` e rădăcina hostului (DeepSeek `/sign_in`, ChatGPT `/auth/login`).
+ */
+const AUTH_PATHS = [
+  '/sign_in', '/signin', '/sign-in',
+  '/login', '/log-in',
+  '/signup', '/sign-up', '/register',
+  '/auth/', '/oauth'
+];
+
+/**
  * `true` dacă `currentUrl` e pagina aplicației providerului (`appUrl`):
  * același host ȘI același path (sau un sub-path al lui, ex. `/app/<id>`).
- * Rădăcina (`/`) e acceptată când `appUrl` e chiar rădăcina (ex. DeepSeek).
+ * Rădăcina (`/`) e acceptată când `appUrl` e chiar rădăcina (ex. DeepSeek),
+ * mai puțin paginile de autentificare (v2.5.23, bug #61: `/sign_in` era
+ * raportat ca pagină validă → health check-ul trimitea `not_found` false).
  */
 export function isAppPage(currentUrl: string, appUrl: string): boolean {
   if (!currentUrl || !appUrl) return false;
@@ -85,7 +99,14 @@ export function isAppPage(currentUrl: string, appUrl: string): boolean {
     if (normalizeHost(cur.host) !== normalizeHost(app.host)) return false;
     const appPath = trimTrailingSlash(app.pathname);
     const curPath = trimTrailingSlash(cur.pathname);
-    if (appPath === '') return true; // provider cu aplicația pe rădăcină
+    if (appPath === '') {
+      // v2.5.23 (bug #61): chiar și pe root, excludem paginile de auth
+      const lowerCur = curPath.toLowerCase();
+      if (AUTH_PATHS.some((p) => lowerCur === p || lowerCur.startsWith(p))) {
+        return false;
+      }
+      return true; // provider cu aplicația pe rădăcină
+    }
     return curPath === appPath || curPath.startsWith(appPath + '/');
   } catch {
     return false;

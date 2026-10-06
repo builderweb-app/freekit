@@ -643,6 +643,27 @@ const VSTEP_KINDS = {
 };
 const VSTEP_STATUS = { running: '⏳', done: '✓', error: '✗' };
 
+/**
+ * v2.5.18 (bug #48): setează starea pliat/extins a unui pas (clasă + aria).
+ * Cardul „Thinking" e <details> — starea lui e atributul `open`.
+ */
+function setStepCollapsed(el, collapsed) {
+  if (el.classList.contains('thinking-card') && el.tagName === 'DETAILS') {
+    el.open = !collapsed;
+    return;
+  }
+  el.classList.toggle('collapsed', collapsed);
+  const head = el.querySelector('.vstep-head');
+  if (head && head.getAttribute('role') === 'button') {
+    head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  }
+}
+
+/** v2.5.18 (bug #48): la finalul turei toți pașii se pliază — chat curat. */
+function collapseAllSteps() {
+  verboseSteps.forEach((el) => setStepCollapsed(el, true));
+}
+
 function ensureVerboseStepEl(step) {
   let el = verboseSteps.get(step.id);
   if (el) return el;
@@ -685,15 +706,31 @@ function ensureVerboseStepEl(step) {
     head.appendChild(prev);
     el.open = true; // deschis cât timp stream-ează
   } else {
+    // v2.5.18 (bug #48): chevron + sumar ca la cardul „Thinking", pe orice pas
+    const arrow = document.createElement('span');
+    arrow.className = 'vstep-arrow';
     const title = document.createElement('span');
     title.className = 'vstep-title';
+    const summary = document.createElement('span');
+    summary.className = 'vstep-summary';
     const status = document.createElement('span');
     status.className = 'vstep-status';
+    head.setAttribute('role', 'button');
+    head.setAttribute('tabindex', '0');
+    head.setAttribute('aria-expanded', 'true');
+    head.appendChild(arrow);
     head.appendChild(icon);
     head.appendChild(label);
     head.appendChild(title);
+    head.appendChild(summary);
     head.appendChild(status);
-    head.onclick = () => el.classList.toggle('collapsed');
+    head.onclick = () => setStepCollapsed(el, !el.classList.contains('collapsed'));
+    head.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        head.click();
+      }
+    };
   }
   el.appendChild(head);
 
@@ -730,6 +767,16 @@ function addVerboseStep(step) {
     } else {
       body.textContent = step.text;
     }
+    // v2.5.18 (bug #48): sumarul din header = prima linie din detalii, trunchiată
+    // (vizibil doar cât timp pasul e pliat; vezi .vstep-summary în chat.css)
+    if (!isThinking) {
+      const summaryEl = el.querySelector('.vstep-summary');
+      if (summaryEl) {
+        const flat = body.textContent.replace(/\s+/g, ' ').trim();
+        summaryEl.textContent = flat.length > 90 ? flat.slice(0, 90) + '…' : flat;
+        summaryEl.title = flat.length > 90 ? flat : '';
+      }
+    }
     // v2.0.1: preview-ul cardului „Thinking" (primele ~60 de caractere)
     if (isThinking) {
       const prevEl = el.querySelector('.prev');
@@ -765,10 +812,10 @@ function addVerboseStep(step) {
     } else if (statusEl) {
       statusEl.textContent = VSTEP_STATUS[step.status] || '';
       if (step.status === 'running') {
-        el.classList.remove('collapsed');
+        setStepCollapsed(el, false);
       } else if (step.kind === 'result') {
         // pașii lungi se pliază automat la terminare (rămân în istoricul vizual)
-        el.classList.add('collapsed');
+        setStepCollapsed(el, true);
       }
     }
   }
@@ -2123,6 +2170,7 @@ window.addEventListener('message', (event) => {
   const msg = event.data;
 
   if (msg.type === 'reply') {
+    collapseAllSteps(); // v2.5.18 (bug #48): tura s-a terminat → chat curat (expand la click)
     try {
       removeGuestModeCard(); // v2.5.12 (bug #35): răspunsul a sosit, cardul nu mai e necesar
       removeMemoryFullCard(); // v2.5.15 (bug #41): idem pentru cardul de context
@@ -2140,6 +2188,7 @@ window.addEventListener('message', (event) => {
       if (!stick) jumpBtn.hidden = false;
     }
   } else if (msg.type === 'stopped') {
+    collapseAllSteps(); // v2.5.18 (bug #48)
     removeGuestModeCard(); // v2.5.12 (bug #35): Stop/anulare cu cardul deschis
     removeMemoryFullCard(); // v2.5.15 (bug #41): Stop/anulare cu cardul deschis
     try {
@@ -2150,6 +2199,7 @@ window.addEventListener('message', (event) => {
       if (!stick) jumpBtn.hidden = false;
     }
   } else if (msg.type === 'error') {
+    collapseAllSteps(); // v2.5.18 (bug #48)
     try {
       if (pendingEl) setPendingText('⚠️ ' + msg.text);
     } finally {

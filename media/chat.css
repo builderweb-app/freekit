@@ -144,6 +144,16 @@ textarea:focus-visible {
   gap: 14px;
 }
 
+/*
+ * v2.5.18 (bug #48): copiii direcți NU au voie să se comprime. Fără asta,
+ * flex column + `overflow: hidden` pe carduri (ex: .vstep) => minimum-size 0,
+ * iar la conținut peste viewport-ul panoului cardurile se striveau la ~2px
+ * („linii subțiri"). Containerul e scrollabil — scroll, nu compresie.
+ */
+.chat > * {
+  flex-shrink: 0;
+}
+
 .chat::-webkit-scrollbar {
   width: 10px;
 }
@@ -1477,12 +1487,17 @@ pre.code code {
   opacity: 0.7;
 }
 
+/* v2.5.18 (bug #48): chevron pe TOȚI pașii — ▼ extins, ▶ pliat */
 .vstep-arrow::before {
+  content: '▼';
+}
+
+.vstep.collapsed .vstep-arrow::before {
   content: '▶';
 }
 
-.vstep.thinking-card[open] > .vstep-head .vstep-arrow::before {
-  content: '▼';
+.vstep.thinking-card:not([open]) > .vstep-head .vstep-arrow::before {
+  content: '▶';
 }
 
 .thinking-duration {
@@ -1511,8 +1526,15 @@ pre.code code {
   align-items: center;
   gap: 6px;
   padding: 4px 8px;
+  /* v2.5.18 (bug #48): 30px + 2×1px border = rând compact de 32px */
+  min-height: 30px;
   cursor: pointer;
   user-select: none;
+}
+
+.vstep-head:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #007fd4);
+  outline-offset: -1px;
 }
 
 .vstep-head:hover {
@@ -1543,6 +1565,30 @@ pre.code code {
 
 .vstep-status {
   flex-shrink: 0;
+}
+
+/*
+ * v2.5.18 (bug #48): sumarul din header — vizibil DOAR când pasul e pliat
+ * (prima linie din detalii, trunchiată); titlul e limitat ca să încapă amândouă.
+ */
+.vstep-summary {
+  display: none;
+}
+
+.vstep.collapsed .vstep-title {
+  flex: 0 1 auto;
+  max-width: 45%;
+}
+
+.vstep.collapsed .vstep-summary {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.65;
+  font-style: italic;
 }
 
 .vstep.status-running .vstep-status {

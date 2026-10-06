@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.5.18
+
+- FIX (bug #48): **verbose steps were squashed into thin lines** when the chat content exceeded the panel — the chat is a scrollable flex column, and cards with `overflow: hidden` (like `.vstep`) get an automatic minimum size of 0, so flexbox compressed every step to ~2px instead of scrolling. All direct children of the chat are now `flex-shrink: 0`: measured live with 30 steps + a long reply, every card keeps its height (32px when collapsed) and the chat scrolls.
+- Verbose steps are now **compact 1-row cards (32px collapsed) with a chevron on every step** (▼ expanded / ▶ collapsed; previously only the „Thinking" card had one). Click — or Enter/Space — toggles the details, and `aria-expanded` is kept in sync.
+- **Auto-collapse at the end of every turn** — on reply / Stop / error all steps fold to their 32px header row so the chat stays clean; the per-step auto-collapse of finished `Result` steps is kept.
+- **Summary in the collapsed header** — the first line of the step details (up to 90 chars, hover for the full text) is shown next to the title while the step is collapsed, and hidden again when expanded.
+
 ## v2.5.17
 
 - FIX (bug #43): **„not ACTUALLY available" refusals were still treated as answers.** The v2.5.16 patterns required the negation and „available" to be adjacent, so „the VS Code workspace tools you specified (read_file, list_files, etc.) are not *actually* available in this chat session" slipped through. `TOOL_REFUSAL_RES` now also covers the adverb forms („are not actually available", „are actually not available", „aren't actually available"), the bare „not available in this / here / in my …" wording, refusals that name the tools one by one (`read_file` / `write_file` / `list_files` / `edit_file` / `run_npm` … not available) and the Romanian „instrumentele … nu sunt **de fapt** disponibile"; the one-shot `TOOL_REFUSAL_NUDGE` is sent instead of posting the refusal as the final answer.

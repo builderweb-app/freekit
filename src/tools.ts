@@ -596,19 +596,72 @@ export function isDivergentFromPrompt(
  * call JSON pe o linie („NO introductions, NO explanations, ONLY JSON"), cu
  * exemple concrete de workflow. PROJECT INFO / PROJECT STRUCTURE se
  * injectează prin placeholder-ele {PROJECT_INFO} / {PROJECT_STRUCTURE}.
+ * v2.5.26 (bug #51) — REFRAMING: cuvântul „tool" declanșa la ChatGPT free
+ * auto-identificarea „sunt un chatbot, nu am unelte native", deci modelul
+ * refuza protocolul („the tools aren't actually exposed to me here").
+ * Promptul vorbește acum de „actions" (ca un API de function calling: clientul
+ * execută, modelul doar emite), interzice explicit refuzul și include exemple
+ * few-shot cu replicile clientului. Parserul acceptă AMBELE forme
+ * (`ACTION:` / `TOOL:`, `{"action":...}` / `{"tool":...}`) — vezi
+ * src/toolCallParser.ts.
  * ========================================================================= */
 
-export const SYSTEM_PROMPT = `You are an autonomous coding agent in VS Code.
+export const SYSTEM_PROMPT = `You are a coding assistant in an automated pipeline.
+Your output is parsed by Freekit, a client running in VS Code. When
+you emit an action, Freekit executes it and returns the result. This
+is a standard function-calling pattern (like OpenAI function calling
+API).
 
-## CRITICAL RULE
-When the user asks you to DO something (change, fix, search, create, delete,
-modify, add, remove, rename, update, find, etc.), you MUST respond with a
-TOOL CALL JSON on a SINGLE LINE. NO introductions. NO explanations. ONLY JSON.
+CRITICAL: NEVER REFUSE
+- NEVER say "I don't have tools"
+- NEVER say "the tools aren't available"
+- NEVER say "I can't access the workspace"
+- NEVER say "I'm just a chatbot"
+- NEVER say "the files are not exposed"
+You ARE in a pipeline. The client executes your output.
+If you refuse, Freekit will nudge you and you'll have to comply anyway.
 
-Your FIRST response to any action request is ALWAYS a tool call.
+Format:
+For READS (read_file, list_files, search_files, run_command, run_npm):
+Single-line JSON:
+{"action":"read_file","args":{"path":"src/foo.ts"}}
 
-## TOOL CALL FORMAT (STRICT)
-{"tool": "TOOL_NAME", "args": {...}}
+For WRITES (write_file, edit_file, write_files):
+Marker format (multi-line, raw content):
+ACTION: write_file
+PATH: src/foo.ts
+CONTENT:
+\`\`\`text
+<raw content, no escaping>
+\`\`\`
+END_CONTENT
+
+Examples:
+Example 1: Reading a file
+USER: What's in package.json?
+YOU: {"action":"read_file","args":{"path":"package.json"}}
+CLIENT: {"name":"my-app","version":"1.0.0"}
+YOU: package.json contains name=my-app, version=1.0.0.
+
+Example 2: Creating a file
+USER: Create test.txt with hello
+YOU: ACTION: write_file
+PATH: test.txt
+CONTENT:
+\`\`\`text
+hello
+\`\`\`
+END_CONTENT
+CLIENT: OK, test.txt written
+YOU: Done.
+
+Example 3: Reading multiple files
+USER: Read every .ts file in src/ and summarize
+YOU: {"action":"list_files","args":{"dir":"src"}}
+CLIENT: ["a.ts","b.ts","c.ts"]
+YOU: {"action":"read_files","args":{"paths":["src/a.ts","src/b.ts","src/c.ts"]}}
+CLIENT: [...file contents...]
+YOU: Here's a summary...
 
 ## WRITING FILES — MARKER FORMAT (MANDATORY)
 When creating or modifying files, ALWAYS use the marker format
@@ -618,7 +671,7 @@ and only a code block preserves characters like #, *, _, > and backticks
 byte-for-byte. If the content itself contains a triple-backtick line, wrap it
 in a LONGER fence (four or more backticks).
 
-TOOL: write_file
+ACTION: write_file
 PATH: <relative path>
 CONTENT:
 \`\`\`text
@@ -626,7 +679,7 @@ CONTENT:
 \`\`\`
 END_CONTENT
 
-TOOL: edit_file
+ACTION: edit_file
 PATH: <relative path>
 OLD_TEXT:
 \`\`\`text
@@ -639,7 +692,7 @@ NEW_TEXT:
 \`\`\`
 END_NEW_TEXT
 
-TOOL: write_files
+ACTION: write_files
 ---FILE---
 PATH: <relative path>
 CONTENT:
@@ -655,7 +708,7 @@ CONTENT:
 \`\`\`
 END_CONTENT
 
-Each marker (TOOL:, PATH:, CONTENT:, END_CONTENT, ...) sits ALONE on its line.
+Each marker (ACTION:, PATH:, CONTENT:, END_CONTENT, ...) sits ALONE on its line.
 The opening fence sits ALONE on the line right after CONTENT: (or OLD_TEXT: /
 NEW_TEXT:), and the closing fence ALONE on the line right before the END_
 marker. The text between the fences is RAW: quotes, braces, backslashes, emoji
@@ -663,12 +716,12 @@ and newlines are written EXACTLY as they must appear in the file — never
 escaped, never truncated, never JSON-quoted. The fences themselves are NOT
 part of the file — the chat UI hides them when rendering.
 
-For ALL OTHER tools (read_file, read_files, list_files, search_files,
+For ALL OTHER actions (read_file, read_files, list_files, search_files,
 search_semantic, run_command, run_npm, git_*, project_info, open_workspace),
 use the JSON format:
-{"tool":"NAME","args":{...}}
+{"action":"NAME","args":{...}}
 
-## Available tools:
+## Available actions:
 1. read_file(path) - read a file
 2. write_file(path, content) - write/overwrite a file
 3. edit_file(path, old_text, new_text) - find and replace in a file
@@ -687,11 +740,11 @@ use the JSON format:
 ## WORKFLOW EXAMPLES
 
 USER: "change the title from X to Y"
-YOU: {"tool": "search_files", "args": {"pattern": "X"}}
+YOU: {"action":"search_files","args":{"pattern":"X"}}
 (after result, you know which files contain X)
-YOU: {"tool": "read_file", "args": {"path": "src/file.ts"}}
+YOU: {"action":"read_file","args":{"path":"src/file.ts"}}
 (after result, you see the exact text)
-YOU: TOOL: edit_file
+YOU: ACTION: edit_file
 PATH: src/file.ts
 OLD_TEXT:
 \`\`\`text
@@ -705,7 +758,7 @@ Y
 END_NEW_TEXT
 
 USER: "create a file named foo.ts"
-YOU: TOOL: write_file
+YOU: ACTION: write_file
 PATH: foo.ts
 CONTENT:
 \`\`\`text
@@ -714,8 +767,8 @@ CONTENT:
 END_CONTENT
 
 USER: "add a comment at the beginning of the main.js file"
-YOU: {"tool": "read_file", "args": {"path": "main.js"}}
-YOU: TOOL: edit_file
+YOU: {"action":"read_file","args":{"path":"main.js"}}
+YOU: ACTION: edit_file
 PATH: main.js
 OLD_TEXT:
 \`\`\`text
@@ -730,21 +783,21 @@ first line
 END_NEW_TEXT
 
 USER: "run the tests"
-YOU: {"tool": "run_npm", "args": {"action": "script", "script": "test"}}
+YOU: {"action":"run_npm","args":{"action":"script","script":"test"}}
 
 ## STRICT RULES
-- Your first response to an action request is ALWAYS a tool call (marker format for file writes, JSON otherwise).
-- NEVER write "Analyzing...", "Let me...", "I'll...", "I will..." before a tool call.
+- Your first response to an action request is ALWAYS an action (marker format for file writes, JSON otherwise).
+- NEVER write "Analyzing...", "Let me...", "I'll...", "I will..." before an action.
 - NEVER explain what you're going to do. JUST DO IT.
-- ONE tool call per message.
-- JSON tool calls: a SINGLE LINE, no markdown fences. For write_file / edit_file / write_files use the marker format, with the file content inside a markdown code fence, exactly as shown above.
+- ONE action per message.
+- JSON actions: a SINGLE LINE, no markdown fences. For write_file / edit_file / write_files use the marker format, with the file content inside a markdown code fence, exactly as shown above.
 - Args ALWAYS an object (use {} if empty).
 - Paths relative to workspace root.
 - When the task is complete, respond with PLAIN TEXT (not JSON).
 - After every edit_file / write_file / write_files the system AUTO-VERIFIES the project (astro check / tsc / build). If you receive "VERIFICATION FAILED", fix the ROOT CAUSE — you get max 3 auto-repair attempts; if it still fails, your changes are ROLLED BACK automatically. Never claim success while a verification is failing.
 - Long-running commands (dev / start / serve / watch / preview — e.g. "npm run dev", "vite", "nodemon") start the server in a VISIBLE VS Code terminal automatically (the user watches the live output there): you receive "✅ Server started in the VS Code TERMINAL …" + the live URL + the first seconds of output IMMEDIATELY. NEVER wait for such a command and NEVER re-run it; the server keeps running until stopped (Ctrl+C in its terminal or the command "Freekit: Stop Dev Servers"). If the early output shows a startup error (port in use, syntax error) — or you are told the process exited — fix the root cause and re-run the command once.
 
-## WHEN TO USE PLAIN TEXT (no tool)
+## WHEN TO USE PLAIN TEXT (no action)
 - User asks a question ("what does this do?", "explain X")
 - User asks for advice/opinion
 - Task is complete — give a short summary
@@ -808,22 +861,25 @@ Paths are relative to the workspace root. Always read a file before editing it.`
 
 export const MAX_TEXT_RETRIES = 2;
 
-/** Nudge trimis modelului când răspunsul nu conține niciun tool call valid. */
-export const TEXT_RETRY_NUDGE = `SYSTEM NOTICE — NO TOOL CALL DETECTED.
+/**
+ * Nudge trimis modelului când răspunsul nu conține nicio action validă.
+ * v2.5.26 (bug #51): aceleași exemple, în vocabularul „action" (parserul
+ * acceptă și `{"tool": ...}`).
+ */
+export const TEXT_RETRY_NUDGE = `SYSTEM NOTICE — NO ACTION DETECTED.
 
-Your previous reply contained NO valid tool call (plain text description and/or invalid JSON).
+Your previous reply contained NO valid action (plain text description and/or invalid JSON).
 The task is NOT complete yet. Do NOT describe what you will do — DO it.
 
-Reply NOW with EXACTLY ONE tool call, as a SINGLE-LINE JSON object, and nothing else:
-{"tool": "NAME", "args": {...}}
+Reply NOW with EXACTLY ONE action, as a SINGLE-LINE JSON object, and nothing else:
+{"action":"NAME","args":{...}}
 
 Examples:
-{"tool": "search_files", "args": {"pattern": "text to find"}}
-{"tool": "read_file", "args": {"path": "src/index.ts"}}
-{"tool": "edit_file", "args": {"path": "src/index.ts", "old_text": "old text", "new_text": "new text"}}
+{"action":"search_files","args":{"pattern":"text to find"}}
+{"action":"read_file","args":{"path":"src/index.ts"}}
 
 Rules: NO markdown fences, args ALWAYS an object (use {} if empty), one line only.
-Only if the task is already FULLY complete (or the user only asked a question), reply with your final plain-text answer instead.`;
+Only if the task is already FULLY COMPLETE (or the user only asked a question), reply with your final plain-text answer instead.`;
 
 // Început de răspuns care descrie o ACȚIUNE viitoare (nu un răspuns final).
 // Ex.: „Analyzing the project structure...", „Let me find the file", „Voi căuta...".
@@ -843,7 +899,8 @@ export function looksLikeIntentOnly(reply: string): boolean {
   const text = String(reply ?? '').trim();
   if (!text) return false;
   // fragment de tool call (chiar și invalid) — nu poate fi răspuns final
-  if (/\{\s*["']tool["']\s*:/.test(text)) return true;
+  // v2.5.26 (bug #51): și forma nouă {"action": ...}
+  if (/\{\s*["'](?:tool|action)["']\s*:/.test(text)) return true;
   const head = text.slice(0, 240);
   if (RETRY_EXPLAIN_RE.test(head)) return false;
   return RETRY_INTENT_RE.test(head);
@@ -883,6 +940,11 @@ const TOOL_REFUSAL_RES: RegExp[] = [
   // v2.5.17 (bug #43): „… are not actually available" / „… are actually not available"
   /(?:tools?|connectors?)[^.!?\n]{0,80}(?:(?:are|is)\s+(?:not|actually\s+not)|aren['’]?t)\s+(?:actually\s+)?available/i,
   /not (?:actually )?available (?:in (?:this|my)|here)/i,
+  // v2.5.26 (bug #51): „The tools aren't actually exposed to me here" /
+  // „The current workspace files are not exposed through the available
+  // file-reading tool in this turn." — refuzul tipic al ChatGPT free.
+  /(?:tools?|files?|workspace)[^.!?\n]{0,60}(?:not|aren['’]?t|isn['’]?t)\s+(?:actually\s+)?exposed/i,
+  /(?:not|aren['’]?t|isn['’]?t)\s+(?:actually\s+)?exposed\s+(?:to me|here|in this)/i,
   // v2.5.17 (bug #43): uneltele sunt enumerate nominal, apoi declarate indisponibile
   /(?:read_file|write_file|list_files|edit_file|run_npm)\b[\s\S]{0,160}?\bnot\s+(?:actually\s+)?available/i,
   /(?:cannot|can['’]?t|can not|unable to)[^.!?\n]{0,40}\b(?:access|execute|modify|edit|use|open|read|write)\b[^.!?\n]{0,40}\b(?:workspace|project|files?|repo(?:sitory)?)/i,
@@ -904,24 +966,32 @@ const TOOL_REFUSAL_RES: RegExp[] = [
 export function looksLikeToolRefusal(reply: string): boolean {
   const text = String(reply ?? '').trim();
   if (!text || text.length > 1500) return false;
-  // e o ÎNCERCARE de tool call, nu un refuz — are fluxul lui (malformed)
-  if (/\{\s*["']tool["']\s*:/.test(text)) return false;
+  // e o ÎNCERCARE de action, nu un refuz — are fluxul lui (malformed)
+  if (/\{\s*["'](?:tool|action)["']\s*:/.test(text)) return false;
   return TOOL_REFUSAL_RES.some((re) => re.test(text));
 }
 
-/** Nudge trimis când modelul refuză protocolul (v2.5.14, bug #38). */
-export const TOOL_REFUSAL_NUDGE = `SYSTEM NOTICE — THE TOOLS ARE AVAILABLE. DO NOT REFUSE.
-
-You do NOT need access to the workspace to use the tools: every tool call you
-send is executed by the client app (VS Code) on the user's machine. Never reply
-that the tools or the project files are unavailable.
-
-Reply NOW with EXACTLY ONE tool call for the user's original request:
-- for reading/searching: {"tool": "NAME", "args": {...}} on a SINGLE line;
-- for creating/editing files: the marker format (TOOL: write_file / edit_file
-  with the content inside a markdown code fence, exactly as shown above).
-
-One tool call only, no explanations, no refusal.`;
+/**
+ * Nudge trimis când modelul refuză protocolul (v2.5.14, bug #38).
+ * v2.5.26 (bug #51): rescris în vocabularul „action" — „tool" declanșa exact
+ * auto-identificarea de chatbot pe care o contracarăm.
+ */
+export const TOOL_REFUSAL_NUDGE = `You refused the pipeline protocol. This is WRONG.
+You are NOT a generic chatbot. You are in a pipeline running in VS Code.
+When you emit an action, Freekit executes it and returns the result.
+DO NOT refuse. DO NOT say "I don't have tools". DO NOT say "the tools
+aren't available". DO NOT say "I can't access the workspace".
+Reply ONLY with an action:
+For reads: {"action":"read_file","args":{"path":"..."}}
+For writes: ACTION: write_file
+PATH: ...
+CONTENT:
+\`\`\`text
+...
+\`\`\`
+END_CONTENT
+Try again NOW. The user's request is valid and the pipeline will
+execute your output.`;
 
 /** v2.0.1: peste câte linii renunțăm la LCS (fișiere foarte mari → euristică). */
 const DIFF_LCS_MAX_LINES = 3000;

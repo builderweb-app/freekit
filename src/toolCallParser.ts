@@ -19,6 +19,9 @@ import type { ToolCall } from './tools';
  * v2.4.9: pentru uneltele cu conținut liber (write_file / edit_file /
  * write_files) există și formatul marker-based (`TOOL: ... / CONTENT: ...
  * END_CONTENT`), verificat PRIORITAR — vezi secțiunea dedicată de mai jos.
+ * v2.5.26 (bug #51): promptul cere „ACTION:" (cuvântul „tool" declanșa refuzul
+ * ChatGPT); parserul acceptă ambele prefixe, iar JSON-ul cu cheia „action" e
+ * normalizat la {tool, args} — vechiul `{"tool": ...}` rămâne valid.
  * ========================================================================= */
 
 /** Mesaj afișat utilizatorului când răspunsul e clar o încercare de tool call
@@ -26,20 +29,27 @@ import type { ToolCall } from './tools';
 export const MALFORMED_TOOL_CALL_ERROR =
   'Model returned malformed tool call. Try again or switch provider.';
 
+/** v2.5.26 (bug #51): promptul vorbește de „actions" (ca ChatGPT să nu refuze),
+ *  dar parserul acceptă în continuare și vechiul prefix „TOOL:" (retrocompat). */
+const MARKER_PREFIX = '(?:TOOL|ACTION)';
+
 /** v2.5.3 FIX 7: câte reluări facem înainte de a afișa MALFORMED_TOOL_CALL_ERROR. */
 export const MAX_MALFORMED_RETRIES = 1;
 
 /**
- * v2.5.3 FIX 7: nudge trimis modelului când răspunsul conține `TOOL:` dar nu
- * poate fi parsat (ex: DeepSeek ecouază promptul și strivesc conținutul pe o
- * singură linie). Cerem explicit formatul marker cu conținut în code fence.
+ * v2.5.3 FIX 7: nudge trimis modelului când răspunsul conține `TOOL:` /
+ * `ACTION:` dar nu poate fi parsat (ex: DeepSeek ecouază promptul și strivesc
+ * conținutul pe o singură linie). Cerem explicit formatul marker cu conținut
+ * în code fence.
+ * v2.5.26 (bug #51): nudge-ul folosește același vocabular ca promptul nou
+ * („action"), altfel cuvântul „tool" reintroduce refuzul pe care îl reparăm.
  */
-export const MALFORMED_TOOL_CALL_NUDGE = `SYSTEM NOTICE — MALFORMED TOOL CALL.
+export const MALFORMED_TOOL_CALL_NUDGE = `SYSTEM NOTICE — MALFORMED ACTION CALL.
 
 Your previous response was malformed. Try again.
-Use TOOL: write_file with content in a code fence, one item per line:
+Use ACTION: write_file with content in a code fence, one item per line:
 
-TOOL: write_file
+ACTION: write_file
 PATH: <relative path>
 CONTENT:
 \`\`\`text
@@ -47,10 +57,13 @@ CONTENT:
 \`\`\`
 END_CONTENT
 
-Do NOT echo the user message. Do NOT explain. Reply with EXACTLY ONE tool call and nothing else.`;
+Do NOT echo the user message. Do NOT explain. Reply with EXACTLY ONE action and nothing else.`;
 
 /** Început de obiect JSON cu cheia „tool” (acceptă și spații în plus). */
 const TOOL_MARKER_HEAD_RE = /^\{\s*["']?tool["']?\s*:/;
+
+/** v2.5.26 (bug #51): început de obiect JSON cu cheia „action" (promptul nou). */
+const ACTION_MARKER_HEAD_RE = /^\{\s*["']?action["']?\s*:/;
 
 /** Cât ne uităm înainte la începutul unui obiect când căutăm cheia „tool”. */
 const TOOL_HEAD_WINDOW = 64;
@@ -298,20 +311,34 @@ function collectCandidates(text: string): string[] {
 
 /** Normalizează obiectul parsat la {tool, args} (inclusiv forma legacy „action"). */
 function normalizeToolCall(parsed: any): ToolCall | null {
-  if (!parsed || typeof parsed !== 'object' || typeof parsed.tool !== 'string') {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return null;
   }
 
-  if (parsed.args && typeof parsed.args === 'object') {
-    return { tool: parsed.tool, args: parsed.args };
+  if (typeof parsed.tool === 'string') {
+    if (parsed.args && typeof parsed.args === 'object') {
+      return { tool: parsed.tool, args: parsed.args };
+    }
+
+    if (typeof parsed.action === 'string') {
+      const { tool, action, ...rest } = parsed;
+      return { tool: `${tool}_${action}`, args: rest };
+    }
+
+    return { tool: parsed.tool, args: {} };
   }
 
+  // v2.5.26 (bug #51): promptul vorbește de „actions", deci modelele trimit
+  // {"action":"read_file","args":{...}} — aceeași formă, doar cheia diferă.
   if (typeof parsed.action === 'string') {
-    const { tool, action, ...rest } = parsed;
-    return { tool: `${tool}_${action}`, args: rest };
+    const { action, args, ...rest } = parsed;
+    if (args && typeof args === 'object' && !Array.isArray(args)) {
+      return { tool: action, args };
+    }
+    return { tool: action, args: rest };
   }
 
-  return { tool: parsed.tool, args: {} };
+  return null;
 }
 
 /* =========================================================================
@@ -329,11 +356,14 @@ function normalizeToolCall(parsed: any): ToolCall | null {
  *
  * Marker-based e OPȚIONAL și PRIORITAR: dacă blocul nu e valid (marker de
  * închidere lipsă, PATH lipsă, alt tool) cădem înapoi pe parserul JSON.
+ * v2.5.26 (bug #51): prefixul poate fi `TOOL:` (vechi) sau `ACTION:` (nou).
  * ========================================================================= */
 
-/** `TOOL: nume` singur pe linie (case-insensitive, whitespace ignorat). */
-const MARKER_TOOL_LINE_RE =
-  /^[ \t]*TOOL[ \t]*:[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*$/i;
+/** `TOOL: nume` / `ACTION: nume` singur pe linie (case-insensitive, whitespace ignorat). */
+const MARKER_TOOL_LINE_RE = new RegExp(
+  '^[ \\t]*' + MARKER_PREFIX + '[ \\t]*:[ \\t]*([A-Za-z_][A-Za-z0-9_]*)[ \\t]*$',
+  'i'
+);
 
 /** Uneltele cu conținut liber care acceptă formatul marker-based. */
 const MARKER_TOOLS = new Set(['write_file', 'edit_file', 'write_files']);
@@ -571,7 +601,7 @@ export function parseMarkerToolCall(text: string): ToolCall | null {
   return null;
 }
 
-/** true când textul conține un `TOOL:` pentru o unealtă cu conținut liber. */
+/** true când textul conține un `TOOL:` / `ACTION:` pentru o unealtă cu conținut liber. */
 export function looksLikeMarkerToolCallAttempt(text: string): boolean {
   return String(text ?? '')
     .split(/\r?\n/)
@@ -604,15 +634,17 @@ export function parseToolCallText(text: string): ToolCall | null {
 }
 
 /**
- * true când răspunsul e clar o ÎNCERCARE de tool call (începe cu `{"tool":`,
- * eventual în fence markdown — sau conține un bloc marker-based `TOOL:`) care
- * nu a putut fi parsat — merită un mesaj de eroare clar, nu afișarea JSON-ului
- * brut ca răspuns final.
+ * true când răspunsul e clar o ÎNCERCARE de tool call (începe cu `{"tool":` /
+ * `{"action":`, eventual în fence markdown — sau conține un bloc marker-based
+ * `TOOL:` / `ACTION:`) care nu a putut fi parsat — merită un mesaj de eroare
+ * clar, nu afișarea JSON-ului brut ca răspuns final.
  */
 export function looksLikeToolCallAttempt(text: string): boolean {
   const src = String(text ?? '');
+  const head = stripLeadingFence(src);
   return (
-    TOOL_MARKER_HEAD_RE.test(stripLeadingFence(src)) ||
+    TOOL_MARKER_HEAD_RE.test(head) ||
+    ACTION_MARKER_HEAD_RE.test(head) ||
     looksLikeMarkerToolCallAttempt(src)
   );
 }

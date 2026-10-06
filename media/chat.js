@@ -46,6 +46,8 @@ const newChatBtn = document.getElementById('mNew');
 // v2.0.1: chip-ul de model (înlocuiește vechiul <select id="provider">)
 const modelLabel = document.getElementById('modelLabel');
 const modelDot = document.getElementById('modelDot');
+// v2.5.26 (bug #51): badge-ul de reliability al providerului activ
+const modelRel = document.getElementById('modelRel');
 const modelBrowserEl = document.getElementById('model-browser');
 const modelLocalEl = document.getElementById('model-local');
 // v2.0.2: hardware detectat (VRAM/RAM) afișat sub lista de modele locale
@@ -1873,6 +1875,25 @@ function setModelDot(dot) {
   modelDot.className = 'dot' + (dot ? ' ' + dot : '');
 }
 
+// v2.5.26 (bug #51): cât de fiabil respectă providerul activ protocolul de
+// „actions" (cât de rar refuză) — 5 = mereu compliant, 3 = poate refuza
+// task-uri complexe. Stelele apar în chip, explicația în tooltip.
+function setReliabilityBadge(rel) {
+  if (!modelRel) return;
+  const value = rel && Number.isFinite(rel.value) ? Math.round(rel.value) : 0;
+  if (!value) {
+    modelRel.hidden = true;
+    modelRel.textContent = '';
+    modelRel.removeAttribute('title');
+    return;
+  }
+  const stars = Math.max(0, Math.min(5, value));
+  modelRel.hidden = false;
+  modelRel.textContent = '⭐'.repeat(stars);
+  modelRel.title =
+    'Provider reliability ' + stars + '/5' + (rel.note ? ' — ' + rel.note : '');
+}
+
 // v2.2.0: sub-rând de model web (indentat, sub providerul activ)
 function modelSubItem(parent, m, parentName) {
   const item = document.createElement('button');
@@ -2025,6 +2046,8 @@ function renderProviderMenu(providers, payload) {
 
   if (activeLabel && modelLabel) modelLabel.textContent = activeLabel;
   if (activeDot) setModelDot(activeDot);
+  // v2.5.26 (bug #51): badge-ul de reliability al providerului activ
+  setReliabilityBadge(payload && payload.reliability);
   // v2.3.1: meniul a fost re-randat → recalculăm titlurile de trunchiere
   syncOverflowTitles(document);
 }

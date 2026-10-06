@@ -10,6 +10,8 @@ import {
   BROWSER_PROVIDER_IDS,
   getProviderStatus,
   ollamaInstallState,
+  providerReliability,
+  reliabilityNote,
   ProviderStatusInfo
 } from './providers';
 import { pullOllamaModel } from './providers/ollama';
@@ -171,8 +173,9 @@ END_CONTENT`;
  * SYSTEM_PROMPT), deci handoff-ul îi reamintește protocolul de unelte. Nu
  * reluăm tot promptul: scopul rotirii e ca paste-ul să rămână mic (vezi
  * MAX_CHARS_TOTAL din src/payload.ts).
+ * v2.5.26 (bug #51): același vocabular „action" ca SYSTEM_PROMPT.
  */
-const ROTATION_PROTOCOL_REMINDER = `Tool protocol (this chat is new and has no system prompt yet): answer EVERY step with EXACTLY ONE tool call — a single-line JSON {"tool":"NAME","args":{...}} (read_file, read_files, list_files, search_files, search_semantic, run_command, run_npm, git_*, project_info), or the marker format below for write_file / edit_file / write_files. No introductions, no explanations. When the task is fully done, answer with plain text.`;
+const ROTATION_PROTOCOL_REMINDER = `Action protocol (this chat is new and has no system prompt yet): answer EVERY step with EXACTLY ONE action — a single-line JSON {"action":"NAME","args":{...}} (read_file, read_files, list_files, search_files, search_semantic, run_command, run_npm, git_*, project_info), or the marker format below for write_file / edit_file / write_files. No introductions, no explanations. When the task is fully done, answer with plain text.`;
 
 // v1.7.1: verbose mode — pașii AI afișați în chat (persistat în globalState)
 const VERBOSE_KEY = 'freekit.verboseMode';
@@ -3713,6 +3716,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       modelLabel?: string;
       /** v2.2.0: modelele web ale providerului activ (sub-rânduri în meniu). */
       models?: Array<{ id: string; label: string; badge?: string; active?: boolean }>;
+      /** v2.5.26 (bug #51): 0-5 — cât de rar refuză providerul protocolul. */
+      reliability?: number;
     }
 
     const browserDot = (id: string): 'green' | 'orange' => {
@@ -3878,16 +3883,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (!configuredInstalled) offerDownload(activeModel);
     }
 
+    // v2.5.26 (bug #51): reliability per rând (badge în chip + note în meniu).
+    const autoChain = this.autoChainIds();
     for (const p of providers) {
+      p.reliability = providerReliability(p.id, autoChain);
       p.active =
         p.group === 'local'
           ? selected === 'ollama' && (p.modelId ? p.modelId === activeModel : true)
           : p.id === selected;
     }
+    const activeReliability =
+      providers.find((p) => p.active)?.reliability ??
+      providerReliability(selected, autoChain);
 
     this.view?.webview.postMessage({
       type: 'providers_list',
       providers,
+      reliability: {
+        value: activeReliability,
+        note: reliabilityNote(activeReliability)
+      },
       hardware: {
         summary: hardwareSummary(hw),
         gpu: hw.gpus[0]?.name ?? '',
@@ -4659,7 +4674,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <div class="ctx">
       <div class="pop">
         <button class="chip" id="modelChip" data-menu="menuModel" aria-haspopup="true" aria-expanded="false" title="Provider and model">
-          <span class="dot" id="modelDot"></span><span class="lbl" id="modelLabel">Auto</span><svg class="ic sm"><use href="#i-chev"/></svg>
+          <span class="dot" id="modelDot"></span><span class="lbl" id="modelLabel">Auto</span><span class="rel" id="modelRel" hidden></span><svg class="ic sm"><use href="#i-chev"/></svg>
         </button>
         <div class="menu up" id="menuModel" role="menu">
           <div class="mh">Browser accounts</div>

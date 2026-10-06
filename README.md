@@ -76,6 +76,24 @@ Unlike other AI coding agents, Freekit works with your existing web AI accounts:
 
 - **Ollama** — 51-model catalog, hardware tiers T0-T6, auto-recommendation based on your VRAM and RAM; warns when a model is too small for real code (under 3B) and points to the free web providers on machines without a GPU
 
+## Provider reliability for agentic tasks
+
+| Provider | Reliability | Notes |
+|----------|-------------|-------|
+| Gemini | ⭐⭐⭐⭐⭐ | Accepts from first message |
+| DeepSeek | ⭐⭐⭐⭐⭐ | Accepts from first message |
+| Ollama (local) | ⭐⭐⭐⭐⭐ | Always compliant |
+| Claude | ⭐⭐⭐⭐ | Rarely refuses |
+| Mistral | ⭐⭐⭐⭐ | Rarely refuses |
+| Qwen | ⭐⭐⭐⭐ | Rarely refuses |
+| ChatGPT free | ⭐⭐⭐ | May refuse complex multi-step tasks |
+
+For complex tasks (reading many files, multi-file edits), prefer
+Gemini, DeepSeek, or Ollama.
+
+The same rating is shown in the **model chip** in the composer (the stars next
+to the provider name; hover for the explanation).
+
 ## How it works
 
 Freekit connects to your **existing web AI sessions** via browser automation:

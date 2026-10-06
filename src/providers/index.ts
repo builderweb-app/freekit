@@ -30,6 +30,48 @@ export const PROVIDER_LABELS: Record<string, string> = {
   ollama: 'Ollama (local)'
 };
 
+/**
+ * v2.5.26 (bug #51) — cât de fiabil respectă providerul protocolul de „actions"
+ * (0-5): cât de rar refuză să emită o action și cât de bine ține formatul pe
+ * task-uri lungi, multi-pas. Sursa: rapoartele de bug + testele manuale pe
+ * task-uri agentice (citit mai multe fișiere, editări pe mai multe fișiere).
+ * Valoarea ajunge în UI (badge în chip-ul de model) și în README.
+ */
+export const PROVIDER_META: Record<string, { reliability: number }> = {
+  chatgpt: { reliability: 3 },
+  claude: { reliability: 4 },
+  mistral: { reliability: 4 },
+  qwen: { reliability: 4 },
+  gemini: { reliability: 5 },
+  deepseek: { reliability: 5 },
+  ollama: { reliability: 5 }
+};
+
+/** Reliability-ul implicit (provider necunoscut / „auto" fără lanț). */
+export const DEFAULT_RELIABILITY = 5;
+
+/**
+ * v2.5.26 (bug #51): reliability-ul unui provider (sau al lanțului Auto — cel
+ * mai slab din lanț, pentru că un singur refuz oprește pașii de acolo).
+ */
+export function providerReliability(id: string, chain: string[] = []): number {
+  if (id === 'auto') {
+    const ids = chain.length ? chain : ['ollama'];
+    return Math.min(
+      ...ids.map((c) => PROVIDER_META[c]?.reliability ?? DEFAULT_RELIABILITY)
+    );
+  }
+  return PROVIDER_META[id]?.reliability ?? DEFAULT_RELIABILITY;
+}
+
+/** Textul de sub stele, afișat în tooltip / README. */
+export function reliabilityNote(reliability: number): string {
+  if (reliability >= 5) return 'most reliable';
+  if (reliability === 4) return 'reliable';
+  if (reliability === 3) return 'may refuse complex tasks';
+  return 'unreliable for agentic tasks';
+}
+
 /** Providerii web (prin Chrome/CDP) — folosiți și de lanțul Auto. */
 export const BROWSER_PROVIDER_IDS: string[] = [
   'deepseek',

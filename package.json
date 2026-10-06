@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.5.24",
+  "version": "2.5.25",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -219,7 +219,7 @@
           "default": 4,
           "minimum": 0,
           "maximum": 40,
-          "markdownDescription": "Starts a **new web chat** (with a short handoff of the task and the recent steps) after this many tool results have been pasted into the **same** browser chat. A large tool payload makes ChatGPT/Claude/Gemini process every later message slowly, and the accumulated context can hit the site's „Chat memory full” limit — a fresh chat keeps the paste small and fast. **0** disables the rotation (the chat is only restarted when the site reports a full context)."
+          "markdownDescription": "Starts a **new web chat** (with a short handoff of the task, the recent steps and the files already read) after this many tool results have been pasted into the **same** browser chat. A large tool payload makes ChatGPT/Claude/Gemini process every later message slowly, and the accumulated context can hit the site's „Chat memory full” limit — a fresh chat keeps the paste small and fast. The handoff carries the list of files already read plus short head+tail excerpts of their content, so the new chat does not ask to re-read them; tasks that read *many* files and summarize them („read every file in src/ and summarize”) skip the rotation entirely, because the new chat would have to re-read everything. **0** disables the rotation (the chat is only restarted when the site reports a full context)."
         },
         "freekit.autoVerify": {
           "type": "boolean",

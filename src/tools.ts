@@ -836,6 +836,51 @@ export function looksLikeIntentOnly(reply: string): boolean {
   return RETRY_INTENT_RE.test(head);
 }
 
+/* =========================================================================
+ * v2.5.14 (bug #38) — REFUZ AL PROTOCOLULUI DE UNELTE
+ * Modelul răspunde uneori ca un chat obișnuit în loc să execute protocolul:
+ * „the VS Code workspace tools you specified are not available in this
+ * session", „I can't safely modify the project without access to the
+ * workspace". Cauza tipică: sesiunea providerului nu era complet autentificată
+ * când a plecat mesajul. Un astfel de refuz NU se afișează ca răspuns final:
+ * îi cerem explicit, o singură dată, să trimită tool call-ul (uneltele rulează
+ * în clientul VS Code, nu la model).
+ * ========================================================================= */
+
+/** v2.5.14 (bug #38): câte reluări facem când modelul refuză protocolul (max 1). */
+export const MAX_REFUSAL_RETRIES = 1;
+
+/**
+ * Refuzuri tipice: unelte/workspace indisponibile, fără acces la proiect.
+ * Doar pentru răspunsuri scurte (un refuz real e scurt) — nu prindem
+ * explicații lungi și legitime despre unelte.
+ */
+const TOOL_REFUSAL_RE =
+  /not available in this session|(?:tools?|connectors?)[^.!?\n]{0,60}(?:are |is )?not (?:available|mounted)|(?:workspace|project|repo(?:sitory)?) files?[^.!?\n]{0,20}not (?:mounted|available|accessible|attached)|(?:can['’]?t|cannot|can not|unable to)[^.!?\n]{0,40}(?:access|modify|use|open|read)[^.!?\n]{0,40}(?:workspace|project|files?|repo(?:sitory)?)|(?:don['’]?t|do not|doesn['’]?t) have (?:any )?access to[^.!?\n]{0,30}(?:workspace|project|files?|repo)|nu am acces (?:la|în)|(?:unelte(?:le)?|instrumentele)[^.!?\n]{0,40}(?:nu sunt|indisponibil)/i;
+
+/** true când răspunsul e un REFUZ al protocolului de unelte (nu un răspuns final). */
+export function looksLikeToolRefusal(reply: string): boolean {
+  const text = String(reply ?? '').trim();
+  if (!text || text.length > 1500) return false;
+  // e o ÎNCERCARE de tool call, nu un refuz — are fluxul lui (malformed)
+  if (/\{\s*["']tool["']\s*:/.test(text)) return false;
+  return TOOL_REFUSAL_RE.test(text);
+}
+
+/** Nudge trimis când modelul refuză protocolul (v2.5.14, bug #38). */
+export const TOOL_REFUSAL_NUDGE = `SYSTEM NOTICE — THE TOOLS ARE AVAILABLE. DO NOT REFUSE.
+
+You do NOT need access to the workspace to use the tools: every tool call you
+send is executed by the client app (VS Code) on the user's machine. Never reply
+that the tools or the project files are unavailable.
+
+Reply NOW with EXACTLY ONE tool call for the user's original request:
+- for reading/searching: {"tool": "NAME", "args": {...}} on a SINGLE line;
+- for creating/editing files: the marker format (TOOL: write_file / edit_file
+  with the content inside a markdown code fence, exactly as shown above).
+
+One tool call only, no explanations, no refusal.`;
+
 /** v2.0.1: peste câte linii renunțăm la LCS (fișiere foarte mari → euristică). */
 const DIFF_LCS_MAX_LINES = 3000;
 

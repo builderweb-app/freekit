@@ -53,6 +53,12 @@ const NATURAL_HEAD_MAX_CHARS = 50;
  * evenimente REALE de keydown/keypress/keyup (anti-detect-ul care numără doar
  * `insertText` nu mai vede o lipire instantă). Mesajele lungi rămân rapide:
  * se tastează natural doar primele 30-50 de caractere, restul se lipește.
+ *
+ * v2.5.14 (bug #39): tastarea „naturală” se oprește ÎNAINTE de primul \r/\n —
+ * pe ChatGPT un `insertText('\n')` izolat echivalează cu Enter: mesajul pleca
+ * trunchiat la prima linie, restul rămânea draft în composer și polua mesajul
+ * următor. Restul mesajului (inclusiv primul newline) se lipește dintr-o
+ * singură bucată.
  */
 export async function humanType(
   page: Page,
@@ -63,10 +69,14 @@ export async function humanType(
   const opts = { ...DEFAULT_OPTIONS, ...options };
   if (!text) return;
 
-  const headLength =
+  const naturalHead =
     text.length <= NATURAL_TYPING_MAX_CHARS
       ? text.length
       : randInt(NATURAL_HEAD_MIN_CHARS, Math.min(NATURAL_HEAD_MAX_CHARS, text.length));
+  // v2.5.14 (bug #39): niciodată \r sau \n în capul tastat „natural”.
+  const firstBreak = text.search(/[\r\n]/);
+  const headLength =
+    firstBreak >= 0 ? Math.min(naturalHead, firstBreak) : naturalHead;
   log('typing ' + headLength + '/' + text.length + ' chars with human delay');
 
   await typeNaturally(page, text.slice(0, headLength), opts, signal);

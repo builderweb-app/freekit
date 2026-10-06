@@ -284,6 +284,26 @@ export async function detectLoggedOut(
   return false;
 }
 
+/**
+ * v2.5.14 (bug #38): sesiunea e „gata" = URL non-login + fără indicator vizibil
+ * de „logged out" + composer renderizat. Un singur eșantion NU e suficient: în
+ * tranziția post-login (redirect/reload) header-ul și composerul lipsesc
+ * temporar, iar reluarea prematură trimitea mesajul în sesiunea veche —
+ * ChatGPT răspundea „the tools … are not available in this session".
+ */
+export async function isSessionReady(
+  page: Page,
+  providerId: string
+): Promise<boolean> {
+  try {
+    if (isLoginUrl(page.url())) return false;
+    if (await detectLoggedOut(page, providerId)) return false;
+    return await inputAvailable(page, providerId, 0);
+  } catch {
+    return false;
+  }
+}
+
 /* =========================================================================
  * v1.8.0 — DETECȚIE CAPTCHA
  * Paginile cu verificare „I'm not a robot” (reCAPTCHA challenge / hCaptcha /
@@ -600,6 +620,92 @@ export async function clickStop(page: Page, providerId: string): Promise<boolean
   return false;
 }
 
+/* =========================================================================
+ * v2.5.14 (bug #39) — COMPOSERUL: DRAFTURI RĂMASE + VERIFICARE ÎNAINTE DE ENTER
+ * Pe ChatGPT un `insertText('\n')` izolat echivalează cu Enter: mesajul pleacă
+ * trunchiat la primul newline, iar restul rămâne DRAFT în composer și se
+ * lipește la mesajul următor (context poluat — dovedit live). Aici: golim
+ * orice draft înainte de tastare și verificăm că în composer e exact mesajul
+ * intenționat înainte de Enter (altfel îl relipim dintr-o bucată).
+ * ========================================================================= */
+
+/** Textul curent din composer (innerText pentru contenteditable, value pentru input/textarea). */
+export async function readComposerText(input: Locator): Promise<string | null> {
+  try {
+    return await input.evaluate((el) => {
+      const tag = el.tagName;
+      if (tag === 'TEXTAREA' || tag === 'INPUT') {
+        return String((el as HTMLTextAreaElement).value || '');
+      }
+      return String((el as HTMLElement).innerText || '');
+    });
+  } catch (e: any) {
+    log('readComposerText failed: ' + (e?.message ?? String(e)));
+    return null;
+  }
+}
+
+/** Comparație tolerantă la whitespace (DOM-ul normalizează newline-urile). */
+export const composerTextMatches = (actual: string, expected: string): boolean =>
+  normalize(actual) === normalize(expected);
+
+/** Golește composerul (best-effort) — un draft rămas nu are voie să plece. */
+export async function clearComposer(
+  page: Page,
+  input: Locator,
+  label: string
+): Promise<void> {
+  try {
+    const current = await readComposerText(input);
+    if (current === null) return; // nu putem citi → nu riscăm un Ctrl+A orb
+    if (!current.trim()) return; // nimic de curățat
+    await humanClickButton(page, input, 5000);
+    await page.keyboard.press('ControlOrMeta+A');
+    await page.keyboard.press('Backspace');
+    await sleep(150);
+    log(label + ': leftover draft cleared from the composer (' + current.length + ' chars)');
+  } catch (e: any) {
+    log(label + ': composer clear failed — ' + (e?.message ?? String(e)));
+  }
+}
+
+/**
+ * Verifică înainte de Enter că în composer e exact `message`; la nepotrivire
+ * (mesaj trunchiat, paste pierdut) golește și relipește mesajul dintr-o bucată.
+ */
+export async function ensureComposerHasMessage(
+  page: Page,
+  input: Locator,
+  message: string,
+  label: string,
+  onNotice?: (text: string) => void
+): Promise<void> {
+  const actual = await readComposerText(input);
+  if (actual === null) return; // nu putem verifica — mergem ca înainte
+  if (composerTextMatches(actual, message)) return;
+
+  log(
+    label + ': composer mismatch — ' + actual.length + '/' + message.length +
+      ' chars in the box, re-pasting the whole message'
+  );
+  onNotice?.(
+    '⚠️ The chat composer did not contain the full message (truncated or a leftover draft) — ' +
+      'the whole message was re-pasted before sending.'
+  );
+  await clearComposer(page, input, label);
+  await page.keyboard.insertText(message);
+  await sleep(200);
+  const after = await readComposerText(input);
+  if (after !== null && !composerTextMatches(after, message)) {
+    log(
+      label + ': composer STILL mismatched after re-paste (' +
+        after.length + '/' + message.length + ')'
+    );
+  } else {
+    log(label + ': composer verified after re-paste');
+  }
+}
+
 /**
  * Trimitere generică: scrie în input (v0.8.0: tastare "umană" caracter-cu-caracter
  * pe mesaje scurte, insertText pe cele lungi — nu `type`, altfel \n devine Enter),
@@ -768,6 +874,11 @@ export async function sendAndWait(
   }
   await clickInput(page, input);
 
+  // v2.5.14 (bug #39): un mesaj trunchiat de site lasă restul ca DRAFT în
+  // composer; următoarea trimitere l-ar lipi la mesajul nou (context poluat —
+  // dovedit live pe ChatGPT). Golim înainte de tastare.
+  await clearComposer(page, input, label);
+
   // v0.8.0: tastare "umană" (evenimente reale de tastatură); v2.0.6: mesajele
   // lungi tastează natural doar începutul, restul se lipește — vezi humanType.
   try {
@@ -784,6 +895,11 @@ export async function sendAndWait(
     throw e;
   }
   await sleep(400);
+
+  // v2.5.14 (bug #39): verificăm că în composer e EXACT mesajul, înainte de
+  // Enter — altfel (trunchiere/draft/paste pierdut) îl relipim dintr-o bucată.
+  await ensureComposerHasMessage(page, input, message, label, cfg.onNotice);
+
   await page.keyboard.press('Enter');
   log(label + ': message sent, waiting for the response...');
 

@@ -45,7 +45,10 @@ import {
   resetCommandLimits,
   MAX_TEXT_RETRIES,
   TEXT_RETRY_NUDGE,
-  looksLikeIntentOnly
+  MAX_REFUSAL_RETRIES,
+  TOOL_REFUSAL_NUDGE,
+  looksLikeIntentOnly,
+  looksLikeToolRefusal
 } from './tools';
 import {
   MALFORMED_TOOL_CALL_ERROR,
@@ -65,10 +68,10 @@ import { detectProject, formatProjectInfo } from './project';
 import { initLogChannel, logLine } from './log';
 import {
   detectCaptcha,
-  detectLoggedOut,
   isLoginRequiredError,
   isLoginUrl,
   isProviderRootUrl,
+  isSessionReady,
   resumeConversation,
   sleep
 } from './providers/base';
@@ -159,6 +162,11 @@ let reviewSeq = 0;
 const LOGIN_WAIT_MS = 5 * 60_000;
 const LOGIN_POLL_MS = 2500;
 const LOGIN_MAX_ASSISTS = 2;
+// v2.5.14 (bug #38): câte poll-uri consecutive „curate" (URL non-login, fără
+// indicator de logged-out, composer prezent) confirmă login-ul. Un singur
+// eșantion era prea puțin: în tranziția post-login header-ul și composerul
+// lipsesc temporar → „logged in" fals → mesajul pleca în sesiunea veche.
+const LOGIN_CONFIRM_POLLS = 2;
 
 // v1.8.0: asistentul de CAPTCHA — aceleași limite ca la login (5 min, poll 2.5s)
 const CAPTCHA_WAIT_MS = 5 * 60_000;
@@ -1604,6 +1612,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       let textRetries = 0;
       // v2.5.3 FIX 7: câte nudge-uri „tool call malformat" am trimis (max 1)
       let malformedRetries = 0;
+      // v2.5.14 (bug #38): câte nudge-uri „refuz al protocolului de unelte"
+      // am trimis (max 1)
+      let refusalRetries = 0;
       // v1.3.0: mesajul final de rollback (auto-repair eșuat definitiv)
       let verifyRollbackText = '';
       // v2.5.0 — FIX 3: verificarea rulează o SINGURĂ dată per răspuns complet
@@ -1625,11 +1636,45 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const toolCall = this.parseToolCall(aiReply);
 
         if (!toolCall) {
+          // v2.5.14 (bug #38): refuz al protocolului de unelte („the tools you
+          // specified are not available in this session", „I can't access the
+          // workspace") — de obicei providerul nu era complet logat la
+          // trimitere. NU e răspuns final: o singură reluare cu nudge explicit.
+          if (refusalRetries < MAX_REFUSAL_RETRIES && looksLikeToolRefusal(aiReply)) {
+            refusalRetries++;
+            log(
+              'tool refusal — auto-retry ' +
+                refusalRetries + '/' + MAX_REFUSAL_RETRIES
+            );
+            this.post(
+              'heal',
+              '🔁 Auto-retry ' + refusalRetries + '/' + MAX_REFUSAL_RETRIES +
+                ': the model refused the tool protocol — asking it to send the tool call instead.'
+            );
+            this.postVerboseStep({
+              kind: 'decision',
+              title: 'Auto-retry ' + refusalRetries + '/' + MAX_REFUSAL_RETRIES + ' (tool refusal)',
+              text: 'The model refused to use the tools — re-asking with an explicit notice that the tools run in the VS Code client.',
+              status: 'done'
+            });
+            aiReply = await provider.send(page, TOOL_REFUSAL_NUDGE, signal, {
+              onProgress
+            });
+            continue;
+          }
           // v1.1.2: auto-retry — modelul a răspuns cu text descriptiv
           // („Analyzing...", „Let me...") sau cu un tool call JSON invalid
           // în loc să execute o unealtă. Îi cerem explicit, din nou, un
           // SINGUR tool call (max MAX_TEXT_RETRIES per mesaj).
-          if (textRetries < MAX_TEXT_RETRIES && looksLikeIntentOnly(aiReply)) {
+          // v2.5.14 (bug #39): o ÎNCERCARE de tool call care nu se poate parsa
+          // (ex: JSON pe o linie cu ghilimele neescapate) NU mai primește
+          // nudge-ul „răspunde cu JSON" (care repeta exact formatul eșuat) —
+          // merge direct pe nudge-ul de format marker (ramura de mai jos).
+          if (
+            textRetries < MAX_TEXT_RETRIES &&
+            looksLikeIntentOnly(aiReply) &&
+            !looksLikeToolCallAttempt(aiReply)
+          ) {
             textRetries++;
             log(
               'text instead of tool call — auto-retry ' +
@@ -2282,6 +2327,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const deadline = Date.now() + LOGIN_WAIT_MS;
     let loggedIn = false;
+    let cleanPolls = 0;
     while (Date.now() < deadline) {
       if (this.abortRequested || signal.aborted) break;
       let url = '';
@@ -2290,9 +2336,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       } catch {
         /* pagina poate fi în tranziție */
       }
+      // v2.5.14 (bug #38): un singur URL non-login nu e suficient — în timpul
+      // redirectului post-login pagina poate fi momentan pe provider, încă în
+      // tranziție. Cerem LOGIN_CONFIRM_POLLS poll-uri consecutive curate.
       if (url && !isLoginUrl(url)) {
-        loggedIn = true;
-        break;
+        cleanPolls++;
+        if (cleanPolls >= LOGIN_CONFIRM_POLLS) {
+          loggedIn = true;
+          break;
+        }
+      } else {
+        cleanPolls = 0;
       }
       await sleep(LOGIN_POLL_MS);
     }
@@ -2399,16 +2453,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const deadline = Date.now() + LOGIN_WAIT_MS;
     let loggedIn = false;
+    let cleanPolls = 0;
     while (Date.now() < deadline) {
       if (this.abortRequested || signal.aborted) break;
       try {
-        const url = page.url();
-        if (!isLoginUrl(url) && !(await detectLoggedOut(page, providerId))) {
-          loggedIn = true;
-          break;
+        // v2.5.14 (bug #38): „indicatorul lipsește" ≠ „ești logat" — în
+        // tranziția post-login header-ul dispare complet. Cerem LOGIN_CONFIRM_POLLS
+        // poll-uri consecutive cu sesiune gata (URL + indicator + composer).
+        if (await isSessionReady(page, providerId)) {
+          cleanPolls++;
+          if (cleanPolls >= LOGIN_CONFIRM_POLLS) {
+            loggedIn = true;
+            break;
+          }
+        } else {
+          cleanPolls = 0;
         }
       } catch {
-        /* pagina poate fi în tranziție (auth.openai.com etc.) */
+        cleanPolls = 0; /* pagina poate fi în tranziție (auth.openai.com etc.) */
       }
       await sleep(LOGIN_POLL_MS);
     }

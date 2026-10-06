@@ -1,7 +1,7 @@
 {
-  "version": "1.5.2",
+  "version": "1.5.3",
   "updated": "2026-10-06",
-  "changelog": "v1.5.2: new `loggedOut` slot for ChatGPT (bug #35) — detects the visible „Log in”/„Sign up for free” CTAs (header/aside) on the logged-out page, including the guest mode where the composer still works; validated live against the real page. v1.5.1: Gemini selectors cleaned up — removed the dead `textarea` and `button[aria-label*=…]` candidates (the „New chat” element is an `<a>`), added stable role/aria/data-* alternatives (`[role='textbox'][contenteditable='true']`, `[aria-label='Enter a prompt for Gemini']`, `a[data-test-id='side-nav-sparkle-button']`); the health check no longer reports a false `not_found` on non-app pages (bug #34). v1.5.0: the Kimi provider was removed — the site migrated to kimi.ai and the kimi.com selectors no longer work (no test account on kimi.ai).",
+  "changelog": "v1.5.3: ChatGPT response selectors re-validated on the live page (bug #47) — the turn container is a `<section data-testid='conversation-turn-N'>`, so the `article[data-testid^='conversation-turn'] .markdown` alternative could never match; it is now the tag-agnostic `[data-testid^='conversation-turn'] .markdown`. Primary `[data-message-author-role='assistant']` and the still-valid `.markdown` alternative were confirmed on a real conversation (the `model-response` element only exists on Gemini). v1.5.2: new `loggedOut` slot for ChatGPT (bug #35) — detects the visible „Log in”/„Sign up for free” CTAs (header/aside) on the logged-out page, including the guest mode where the composer still works; validated live against the real page. v1.5.1: Gemini selectors cleaned up — removed the dead `textarea` and `button[aria-label*=…]` candidates (the „New chat” element is an `<a>`), added stable role/aria/data-* alternatives (`[role='textbox'][contenteditable='true']`, `[aria-label='Enter a prompt for Gemini']`, `a[data-test-id='side-nav-sparkle-button']`); the health check no longer reports a false `not_found` on non-app pages (bug #34). v1.5.0: the Kimi provider was removed — the site migrated to kimi.ai and the kimi.com selectors no longer work (no test account on kimi.ai).",
   "providers": {
     "deepseek": {
       "url": "https://chat.deepseek.com/",
@@ -203,7 +203,7 @@
         "primary": "[data-message-author-role='assistant']",
         "alternatives": [
           "[data-message-author-role='assistant'] .markdown",
-          "article[data-testid^='conversation-turn'] .markdown",
+          "[data-testid^='conversation-turn'] .markdown",
           ".markdown"
         ],
         "fingerprint": {

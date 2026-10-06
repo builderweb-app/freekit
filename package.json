@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.5.16",
+  "version": "2.5.17",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -196,8 +196,8 @@
         },
         "freekit.aiFinderTimeoutSeconds": {
           "type": "number",
-          "default": 45,
-          "markdownDescription": "Timeout (seconds, 5–300) for the AI selector analysis. After it expires, the AI fallback is abandoned and the healer returns null."
+          "default": 120,
+          "markdownDescription": "Timeout (seconds, 5–300) for the AI selector analysis. After it expires, the AI fallback is abandoned, the stale locally learned selector (if any) is dropped, and the static selector from `selectors.json` is used again."
         },
         "freekit.cdpPort": {
           "type": "number",

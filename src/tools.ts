@@ -858,13 +858,20 @@ export const MAX_REFUSAL_RETRIES = 1;
  * („tools you specified are not available", „not available in my current
  * environment", „Nu pot executa…", „instrumentele … nu sunt disponibile") —
  * fiecare variantă EN/RO are pattern-ul ei.
+ * v2.5.17 (bug #43): adverbul dintre negație și „available" rupea pattern-ul
+ * („the VS Code workspace tools you specified (read_file, list_files, etc.)
+ * are not ACTUALLY available in this chat session").
  * Doar pentru răspunsuri scurte (un refuz real e scurt) — nu prindem
  * explicații lungi și legitime despre unelte.
  */
 const TOOL_REFUSAL_RES: RegExp[] = [
   // EN — unelte/workspace indisponibile sau lipsa accesului
   /(?:tools?|connectors?)[^.!?\n]{0,60}(?:are |is )?(?:not|aren['’]?t) (?:available|mounted)/i,
-  /not available (?:in (?:this|my)|here)/i,
+  // v2.5.17 (bug #43): „… are not actually available" / „… are actually not available"
+  /(?:tools?|connectors?)[^.!?\n]{0,80}(?:(?:are|is)\s+(?:not|actually\s+not)|aren['’]?t)\s+(?:actually\s+)?available/i,
+  /not (?:actually )?available (?:in (?:this|my)|here)/i,
+  // v2.5.17 (bug #43): uneltele sunt enumerate nominal, apoi declarate indisponibile
+  /(?:read_file|write_file|list_files|edit_file|run_npm)\b[\s\S]{0,160}?\bnot\s+(?:actually\s+)?available/i,
   /(?:cannot|can['’]?t|can not|unable to)[^.!?\n]{0,40}\b(?:access|execute|modify|edit|use|open|read|write)\b[^.!?\n]{0,40}\b(?:workspace|project|files?|repo(?:sitory)?)/i,
   /(?:don['’]?t|do not|doesn['’]?t) have (?:any )?access to/i,
   /(?:can['’]?t|cannot|can not)\s+(?:read|write|edit)\s+files?/i,
@@ -873,6 +880,8 @@ const TOOL_REFUSAL_RES: RegExp[] = [
   // RO — aceleași situații, formulări românești
   /nu pot\s+(?:executa|accesa|modifica)/i,
   /(?:unelte(?:le)?|instrumentele)[\s\S]{0,200}nu sunt disponibile/i,
+  // v2.5.17 (bug #43): „instrumentele … nu sunt DE FAPT disponibile"
+  /(?:unelte(?:le)?|instrumentele)[\s\S]{0,200}nu sunt de fapt disponibile/i,
   /nu am acces\s+(?:la|[îi]n)/i,
   /nu pot\s+(?:citi|scrie|edita)\s+fi(?:ș|s)iere/i,
   /nu sunt disponibile [îi]n mediul meu/i

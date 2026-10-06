@@ -44,6 +44,14 @@ const NON_ACTION_RE = /(^|[^a-z])(sign|signin|sign-in|signup|sign-up|login|log-i
  */
 export const DOM_MAX_CHARS = 18000;
 
+/**
+ * v2.5.17 (bug #44): 45 s era insuficient pentru un snapshot de ~19k caractere
+ * analizat de un model local de 7B („analiza AI a eșuat: timeout after 45s").
+ * 120 s acoperă analiza pe hardware modest fără să blocheze prea mult bucla.
+ * Valoarea e și default-ul setării `freekit.aiFinderTimeoutSeconds`.
+ */
+export const DEFAULT_AI_FINDER_TIMEOUT_SECONDS = 120;
+
 const AI_RETRY_MS = 5 * 60 * 1000;
 
 interface FinderSettings {
@@ -57,11 +65,15 @@ function finderSettings(): FinderSettings {
     const v = require('vscode') as typeof import('vscode');
     const cfg = v.workspace.getConfiguration('freekit');
     const enabled = cfg.get<boolean>('aiSelectorFinder', true);
-    const secs = Number(cfg.get<number>('aiFinderTimeoutSeconds', 45));
-    const safe = Number.isFinite(secs) ? Math.min(300, Math.max(5, secs)) : 45;
+    const secs = Number(
+      cfg.get<number>('aiFinderTimeoutSeconds', DEFAULT_AI_FINDER_TIMEOUT_SECONDS)
+    );
+    const safe = Number.isFinite(secs)
+      ? Math.min(300, Math.max(5, secs))
+      : DEFAULT_AI_FINDER_TIMEOUT_SECONDS;
     return { enabled, timeoutMs: safe * 1000 };
   } catch {
-    return { enabled: true, timeoutMs: 45000 };
+    return { enabled: true, timeoutMs: DEFAULT_AI_FINDER_TIMEOUT_SECONDS * 1000 };
   }
 }
 
@@ -249,6 +261,9 @@ export async function findSelectorsWithAI(
       await ollama.open();
       return await ollama.send(undefined, prompt, controller.signal);
     })();
+    // v2.5.17 (bug #44): la timeout promisiunea pierzătoare e abandonată —
+    // fără handler, reject-ul ei ajunge „unhandled rejection" în extension host.
+    work.catch(() => undefined);
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         controller.abort();
@@ -504,6 +519,36 @@ export function resetAIFinderCache(): void {
   inFlight.clear();
 }
 
+/**
+ * v2.5.17 (bug #44): când AI finder-ul nu produce NIMIC pentru un slot (timeout,
+ * răspuns neparsabil, selector respins la validare), override-ul local rămas
+ * (how='ai'/'fingerprint') e aproape sigur stale — a fost „reparat" pe un DOM
+ * vechi (ex: `div.xh8yej3.x1ghz6dp` la ChatGPT) și, fiind primul în
+ * `candidates()`, umbrește selectorul static din selectors.json la citirea
+ * răspunsului. Îl ștergem, ca să rămână selectorul original (bundled/remote).
+ * Override-urile publicate de server (how='server') NU se ating — nu sunt
+ * ghicite pe DOM-ul curent.
+ */
+function dropStaleOverride(providerId: string, slot: SlotName): void {
+  const learned = selectors.learned(providerId, slot);
+  if (!learned || learned.how === 'server') return;
+  if (!selectors.forget(providerId, slot)) return;
+  log(
+    'AI finder nu a produs un selector pentru ' +
+      providerId +
+      '.' +
+      slot +
+      ' — override stale șters („' +
+      learned.selector +
+      '", sursă ' +
+      learned.how +
+      '); se folosește selectorul static'
+  );
+  // fișierul e rescris din listLearned() — altfel intrarea 'ai' ar reveni la
+  // următoarea pornire, vezi loadUserSelectorsFromDisk()
+  if (learned.how === 'ai') saveUserSelectors();
+}
+
 async function discoverForHealer(
   page: Page,
   providerId: string,
@@ -537,7 +582,10 @@ async function discoverForHealer(
   try {
     const label = PROVIDER_LABELS[providerId] || providerId;
     const discovered = await findSelectorsWithAI(page, label, [slot]);
-    if (!discovered) return null;
+    if (!discovered) {
+      dropStaleOverride(providerId, slot);
+      return null;
+    }
 
     const validated = await validateSelectors(page, discovered, { echoText });
     const applied: string[] = [];
@@ -568,9 +616,13 @@ async function discoverForHealer(
           '”)'
       );
     }
+    // nimic util pentru slotul cerut (selector respins la validare / respins la
+    // salvare) → override-ul local rămas e stale, vezi dropStaleOverride()
+    if (!found) dropStaleOverride(providerId, slot);
     return found;
   } catch (e: any) {
     log('AI finder a eșuat: ' + (e?.message ?? String(e)));
+    dropStaleOverride(providerId, slot);
     return null;
   } finally {
     inFlight.delete(key);

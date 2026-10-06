@@ -241,7 +241,15 @@ const BLACKLIST_KEYWORDS = [
   // să NU fie respinse greșit; 'promo' și 'banner' erau deja în listă.)
   'invite', 'earn', 'membership', 'benefit', 'offer', 'upgrade', 'premium',
   'subscribe', 'pricing', 'plan', 'resource-placement', 'cta', 'call-to-action',
-  'reward', 'referral', 'coupon', 'discount', 'trial'
+  'reward', 'referral', 'coupon', 'discount', 'trial',
+  // v2.5.13 FIX (bug #37): zone de NAVIGAȚIE/sidebar — Gemini ține lista de
+  // conversații „Recents” în `div.chat-history-list` (în `bard-sidenav`), iar
+  // cardurile de start în `div.suggestion-container`. Healer-ul le învățase ca
+  // `response` cât timp răspunsul AI nu era încă în DOM. Tokenii de aici le
+  // resping la învățare/persistare; init() curăță și override-urile deja salvate.
+  'chat-history', 'suggestion', 'sidenav', 'side-nav',
+  // blocul de „zero state” (ecranul gol cu salut + sugestii) — nu e răspuns
+  'zero-state'
 ];
 
 /**
@@ -375,6 +383,26 @@ function isBlacklistedSelector(slot: SlotName, selector: string): boolean {
   if (slot === 'response' && responseLooksLikeInput(selector)) return true;
   return CONTENT_SLOTS.indexOf(slot) >= 0 && blacklistHit(selector) !== null;
 }
+
+/**
+ * v2.5.13 FIX (bug #37): zonele de NAVIGAȚIE (sidebar/nav/aside) conțin doar
+ * chrome de aplicație, niciodată răspunsul AI — la Gemini, lista „Recents”
+ * (`div.chat-history-list`) a fost returnată ca răspuns după ce healer-ul a
+ * învățat-o ca selector de `response` (răspunsul nu era încă în DOM la primul
+ * checkpoint). Excluderea se aplică DOAR slotului `response`: butonul „New
+ * chat” al Gemini stă chiar în sidebar, deci la `newChat`/`stopButton` zonele
+ * astea rămân valide. Lista se trimite ca argument funcțiilor care rulează în
+ * pagină (sursă unică de adevăr — ca la `blacklist`/`promoText`).
+ */
+const NAV_SELECTORS = [
+  'nav',
+  'aside',
+  '[role="navigation"]',
+  '[role="complementary"]',
+  'bard-sidenav',
+  'side-navigation-content',
+  '.chat-history-list'
+];
 
 /**
  * v0.9.3 FIX Kimi: un selector pentru slotul `response` care indică evident
@@ -728,6 +756,8 @@ interface ScanArgs {
   echoText?: string;
   /** v0.9.0: preferredKeywords (bonus la scor) — vezi SlotConfig. */
   keywords?: string[];
+  /** v2.5.13: zonele de navigație excluse la `response` — vezi NAV_SELECTORS. */
+  navSels?: string[];
 }
 
 interface ScanResult {
@@ -801,6 +831,20 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
   };
 
   const isElement = (n: Element | null): n is HTMLElement => !!n && n.nodeType === 1;
+
+  // v2.5.13 FIX (bug #37): funcția e serializată în pagină, deci lista vine ca
+  // argument (sursă unică de adevăr: NAV_SELECTORS din Node).
+  const inNav = (el: Element): boolean => {
+    const list = args.navSels || [];
+    for (let i = 0; i < list.length; i++) {
+      try {
+        if (el.closest(list[i]) !== null) return true;
+      } catch {
+        /* selector invalid — îl ignorăm */
+      }
+    }
+    return false;
+  };
 
   const isVisible = (el: Element): boolean => {
     if (!isElement(el)) return false;
@@ -1020,16 +1064,21 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
       why.push('role');
     }
 
+    let childHits = 0;
     if (fp.hasChildren) {
-      let hits = 0;
       for (const c of fp.hasChildren) {
-        if (el.querySelector(c)) hits++;
+        if (el.querySelector(c)) childHits++;
       }
-      if (hits) {
-        s += 2 * Math.min(hits, 3);
-        why.push('children:' + hits);
+      if (childHits) {
+        s += 2 * Math.min(childHits, 3);
+        why.push('children:' + childHits);
       }
     }
+
+    /* v2.5.13 FIX (bug #37): sidebar/nav/aside nu sunt niciodată răspuns —
+       healer-ul învățase lista „Recents” a Gemini (`div.chat-history-list`)
+       pe un chat încă gol și reader-ul returna titlurile conversațiilor. */
+    if (slot === 'response' && inNav(el)) return null;
 
     const own = signalText(el);
 
@@ -1123,13 +1172,27 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
       // istoric înaintea mesajului (v0.9.5: startWith -> contains); gardă
       // similară cu isEchoOf din base.ts; doar mesaje lungi (≥40), ca
       // mesaje scurte („OK”) să nu respingă răspunsuri care doar le conțin.
+      const textNorm = text.replace(/\s+/g, ' ').trim().toLowerCase();
       if (echoText.length >= 40) {
-        const textNorm = text.replace(/\s+/g, ' ').trim().toLowerCase();
         if (textNorm.indexOf(echoText) >= 0) return null;
+      } else if (echoText && textNorm === echoText) {
+        // v2.5.13 FIX (bug #37): nici bula UTILIZATORULUI nu e răspuns — pe un
+        // chat încă gol healer-ul învăța `div.query-text` (mesajul nostru).
+        // Garda de mai sus prinde doar ecourile lungi (≥40); egalitatea exactă
+        // e sigură aici: un răspuns identic cu mesajul e refuzat oricum de
+        // isEchoOf() în base.ts.
+        return null;
       }
       if (fp.minTextLength && text.length < fp.minTextLength) return null;
       if (text.length > 12000) return null;
       if (el.querySelector('textarea, [contenteditable="true"]')) return null;
+      /* v2.5.13 FIX (bug #37): un răspuns real are conținut structurat (p/ol/ul/
+         pre/code — exact ce declară fingerprint.hasChildren); blocurile de chrome
+         fără niciun astfel de copil (sidebar „Recents”, carduri de sugestii,
+         „zero state”) câștigau scanul pe un chat încă gol doar prin tag+depth+pos
+         și erau învățate ca `response`. Fără semnal de conținut nu învățăm nimic:
+         staticul funcționează, iar răspunsul nu e încă în pagină. */
+      if (fp.hasChildren && fp.hasChildren.length && childHits === 0) return null;
       if (el.querySelector('p, li, pre, code')) {
         s += 2;
         why.push('blocks');
@@ -1212,6 +1275,8 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
 interface ReadArgs {
   sels: string[];
   fallback: boolean;
+  /** v2.5.13: zonele de navigație excluse — vezi NAV_SELECTORS. */
+  navSels?: string[];
 }
 
 const readLastText = (args: ReadArgs): string => {
@@ -1225,6 +1290,20 @@ const readLastText = (args: ReadArgs): string => {
     return st.visibility !== 'hidden' && st.display !== 'none';
   };
 
+  // v2.5.13 FIX (bug #37): sidebar-ul nu e răspuns, chiar dacă un selector
+  // (override învățat greșit) îl prinde — trecem la următorul nod/selector.
+  const inNav = (el: Element): boolean => {
+    const list = args.navSels || [];
+    for (let i = 0; i < list.length; i++) {
+      try {
+        if (el.closest(list[i]) !== null) return true;
+      } catch {
+        /* selector invalid — îl ignorăm */
+      }
+    }
+    return false;
+  };
+
   for (const sel of args.sels) {
     let nodes: NodeListOf<Element>;
     try {
@@ -1233,6 +1312,7 @@ const readLastText = (args: ReadArgs): string => {
       continue;
     }
     for (let i = nodes.length - 1; i >= 0; i--) {
+      if (inNav(nodes[i])) continue;
       const text = textOf(nodes[i]);
       if (text) return text;
     }
@@ -1250,6 +1330,7 @@ const readLastText = (args: ReadArgs): string => {
     const text = textOf(el);
     if (text.length < 40 || text.length > 20000) continue;
     if (!isVisible(el)) continue;
+    if (inNav(el)) continue;
     if (el.querySelector('textarea, [contenteditable="true"]')) continue;
     if (!el.querySelector('p, li, pre, code') && text.length < 120) continue;
     candidates.push(el);
@@ -1269,6 +1350,8 @@ const readLastText = (args: ReadArgs): string => {
 
 interface CountArgs {
   sels: string[];
+  /** v2.5.13: zonele de navigație excluse — vezi NAV_SELECTORS. */
+  navSels?: string[];
 }
 
 /**
@@ -1282,6 +1365,20 @@ const countLastResponses = (args: CountArgs): number => {
   const textOf = (el: Element): string =>
     (((el as HTMLElement).innerText || el.textContent || '') as string).trim();
 
+  // v2.5.13 FIX (bug #37): aceeași excludere ca la readLastText, ca numărătoarea
+  // și textul citit să rămână consistente (sidebar-ul nu e un „răspuns nou”).
+  const inNav = (el: Element): boolean => {
+    const list = args.navSels || [];
+    for (let i = 0; i < list.length; i++) {
+      try {
+        if (el.closest(list[i]) !== null) return true;
+      } catch {
+        /* selector invalid — îl ignorăm */
+      }
+    }
+    return false;
+  };
+
   for (const sel of args.sels) {
     let nodes: NodeListOf<Element>;
     try {
@@ -1291,6 +1388,7 @@ const countLastResponses = (args: CountArgs): number => {
     }
     let count = 0;
     for (let i = 0; i < nodes.length; i++) {
+      if (inNav(nodes[i])) continue;
       if (textOf(nodes[i])) count++;
     }
     if (count) return count;
@@ -1348,7 +1446,8 @@ export async function healSlot(
       blacklist: BLACKLIST_KEYWORDS,
       promoText: PROMO_TEXT_PHRASES,
       echoText,
-      keywords
+      keywords,
+      navSels: NAV_SELECTORS
     });
   } catch (e: any) {
     log('heal evaluate failed (' + providerId + '.' + slot + '): ' + (e?.message ?? String(e)));
@@ -1455,7 +1554,21 @@ export async function inputAvailable(
   return (await resolveSlot(page, providerId, 'input', timeoutMs)) !== null;
 }
 
-const anyMatch = (args: { sels: string[] }): boolean => {
+const anyMatch = (args: { sels: string[]; navSels?: string[] }): boolean => {
+  // v2.5.13 FIX (bug #37): un „match” doar în sidebar nu înseamnă că selectorii
+  // de răspuns funcționează — altfel un override greșit bloca auto-repararea.
+  const inNav = (el: Element): boolean => {
+    const list = args.navSels || [];
+    for (let i = 0; i < list.length; i++) {
+      try {
+        if (el.closest(list[i]) !== null) return true;
+      } catch {
+        /* selector invalid — îl ignorăm */
+      }
+    }
+    return false;
+  };
+
   for (const sel of args.sels) {
     let nodes: NodeListOf<Element>;
     try {
@@ -1464,6 +1577,7 @@ const anyMatch = (args: { sels: string[] }): boolean => {
       continue;
     }
     for (let i = 0; i < nodes.length; i++) {
+      if (inNav(nodes[i])) continue;
       const text = (((nodes[i] as HTMLElement).innerText || '') as string).trim();
       if (text) return true;
     }
@@ -1474,7 +1588,10 @@ const anyMatch = (args: { sels: string[] }): boolean => {
 /** true dacă măcar un selector prinde un element cu text (deci nu trebuie reparat). */
 export async function anySelectorMatches(page: Page, sels: string[]): Promise<boolean> {
   try {
-    return await page.evaluate<boolean, { sels: string[] }>(anyMatch, { sels });
+    return await page.evaluate<boolean, { sels: string[]; navSels: string[] }>(anyMatch, {
+      sels,
+      navSels: NAV_SELECTORS
+    });
   } catch {
     return false;
   }
@@ -1507,7 +1624,11 @@ export async function getLastResponseText(
   fallback = false
 ): Promise<string> {
   try {
-    return await page.evaluate<string, ReadArgs>(readLastText, { sels, fallback });
+    return await page.evaluate<string, ReadArgs>(readLastText, {
+      sels,
+      fallback,
+      navSels: NAV_SELECTORS
+    });
   } catch (e: any) {
     log('reading the response failed: ' + (e?.message ?? String(e)));
     return '';
@@ -1524,7 +1645,10 @@ export async function countAssistantResponses(
   sels: string[]
 ): Promise<number> {
   try {
-    return await page.evaluate<number, CountArgs>(countLastResponses, { sels });
+    return await page.evaluate<number, CountArgs>(countLastResponses, {
+      sels,
+      navSels: NAV_SELECTORS
+    });
   } catch (e: any) {
     log('counting the responses failed: ' + (e?.message ?? String(e)));
     return 0;

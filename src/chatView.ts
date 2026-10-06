@@ -74,7 +74,8 @@ import {
   CIRCUIT_BREAKER_THRESHOLD,
   CircuitBreaker,
   EDIT_TOOLS,
-  EditLoopDetector
+  EditLoopDetector,
+  SameErrorTracker
 } from './circuitBreaker';
 import {
   formatReadFilesExcerpts,
@@ -100,6 +101,8 @@ import {
 import { DetectedProviderError } from './providerErrors';
 import {
   buildCommandErrorHints,
+  buildTsconfigRewriteInjection,
+  looksLikeTs6059,
   runVerification,
   createPromptCheckpoint,
   restoreToCheckpoint,
@@ -484,6 +487,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private lastEditTargets: string[] = [];
   /** v1.3.0: câte auto-repair-uri am cerut pentru seria curentă de verificări eșuate. */
   private verifyRepairs = 0;
+  /**
+   * v2.5.33 (bug #84): eșecuri consecutive pe ACELAȘI tip de eroare (ex.
+   * „TS6059") în task-ul curent — la 5, bucla e oprită.
+   */
+  private sameErrors = new SameErrorTracker();
   /**
    * v2.5.0: a trecut vreodată verificarea? Fără o verificare verde nu există
    * un „verified-good state" real, iar rollback-ul ar readuce proiectul la
@@ -1763,6 +1771,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       let refusalRetries = 0;
       // v1.3.0: mesajul final de rollback (auto-repair eșuat definitiv)
       let verifyRollbackText = '';
+      // v2.5.33 (bug #84): mesajul final când același tip de eroare a eșuat de
+      // prea multe ori („Task blocked after 5 retries on TS6059.")
+      let taskBlockedText = '';
       // v2.5.0 — FIX 3: verificarea rulează o SINGURĂ dată per răspuns complet
       // al AI (nu după fiecare fișier); flag = s-a modificat vreun fișier în tura asta
       let filesWereModifiedThisTurn = false;
@@ -1948,6 +1959,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             filesWereModifiedThisTurn = false;
             const repairsBefore = this.verifyRepairs;
             const v = await this.autoVerify(root);
+            // v2.5.33 (bug #84): prea multe eșecuri consecutive pe același tip
+            // de eroare → oprim bucla, fără rollback automat.
+            if (v.blocked) {
+              taskBlockedText = v.blocked;
+              break;
+            }
             if (v.rollbackText) {
               verifyRollbackText = v.rollbackText;
               break;
@@ -2146,6 +2163,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               ? loopNudge + '\n\n' + global.nudge
               : global.nudge;
           }
+          // v2.5.33 FIX (bug #82): tsconfig.json rescris de 2 ori și eroarea e
+          // TOT TS6059 → nudge-ul generic nu ajută; injectăm template-ul EXACT
+          // (Gemini rescria tsconfig-ul cu versiuni greșite, de 4 ori la rând).
+          const tsErrorText =
+            lastToolError + '\n' + (this.getLastVerifyFailure()?.output ?? '');
+          if (looksLikeTs6059(tsErrorText)) {
+            const rewritten = targets.find(
+              (f) =>
+                /(^|\/)tsconfig\.json$/i.test(String(f).replace(/\\/g, '/')) &&
+                editLoop.count(f) >= 2
+            );
+            if (rewritten) {
+              log('[loop] tsconfig rewritten twice — injecting exact template');
+              this.post(
+                'heal',
+                '⚠️ Loop detected: "' + rewritten +
+                  '" was rewritten twice and TS6059 is still there — sending the exact tsconfig template.'
+              );
+              const injection = buildTsconfigRewriteInjection(rewritten);
+              loopNudge = loopNudge
+                ? loopNudge + '\n\n' + injection
+                : injection;
+            }
+          }
           if (result.ok && targets.length) {
             lastEditedFile = targets[targets.length - 1];
           }
@@ -2158,6 +2199,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 ' (edit + command succeeded)'
             );
           }
+          // v2.5.33 (bug #84): un succes real rupe seria de erori identice
+          this.sameErrors.reset();
         }
 
         // v2.5.29 FIX 4 (bug #67): o comandă eșuată (tsc/build) primește context
@@ -2191,6 +2234,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             buildUnixCommandHint(toolCall.args.command);
           if (commandHints) {
             log('command error context added for: ' + toolCall.args.command);
+          }
+          // v2.5.33 FIX (bug #84): 5 eșecuri consecutive pe ACELAȘI tip de
+          // eroare (ex. TS6059) ⇒ bucla nu mai are cum să reușească; oprim.
+          taskBlockedText = this.sameErrors.note(errOut);
+          if (taskBlockedText) {
+            log(
+              'same-error retry limit reached (' +
+                this.sameErrors.currentType + ' × ' +
+                this.sameErrors.currentCount + ') — stopping the loop'
+            );
+            break;
           }
         }
 
@@ -2298,6 +2352,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         log('auto-verify: rollback completed — ending with the rollback report');
         await this.appendHistory('assistant', verifyRollbackText);
         this.post('reply', verifyRollbackText);
+      } else if (taskBlockedText) {
+        // v2.5.33 (bug #84): același tip de eroare a eșuat de prea multe ori
+        // (mesajul a fost deja postat în chat) — încheiem cu blocarea.
+        log('same-error retry limit — ending with the blocked report');
+        await this.appendHistory('assistant', taskBlockedText);
+        this.post('reply', taskBlockedText);
       } else if (circuitBroken) {
         // v2.5.11 FIX (bug #33): mesajul de circuit breaker a fost deja postat
         // și salvat în istoric înainte de break — nu mai postăm răspunsul vechi.
@@ -3308,6 +3368,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.verifyRepairs = 0;
     this.lastVerifyFailure = undefined;
     this.lastEditTargets = [];
+    // v2.5.33 (bug #84): seria de erori identice e per task (mesaj)
+    this.sameErrors.reset();
   }
 
   /**
@@ -3341,7 +3403,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /** Rulează verificarea după un edit → textul pentru AI + (eventual) rollback. */
   private async autoVerify(
     root: string
-  ): Promise<{ suffix: string; rollbackText: string }> {
+  ): Promise<{ suffix: string; rollbackText: string; blocked?: string }> {
     if (!this.autoVerifyEnabled(root)) return { suffix: '', rollbackText: '' };
 
     // v2.5.31 (bug #72): dacă scope-ul are propriul tsconfig.json, verificarea
@@ -3361,6 +3423,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.edits.markGood();
       // v2.5.0: există acum un baseline real pentru un eventual rollback
       this.hasEverVerifiedGreen = true;
+      // v2.5.33 (bug #84): verificarea a trecut → seria de erori identice se rupe
+      this.sameErrors.reset();
       if (this.verifyRepairs > 0) {
         this.post(
           'heal',
@@ -3401,6 +3465,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     log(
       'auto-verify FAILED (' + attempt + '/' + MAX_VERIFY_REPAIRS + '): ' + vres.command
     );
+
+    // v2.5.33 FIX (bug #84): prea multe eșecuri consecutive pe ACELAȘI tip de
+    // eroare (ex. TS6059) → bucla e oprită; cerem intervenția manuală.
+    const blocked = this.sameErrors.note(vres.output);
+    if (blocked) {
+      log('auto-verify: ' + blocked);
+      this.verifyRepairs = 0;
+      this.lastVerifyFailure = undefined;
+      return { suffix: '', rollbackText: '', blocked };
+    }
 
     if (attempt <= MAX_VERIFY_REPAIRS) {
       this.post(

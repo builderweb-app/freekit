@@ -306,3 +306,59 @@ export function buildLoopCircuitBreakerMessage(
     '- Switch to a different provider (⋯ → model chip)'
   );
 }
+
+/* =========================================================================
+ * v2.5.33 FIX (bug #84) — stop după 5 eșecuri pe ACELAȘI tip de eroare
+ * Gemini rescria `bootcamp-test/tsconfig.json` de 4 ori la rând, cu același
+ * `TS6059` de fiecare dată: eroarea nu e de cod, e de configurare, deci a N-a
+ * încercare identică nu are cum să reușească. Numărăm eșecurile CONSECUTIVE pe
+ * același cod `TSxxxx`; la prag, chatView oprește bucla și cere intervenția
+ * manuală. Succesul (verificare verde / comandă reușită) rupe seria.
+ * ========================================================================= */
+
+/** Câte eșecuri consecutive pe același cod de eroare opresc task-ul. */
+export const MAX_SAME_ERROR_RETRIES = 5;
+
+export class SameErrorTracker {
+  private type = '';
+  private count = 0;
+
+  /**
+   * Înregistrează un eșec. Întoarce mesajul de blocare când același cod
+   * `TSxxxx` a eșuat de MAX_SAME_ERROR_RETRIES ori consecutiv, altfel ''.
+   * Un output fără cod `TS` rupe seria (nu mai e „același tip de eroare").
+   */
+  note(output: string): string {
+    const m = /TS(\d{4})/.exec(String(output ?? ''));
+    if (!m) {
+      this.reset();
+      return '';
+    }
+    const type = 'TS' + m[1];
+    this.count = type === this.type ? this.count + 1 : 1;
+    this.type = type;
+    if (this.count >= MAX_SAME_ERROR_RETRIES) {
+      return (
+        'Task blocked after ' + MAX_SAME_ERROR_RETRIES + ' retries on ' + type +
+        '. Manual intervention needed.'
+      );
+    }
+    return '';
+  }
+
+  /** Succes real (verificare verde / comandă reușită) ⇒ seria se rupe. */
+  reset(): void {
+    this.type = '';
+    this.count = 0;
+  }
+
+  /** Tipul de eroare urmărit acum (ex. „TS6059"), pentru log. */
+  get currentType(): string {
+    return this.type;
+  }
+
+  /** Câte eșecuri consecutive pe tipul curent (pentru log). */
+  get currentCount(): number {
+    return this.count;
+  }
+}

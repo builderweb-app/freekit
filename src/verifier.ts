@@ -258,7 +258,7 @@ export async function runVerification(
     log('verificare TRECUTĂ în ' + duration + 'ms (' + label + ')');
     return { ok: true, output, command: label, duration, cwd };
   } catch (e: any) {
-    const output = clipPayload(
+    const raw = clipPayload(
       String(e?.stdout ?? '') +
         '\n' +
         String(e?.stderr ?? '') +
@@ -266,6 +266,12 @@ export async function runVerification(
         (e?.message ?? String(e)),
       VERIFY_OUTPUT_MAX
     );
+    // v2.5.33 FIX (bug #83): `tsc -p <scope>/tsconfig.json` a eșuat → trimitem
+    // și configul minim viabil, ca modelul (Gemini) să nu ghicească ce scrie în
+    // tsconfig-ul din subfolder.
+    const output = scoped
+      ? raw + '\n\n' + buildScopedTsconfigNudge(scopedRel)
+      : raw;
     const duration = Date.now() - start;
     log('verificare EȘUATĂ în ' + duration + 'ms (' + label + ')');
     return { ok: false, output, command: label, duration, cwd };
@@ -405,6 +411,26 @@ function ts6059Folder(output: string, scope?: string[] | null): string {
   return '<scope>';
 }
 
+/**
+ * v2.5.33 FIX (bug #81): template-ul tsconfig EXACT pe care modelul trebuie să-l
+ * scrie în subfolder. Gemini rescria tsconfig.json de 4 ori cu versiuni greșite
+ * (rootDir/outDir/extends de prisos); un sfat vag nu ajuta — dăm conținutul
+ * exact, gata de scris.
+ */
+export const TS6059_TSCONFIG_JSON = [
+  '{',
+  '  "compilerOptions": {',
+  '    "target": "ES2020",',
+  '    "module": "commonjs",',
+  '    "strict": true,',
+  '    "esModuleInterop": true,',
+  '    "skipLibCheck": true,',
+  '    "forceConsistentCasingInFileNames": true',
+  '  },',
+  '  "include": ["*.ts"]',
+  '}'
+].join('\n');
+
 /** Hint-ul TS6059 (vezi secțiunea de mai sus). */
 export function buildTs6059Hint(
   output: string,
@@ -415,11 +441,55 @@ export function buildTs6059Hint(
     'TS6059 means ROOT tsconfig.json has \'rootDir\' set and excludes files outside it.\n' +
     'BEST FIX: create a separate tsconfig.json inside ' +
     folder +
-    '/ and run:\n' +
+    '/ with EXACTLY this content:\n' +
+    TS6059_TSCONFIG_JSON +
+    '\n' +
+    'Then run:\n' +
     '  npx tsc --noEmit -p ' +
     folder +
     '/tsconfig.json\n' +
-    'Do NOT keep editing the ROOT tsconfig.json.'
+    'Do NOT add rootDir, outDir, extends, or any other fields.\n' +
+    'Do NOT edit the root tsconfig.json again.'
+  );
+}
+
+/**
+ * v2.5.33 FIX (bug #82): textul injectat (în locul nudge-ului generic) când
+ * același `tsconfig.json` a fost rescris de 2 ori și eroarea e tot TS6059.
+ * Trimite template-ul EXACT, nu încă o sugestie.
+ */
+export function buildTsconfigRewriteInjection(relPath: string): string {
+  const rel = String(relPath ?? '').replace(/\\/g, '/');
+  return (
+    '⚠️ You have rewritten ' +
+    rel +
+    ' twice and the TS6059 error is still there.\n' +
+    'Write ' +
+    rel +
+    ' with EXACTLY this content (nothing else):\n' +
+    TS6059_TSCONFIG_JSON +
+    '\n' +
+    'Then run: npx tsc --noEmit -p ' +
+    rel +
+    '\n' +
+    'Do NOT add rootDir, outDir, extends, or any other fields.\n' +
+    'Do NOT edit the root tsconfig.json again.'
+  );
+}
+
+/**
+ * v2.5.33 FIX (bug #83): nudge-ul adăugat la EȘECUL unei verificări `tsc -p
+ * <scope>/tsconfig.json` — configul minim viabil, ca modelul să nu ghicească
+ * ce câmpuri să pună în tsconfig-ul din subfolder.
+ */
+export function buildScopedTsconfigNudge(scopeTsconfigRel: string): string {
+  return (
+    'Check ' +
+    String(scopeTsconfigRel ?? '').replace(/\\/g, '/') +
+    '. Minimum viable config is:\n' +
+    '{ "compilerOptions": { "target": "ES2020", "module": "commonjs", ' +
+    '"strict": true, "esModuleInterop": true, "skipLibCheck": true }, ' +
+    '"include": ["*.ts"] }'
   );
 }
 

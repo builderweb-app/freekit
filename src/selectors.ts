@@ -1395,7 +1395,52 @@ interface ReadArgs {
   navSels?: string[];
 }
 
-const readLastText = (args: ReadArgs): string => {
+/**
+ * v2.5.46 (bug #105): rezultatul unei citiri de răspuns.
+ * `text` = răspunsul final (fără blocul de raționament), `ignored` = câte
+ * caractere de „thinking" au fost sărite (pentru log), `count` = câte răspunsuri
+ * non-goale sunt în DOM (doar în modul `count`).
+ */
+export interface ResponseRead {
+  text: string;
+  ignored: number;
+  count: number;
+}
+
+interface ResponseScanArgs extends ReadArgs {
+  /** 'text' (implicit) = citește ultimul răspuns; 'count' = numără răspunsurile. */
+  mode: 'text' | 'count';
+}
+
+/**
+ * v2.5.46 FIX (bug #105): CITIREA RĂSPUNSULUI OCOLEȘTE BLOCURILE DE „THINKING".
+ *
+ * Test Qwen (7 Oct 2026, 17:06): modelul a trimis corect tool call-ul
+ * (ACTION: write_files, 5 fișiere), dar selectorul de răspuns prinsese ÎNTÂI
+ * blocul de raționament — s-au citit 93 de caractere („Thinking completed") în
+ * loc de răspuns, deci tool call-ul s-a pierdut. Același risc la
+ * DeepSeek/Claude/Gemini/Kimi, care afișează și ele raționamentul separat.
+ *
+ * Reguli (identice pentru citire ȘI numărare, ca sentinelele din sendAndWait să
+ * rămână consistente):
+ *  1. ultimul element al unui selector (ca înainte) și, dacă selectorul prinde
+ *     DOAR thinking, trecem la următorul selector (nu ne oprim la primul match);
+ *  2. elementele marcate „thinking" (class, id, data-testid/role, aria-label
+ *     care conțin thinking|reason|thought) și textele-marker scurte („Thinking",
+ *     „Thinking completed", „Thought for 12s", „Reasoning") sunt ignorate, iar
+ *     caracterele lor se raportează în `ignored` → log `[read] response: N chars
+ *     (thinking: M chars ignored)` în providers/base.ts;
+ *  3. dacă elementul e un CONTAINER, păstrăm TOATE blocurile copil care nu sunt
+ *     thinking (concatenate); fără copii-thinking textul rămâne EXACT ca în
+ *     v2.5.45 (zero regresii pentru providerii care nu afișează raționament);
+ *  4. dacă niciun selector nu dă text non-thinking, reluăm citirea FĂRĂ filtrul
+ *     de atribute (doar markerii de text rămân filtrați) — paritate cu versiunea
+ *     anterioară, ca să nu răspundem „gol" unde înainte citeam ceva.
+ *
+ * Rulează ÎN PAGINĂ (prin page.evaluate) — toate utilitarele sunt definite
+ * local, fiindcă funcția e serializată.
+ */
+const scanResponses = (args: ResponseScanArgs): ResponseRead => {
   const textOf = (el: Element): string =>
     (((el as HTMLElement).innerText || el.textContent || '') as string).trim();
 
@@ -1420,96 +1465,200 @@ const readLastText = (args: ReadArgs): string => {
     return false;
   };
 
-  for (const sel of args.sels) {
-    let nodes: NodeListOf<Element>;
-    try {
-      nodes = document.querySelectorAll(sel);
-    } catch {
-      continue;
-    }
-    for (let i = nodes.length - 1; i >= 0; i--) {
-      if (inNav(nodes[i])) continue;
-      const text = textOf(nodes[i]);
-      if (text) return text;
-    }
-  }
+  /* ---- v2.5.46 (bug #105): thinking ≠ răspuns --------------------------- */
+  const THINKING_ATTRS = ['class', 'id', 'data-testid', 'data-role', 'aria-label'];
+  const THINKING_ATTR_RE = /think|reason|thought/i;
+  const THINKING_MARKER_RE =
+    /^(thinking|thought(\s+for)?|reasoning|se g[âa]nde[șs]te|ra[tț]ionament)/i;
+  /** Peste atâtea caractere, textul nu mai poate fi un marker scurt de thinking. */
+  const THINKING_MARKER_MAX = 160;
 
-  if (!args.fallback) return '';
-
-  // Ultima variantă: cel mai probabil bloc de mesaj, fără selectori.
-  const pool = document.querySelectorAll(
-    'div, article, section, p, message-content, model-response'
-  );
-  const candidates: Element[] = [];
-  for (let i = 0; i < pool.length; i++) {
-    const el = pool[i];
-    const text = textOf(el);
-    if (text.length < 40 || text.length > 20000) continue;
-    if (!isVisible(el)) continue;
-    if (inNav(el)) continue;
-    if (el.querySelector('textarea, [contenteditable="true"]')) continue;
-    if (!el.querySelector('p, li, pre, code') && text.length < 120) continue;
-    candidates.push(el);
-  }
-
-  // păstrăm doar cele mai "interioare" (fără un copil-candidat aproape la fel de mare)
-  const inner = candidates.filter((el) => {
-    const own = textOf(el).length;
-    return !candidates.some(
-      (child) => child !== el && el.contains(child) && textOf(child).length >= own * 0.7
-    );
-  });
-
-  const last = inner.length ? inner[inner.length - 1] : null;
-  return last ? textOf(last) : '';
-};
-
-interface CountArgs {
-  sels: string[];
-  /** v2.5.13: zonele de navigație excluse — vezi NAV_SELECTORS. */
-  navSels?: string[];
-}
-
-/**
- * v2.5.12 FIX (bug #36): câte răspunsuri (bule non-goale) sunt în DOM. Folosim
- * ACELAȘI selector ca getLastResponseText pentru citire — primul care prinde
- * cel puțin un element cu text — ca numărătoarea și textul citit să rămână
- * consistente: când apare o bulă nouă, count-ul crește, chiar dacă textul ei e
- * identic cu răspunsul precedent (exact cazul care bloca sendAndWait).
- */
-const countLastResponses = (args: CountArgs): number => {
-  const textOf = (el: Element): string =>
-    (((el as HTMLElement).innerText || el.textContent || '') as string).trim();
-
-  // v2.5.13 FIX (bug #37): aceeași excludere ca la readLastText, ca numărătoarea
-  // și textul citit să rămână consistente (sidebar-ul nu e un „răspuns nou”).
-  const inNav = (el: Element): boolean => {
-    const list = args.navSels || [];
-    for (let i = 0; i < list.length; i++) {
-      try {
-        if (el.closest(list[i]) !== null) return true;
-      } catch {
-        /* selector invalid — îl ignorăm */
-      }
+  const isThinkingEl = (el: Element): boolean => {
+    for (let i = 0; i < THINKING_ATTRS.length; i++) {
+      const v = el.getAttribute(THINKING_ATTRS[i]);
+      if (v && THINKING_ATTR_RE.test(v)) return true;
     }
     return false;
   };
 
-  for (const sel of args.sels) {
+  const isThinkingMarker = (text: string): boolean => {
+    const flat = text.replace(/\s+/g, ' ').trim();
+    if (!flat || flat.length > THINKING_MARKER_MAX) return false;
+    return THINKING_MARKER_RE.test(flat);
+  };
+
+  /**
+   * Textul „de răspuns" al unui element + câte caractere de thinking au fost
+   * scoase. `useAttrFilter` = false → ignorăm doar markerii de text.
+   */
+  const resolveAnswer = (
+    el: Element,
+    useAttrFilter: boolean
+  ): { text: string; ignored: number } => {
+    const full = textOf(el);
+    if (!full) return { text: '', ignored: 0 };
+
+    // container: păstrăm TOATE blocurile copil care nu sunt thinking
+    const kids = Array.prototype.slice.call(el.children) as Element[];
+    let ignored = 0;
+    let sawThinkingChild = false;
+    const kept: string[] = [];
+    for (let i = 0; i < kids.length; i++) {
+      const t = textOf(kids[i]);
+      if (!t) continue;
+      if (isThinkingMarker(t) || (useAttrFilter && isThinkingEl(kids[i]))) {
+        sawThinkingChild = true;
+        ignored += t.length;
+        continue;
+      }
+      kept.push(t);
+    }
+    if (sawThinkingChild) {
+      const text = kept.join('\n\n').trim();
+      if (!text) return { text: '', ignored };
+      if (isThinkingMarker(text)) return { text: '', ignored: ignored + text.length };
+      return { text, ignored };
+    }
+
+    // elementul însuși e blocul de raționament (ex: qwen.response descoperit de
+    // AI finder prinde exact div-ul de thinking) → nu e răspuns
+    if (useAttrFilter && isThinkingEl(el)) return { text: '', ignored: full.length };
+
+    if (kids.length === 0) {
+      if (isThinkingMarker(full)) return { text: '', ignored: full.length };
+      return { text: full, ignored: 0 };
+    }
+
+    // „Thinking completed\n\n<răspuns>”: scoatem doar linia-marker de la început
+    const nl = full.indexOf('\n');
+    if (nl > 0) {
+      const head = full.slice(0, nl).trim();
+      const rest = full.slice(nl + 1).trim();
+      if (rest && isThinkingMarker(head)) return { text: rest, ignored: head.length };
+    }
+    return { text: full, ignored: 0 };
+  };
+
+  let ignoredTotal = 0;
+
+  const matched = (sel: string): Element[] => {
     let nodes: NodeListOf<Element>;
     try {
       nodes = document.querySelectorAll(sel);
     } catch {
-      continue;
+      return [];
     }
-    let count = 0;
-    for (let i = 0; i < nodes.length; i++) {
-      if (inNav(nodes[i])) continue;
-      if (textOf(nodes[i])) count++;
+    return Array.prototype.slice.call(nodes) as Element[];
+  };
+
+  const readFromSelectors = (
+    useAttrFilter: boolean
+  ): { text: string; ignored: number } | null => {
+    for (const sel of args.sels) {
+      const nodes = matched(sel);
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        if (inNav(nodes[i])) continue;
+        const r = resolveAnswer(nodes[i], useAttrFilter);
+        ignoredTotal += r.ignored;
+        if (r.text) return r;
+      }
     }
-    if (count) return count;
+    return null;
+  };
+
+  const countFromSelectors = (useAttrFilter: boolean): number => {
+    for (const sel of args.sels) {
+      const nodes = matched(sel);
+      let count = 0;
+      for (let i = 0; i < nodes.length; i++) {
+        if (inNav(nodes[i])) continue;
+        const r = resolveAnswer(nodes[i], useAttrFilter);
+        ignoredTotal += r.ignored;
+        if (r.text) count++;
+      }
+      if (count) return count;
+    }
+    return 0;
+  };
+
+  if (args.mode === 'count') {
+    const strict = countFromSelectors(true);
+    // paritate cu v2.5.45 pentru paginile fără blocuri de thinking detectabile
+    const count = strict || countFromSelectors(false);
+    return { text: '', ignored: ignoredTotal, count };
   }
-  return 0;
+
+  /**
+   * Ultima variantă: cel mai probabil bloc de mesaj, fără selectori (aceeași
+   * euristică de „cel mai interior bloc” ca în v2.5.45, doar că textul trece
+   * prin resolveAnswer, deci blocurile de thinking sunt scoase).
+   */
+  const pickGeneric = (
+    useAttrFilter: boolean
+  ): { text: string; ignored: number } | null => {
+    const pool = document.querySelectorAll(
+      'div, article, section, p, message-content, model-response'
+    );
+    const candidates: Element[] = [];
+    const resolved = new Map<Element, string>();
+    let ignored = 0;
+    for (let i = 0; i < pool.length; i++) {
+      const el = pool[i];
+      const full = textOf(el);
+      if (full.length < 40 || full.length > 20000) continue;
+      if (!isVisible(el)) continue;
+      if (inNav(el)) continue;
+      if (el.querySelector('textarea, [contenteditable="true"]')) continue;
+      if (!el.querySelector('p, li, pre, code') && full.length < 120) continue;
+      const r = resolveAnswer(el, useAttrFilter);
+      ignored += r.ignored;
+      if (!r.text) continue;
+      resolved.set(el, r.text);
+      candidates.push(el);
+    }
+
+    // păstrăm doar cele mai "interioare" (fără un copil-candidat aproape la fel de mare)
+    const inner = candidates.filter((el) => {
+      const own = resolved.get(el) as string;
+      return !candidates.some(
+        (child) =>
+          child !== el &&
+          el.contains(child) &&
+          (resolved.get(child) as string).length >= own.length * 0.7
+      );
+    });
+
+    const last = inner.length ? inner[inner.length - 1] : null;
+    return last ? { text: resolved.get(last) as string, ignored } : null;
+  };
+
+  const strict = readFromSelectors(true);
+  if (strict) return { text: strict.text, ignored: ignoredTotal, count: 0 };
+
+  const ignoredStrict = ignoredTotal;
+
+  // pas 2 (doar la rescue): scanul generic, tot cu filtrarea blocurilor de
+  // thinking — preferat înaintea „parității", ca tool call-ul să nu fie pierdut
+  // în favoarea textului de raționament rămas pe ecran
+  const genericStrict = args.fallback ? pickGeneric(true) : null;
+  if (genericStrict) {
+    return { text: genericStrict.text, ignored: ignoredStrict + genericStrict.ignored, count: 0 };
+  }
+
+  // pas 3: paritate cu v2.5.45 — reluăm citirea fără filtrul de atribute, ca să
+  // nu răspundem „gol" acolo unde versiunea anterioară citea ceva
+  const relaxed = readFromSelectors(false);
+  if (relaxed) {
+    return { text: relaxed.text, ignored: ignoredStrict + relaxed.ignored, count: 0 };
+  }
+
+  // pas 4 (doar la rescue): scan generic fără filtrul de atribute
+  const genericRelaxed = args.fallback ? pickGeneric(false) : null;
+  if (genericRelaxed) {
+    return { text: genericRelaxed.text, ignored: ignoredStrict + genericRelaxed.ignored, count: 0 };
+  }
+
+  return { text: '', ignored: ignoredStrict, count: 0 };
 };
 
 /* =========================================================================
@@ -1820,38 +1969,58 @@ export async function anySelectorPresent(page: Page, sels: string[]): Promise<bo
   }
 }
 
-/** Textul ultimului răspuns (ultimul element non-gol din primul selector valid). */
+/**
+ * v2.5.46 (bug #105): citirea completă a răspunsului — textul + câte caractere
+ * de „thinking" au fost ignorate (pentru log-ul `[read] response: …`).
+ */
+export async function getLastResponseRead(
+  page: Page,
+  sels: string[],
+  fallback = false
+): Promise<ResponseRead> {
+  try {
+    return await page.evaluate<ResponseRead, ResponseScanArgs>(scanResponses, {
+      sels,
+      fallback,
+      navSels: NAV_SELECTORS,
+      mode: 'text'
+    });
+  } catch (e: any) {
+    log('reading the response failed: ' + (e?.message ?? String(e)));
+    return { text: '', ignored: 0, count: 0 };
+  }
+}
+
+/**
+ * Textul ultimului răspuns (ultimul element non-gol din primul selector valid),
+ * FĂRĂ blocurile de raționament — vezi scanResponses (v2.5.46, bug #105).
+ */
 export async function getLastResponseText(
   page: Page,
   sels: string[],
   fallback = false
 ): Promise<string> {
-  try {
-    return await page.evaluate<string, ReadArgs>(readLastText, {
-      sels,
-      fallback,
-      navSels: NAV_SELECTORS
-    });
-  } catch (e: any) {
-    log('reading the response failed: ' + (e?.message ?? String(e)));
-    return '';
-  }
+  return (await getLastResponseRead(page, sels, fallback)).text;
 }
 
 /**
  * v2.5.12 FIX (bug #36): numărul de răspunsuri vizibile în DOM pentru slotul
- * `response` (același selector ca getLastResponseText). O creștere a acestui
- * număr = a apărut un răspuns NOU, indiferent de conținutul lui.
+ * `response` (aceeași logică/selectori ca getLastResponseText, deci și aceeași
+ * excludere a blocurilor de thinking — bug #105). O creștere a acestui număr =
+ * a apărut un răspuns NOU, indiferent de conținutul lui.
  */
 export async function countAssistantResponses(
   page: Page,
   sels: string[]
 ): Promise<number> {
   try {
-    return await page.evaluate<number, CountArgs>(countLastResponses, {
+    const read = await page.evaluate<ResponseRead, ResponseScanArgs>(scanResponses, {
       sels,
-      navSels: NAV_SELECTORS
+      fallback: false,
+      navSels: NAV_SELECTORS,
+      mode: 'count'
     });
+    return read.count;
   } catch (e: any) {
     log('counting the responses failed: ' + (e?.message ?? String(e)));
     return 0;

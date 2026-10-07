@@ -3,6 +3,7 @@ import {
   anySelectorMatches,
   anySelectorPresent,
   countAssistantResponses,
+  getLastResponseRead,
   getLastResponseText,
   healSlot,
   inputAvailable,
@@ -1063,6 +1064,35 @@ export async function sendAndWait(
 ): Promise<string> {
   const { providerId, label, signal } = cfg;
 
+  /**
+   * v2.5.46 FIX (bug #105): citirea răspunsului trece printr-un singur loc, ca
+   * să raportăm și câte caractere de „thinking" au fost ignorate. Blocurile de
+   * raționament NU sunt răspuns: la testul Qwen (17:06) selectorul prinsese
+   * întâi blocul de thinking, se citeau 93 de caractere („Thinking completed")
+   * și tool call-ul trimis corect de model se pierdea. Logăm doar când rezultatul
+   * se schimbă relevant (a apărut text SAU s-au ignorat alte caractere), ca să nu
+   * umplem Output-ul la fiecare pas de polling.
+   */
+  let lastIgnoredChars = -1;
+  let lastHadText = false;
+  const readResponse = async (sels: string[], fallback = false): Promise<string> => {
+    const read = await getLastResponseRead(page, sels, fallback);
+    const hasText = read.text.length > 0;
+    if (read.ignored !== lastIgnoredChars || hasText !== lastHadText) {
+      lastIgnoredChars = read.ignored;
+      lastHadText = hasText;
+      log(
+        label +
+          ': [read] response: ' +
+          read.text.length +
+          ' chars (thinking: ' +
+          read.ignored +
+          ' chars ignored)'
+      );
+    }
+    return read.text;
+  };
+
   // v2.0.5: NU mai aducem tab-ul/fereastra în prim-plan la fiecare mesaj — asta
   // făcea fereastra Chrome să sară peste VS Code. Randarea rămâne activă în
   // fundal prin flag-urile de lansare + override-ul de vizibilitate (browser.ts).
@@ -1090,7 +1120,7 @@ export async function sendAndWait(
   }
 
   let responseSelectors = selectors.candidates(providerId, 'response');
-  let beforeText = await getLastResponseText(page, responseSelectors);
+  let beforeText = await readResponse(responseSelectors);
   // v2.5.12 FIX (bug #36): numărul de răspunsuri existente ÎNAINTE de trimitere —
   // sentinela pentru „a apărut un răspuns nou", independentă de conținutul lui.
   let beforeCount = await countAssistantResponses(page, responseSelectors);
@@ -1225,7 +1255,7 @@ export async function sendAndWait(
     sentText = prefix ? prefix + '\n\n' + message : message;
     input = await composeAndSend(sentText);
     // chat nou → sentinelele repornesc (alt DOM, altă numărătoare de răspunsuri)
-    beforeText = await getLastResponseText(page, responseSelectors);
+    beforeText = await readResponse(responseSelectors);
     beforeCount = await countAssistantResponses(page, responseSelectors);
     previousText = '';
     sawNewResponse = false;
@@ -1244,8 +1274,7 @@ export async function sendAndWait(
     // `started` și reia bucla.
     if (Date.now() - started >= hardTimeoutMs) {
       // RESCUE: ultima șansă — extragere generică, ca să nu blocăm utilizatorul
-      const rescuedRaw = await getLastResponseText(
-        page,
+      const rescuedRaw = await readResponse(
         selectors.candidates(providerId, 'response'),
         true
       );
@@ -1324,8 +1353,7 @@ export async function sendAndWait(
       } else {
         const healed = await healSlot(page, providerId, 'response', sentText);
         if (healed) {
-          const probe = await getLastResponseText(
-            page,
+          const probe = await readResponse(
             selectors.candidates(providerId, 'response')
           );
           if (probe && isEchoOf(probe, sentText)) {
@@ -1371,7 +1399,7 @@ export async function sendAndWait(
       }
     }
 
-    const currentText = await getLastResponseText(page, responseSelectors);
+    const currentText = await readResponse(responseSelectors);
     if (!currentText) continue;
 
     // v2.5.15 (bug #41): bannerul „Chat memory full" (ChatGPT) poate ajunge în

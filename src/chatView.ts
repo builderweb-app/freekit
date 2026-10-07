@@ -103,8 +103,10 @@ import {
 import { DetectedProviderError } from './providerErrors';
 import {
   buildCommandErrorHints,
+  buildTs6059FirstFailureInjection,
   buildTsconfigRewriteInjection,
   looksLikeTs6059,
+  ts6059TsconfigRel,
   runVerification,
   createPromptCheckpoint,
   restoreToCheckpoint,
@@ -1804,6 +1806,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       let lastEditedFile = '';
       /** v2.5.31 (bug #74): ultima eroare a unei unelte (mesajul de buclă). */
       let lastToolError = '';
+      /**
+       * v2.5.36 (bug #87): am injectat deja template-ul TS6059 proactiv odată în
+       * acest task? (fix-urile #82/#85 rămân active pentru rescrierile repetate)
+       */
+      let ts6059TemplateInjected = false;
       // v2.5.23: pașii executați în acest mesaj (pentru handoff-ul de rotire)
       const recentSteps: string[] = [];
       /**
@@ -2196,6 +2203,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                   '" was rewritten twice and TS6059 is still there — sending the exact tsconfig template.'
               );
               const injection = buildTsconfigRewriteInjection(rewritten);
+              loopNudge = loopNudge
+                ? loopNudge + '\n\n' + injection
+                : injection;
+            } else if (!ts6059TemplateInjected) {
+              // v2.5.36 FIX (bug #87): PRIMA eroare TS6059, fără nicio rescriere
+              // de tsconfig.json — nu așteptăm 2 rescrieri (#82). În testul HARD
+              // MODE Gemini a scris tsconfig.json o dată, apoi a rescris index.ts
+              // și utils.ts de 4+ ori, crezând că acolo e problema: injectăm
+              // template-ul exact + „nu rescrie .ts-urile" de la început.
+              ts6059TemplateInjected = true;
+              tsconfigTemplateSent = ts6059TsconfigRel(tsErrorText, scope);
+              log(
+                '[ts6059] injecting exact tsconfig template from first failure'
+              );
+              this.post(
+                'heal',
+                '⚠️ TS6059: the error is in ' + tsconfigTemplateSent +
+                  ', not in the .ts files — sending the exact tsconfig template.'
+              );
+              const injection = buildTs6059FirstFailureInjection(
+                tsErrorText,
+                scope
+              );
               loopNudge = loopNudge
                 ? loopNudge + '\n\n' + injection
                 : injection;
@@ -3541,14 +3571,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const scope = this.taskScope();
       const ranInScope =
         !!vres.cwd && path.resolve(vres.cwd) !== path.resolve(root);
+      // v2.5.36 FIX (bug #87): prima eroare TS6059 → template-ul EXACT pleacă
+      // PROACTIV, fără să așteptăm 2 rescrieri de tsconfig.json (#82/#85), plus
+      // „eroarea e în tsconfig.json, NU în fișierele .ts" — Gemini rescria
+      // index.ts/utils.ts de 4+ ori crezând că acolo e problema.
+      const ts6059 = looksLikeTs6059(vres.output);
+      if (ts6059) {
+        log('[ts6059] injecting exact tsconfig template from first failure');
+      }
       const verifyHints =
         buildCommandErrorHints(
           vres.command,
           vres.output,
           this.lastEditTargets[this.lastEditTargets.length - 1],
-          scope
+          scope,
+          { skipTs6059Hint: ts6059 }
         ) +
         buildOutsideScopeHint(vres.output, scope) +
+        (ts6059
+          ? '\n\n' + buildTs6059FirstFailureInjection(vres.output, scope)
+          : '') +
         (ranInScope
           ? '\n\nℹ️ tsc ran inside ' +
             path.relative(root, vres.cwd!).replace(/\\/g, '/') +

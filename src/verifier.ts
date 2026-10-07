@@ -340,7 +340,8 @@ export function buildCommandErrorHints(
   command: string,
   output: string,
   editedFile?: string,
-  scope?: string[] | null
+  scope?: string[] | null,
+  opts?: { skipTs6059Hint?: boolean }
 ): string {
   const text = String(output ?? '');
   if (!text.trim()) return '';
@@ -360,7 +361,9 @@ export function buildCommandErrorHints(
   if (looksLikeTs6059(text)) {
     // v2.5.32 FIX (bug #76): „Check tsconfig.json include/exclude" e un sfat
     // GREȘIT aici — omul edita root tsconfig.json la nesfârșit.
-    hints.push(buildTs6059Hint(text, scope));
+    // v2.5.36 FIX (bug #87): apelantul care injectează el template-ul proactiv
+    // (buildTs6059FirstFailureInjection) sare peste hint ca să nu dubleze textul.
+    if (!opts?.skipTs6059Hint) hints.push(buildTs6059Hint(text, scope));
   } else if (looksLikeTsconfigError(text)) {
     hints.push('Check tsconfig.json include/exclude.');
   }
@@ -412,6 +415,18 @@ function ts6059Folder(output: string, scope?: string[] | null): string {
 }
 
 /**
+ * v2.5.36 FIX (bug #87): calea relativă a tsconfig.json care trebuie scrisă,
+ * derivată din output-ul TS6059 (ex. `bootcamp-test/tsconfig.json`) — sau
+ * `<scope>/tsconfig.json` când folderul nu poate fi dedus din eroare.
+ */
+export function ts6059TsconfigRel(
+  output: string,
+  scope?: string[] | null
+): string {
+  return ts6059Folder(output, scope) + '/tsconfig.json';
+}
+
+/**
  * v2.5.33 FIX (bug #81): template-ul tsconfig EXACT pe care modelul trebuie să-l
  * scrie în subfolder. Gemini rescria tsconfig.json de 4 ori cu versiuni greșite
  * (rootDir/outDir/extends de prisos); un sfat vag nu ajuta — dăm conținutul
@@ -439,6 +454,9 @@ export function buildTs6059Hint(
   const folder = ts6059Folder(output, scope);
   return (
     'TS6059 means ROOT tsconfig.json has \'rootDir\' set and excludes files outside it.\n' +
+    'The error is in the tsconfig.json of ' +
+    folder +
+    '/, NOT in the .ts files — do NOT rewrite the .ts files (index.ts, utils.ts).\n' +
     'BEST FIX: create a separate tsconfig.json inside ' +
     folder +
     '/ with EXACTLY this content:\n' +
@@ -457,16 +475,30 @@ export function buildTs6059Hint(
  * v2.5.33 FIX (bug #82): textul injectat (în locul nudge-ului generic) când
  * același `tsconfig.json` a fost rescris de 2 ori și eroarea e tot TS6059.
  * Trimite template-ul EXACT, nu încă o sugestie.
+ *
+ * v2.5.36 FIX (bug #87): `firstFailure` schimbă antetul pentru injectarea
+ * PROACTIVĂ de la PRIMA eroare TS6059 (fără nicio rescriere de tsconfig.json):
+ * spune explicit că eroarea e în tsconfig.json, NU în fișierele .ts.
  */
-export function buildTsconfigRewriteInjection(relPath: string): string {
+export function buildTsconfigRewriteInjection(
+  relPath: string,
+  firstFailure = false
+): string {
   const rel = String(relPath ?? '').replace(/\\/g, '/');
+  const header = firstFailure
+    ? '⚠️ TS6059: the error is in tsconfig.json, NOT in the .ts files.\n' +
+      'Do NOT rewrite index.ts/utils.ts — use the exact template below.\n' +
+      'Write ' +
+      rel +
+      ' with EXACTLY this content (nothing else):\n'
+    : '⚠️ You have rewritten ' +
+      rel +
+      ' twice and the TS6059 error is still there.\n' +
+      'Write ' +
+      rel +
+      ' with EXACTLY this content (nothing else):\n';
   return (
-    '⚠️ You have rewritten ' +
-    rel +
-    ' twice and the TS6059 error is still there.\n' +
-    'Write ' +
-    rel +
-    ' with EXACTLY this content (nothing else):\n' +
+    header +
     TS6059_TSCONFIG_JSON +
     '\n' +
     'Then run: npx tsc --noEmit -p ' +
@@ -475,6 +507,20 @@ export function buildTsconfigRewriteInjection(relPath: string): string {
     'Do NOT add rootDir, outDir, extends, or any other fields.\n' +
     'Do NOT edit the root tsconfig.json again.'
   );
+}
+
+/**
+ * v2.5.36 FIX (bug #87): injectarea PROACTIVĂ de la PRIMA eroare TS6059 —
+ * template-ul exact + „nu rescrie .ts-urile". În testul HARD MODE (7/10/2026)
+ * Gemini a scris tsconfig.json o singură dată, apoi a rescris index.ts și
+ * utils.ts de 4+ ori, crezând că acolo e problema: fix-urile #82/#85 (care
+ * așteptau 2 rescrieri de tsconfig.json) nu se declanșau niciodată.
+ */
+export function buildTs6059FirstFailureInjection(
+  output: string,
+  scope?: string[] | null
+): string {
+  return buildTsconfigRewriteInjection(ts6059TsconfigRel(output, scope), true);
 }
 
 /**

@@ -270,14 +270,39 @@ function withChain(err: ParsedError, root: string): ParsedError {
   if (!prop || !err.file) return err;
   const source = readSourceFile(root, err.file);
   if (!source) return err;
-  const srcLine = source.split(/\r?\n/)[err.line - 1] ?? '';
-  const chain = extractChain(srcLine, prop);
+  const lines = source.split(/\r?\n/);
+  const chain = findChainNear(lines, err.line, prop);
   if (!chain) return err;
   const parts = chain.split('.');
   const expression = parts.join('.');
   const variable = parts.length >= 2 ? parts[parts.length - 2] : undefined;
   const parent = parts[0];
   return { ...err, expression, variable, parent };
+}
+
+/**
+ * Lanțul de acces căutat poate fi pe linia raportată sau pe una vecină:
+ * bundler-ele/source-map-urile indică uneori linia de continuare a expresiei
+ * („  ))}"). Căutăm în fereastră, preferând linia raportată, apoi cea mai
+ * apropiată — în sus ca în jos.
+ */
+function findChainNear(lines: string[], line: number, prop: string): string | undefined {
+  const idx = Math.max(0, Math.min(lines.length - 1, line - 1));
+  const direct = extractChain(lines[idx] ?? '', prop);
+  if (direct) return direct;
+  for (let offset = 1; offset <= 6; offset++) {
+    const up = lines[idx - offset];
+    if (up) {
+      const found = extractChain(up, prop);
+      if (found) return found;
+    }
+    const down = lines[idx + offset];
+    if (down) {
+      const found = extractChain(down, prop);
+      if (found) return found;
+    }
+  }
+  return undefined;
 }
 
 /** Extinde spre stânga lanțul de acces care se termină cu `.prop`. */

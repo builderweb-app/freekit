@@ -12,5 +12,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "exclude": ["node_modules", "out", "bootcamp-test"]
+  "exclude": ["node_modules", "out", "bootcamp-test", "bootcamp-test*"]
 }

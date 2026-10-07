@@ -26,6 +26,7 @@ import {
 } from './payload';
 import { RESTRICTED_TOOL_ERROR } from './trust';
 import { commandErrorFiles } from './verifier';
+import { logLine } from './log';
 import {
   TS_ALIAS_NOTE,
   isTypeScriptPath,
@@ -1800,6 +1801,125 @@ async function writeFile(
   return { ok: true, result: 'Written ' + content.length + ' bytes to ' + rel };
 }
 
+/* =========================================================================
+ * v2.5.37 (bug #88) — strip defensiv al antetului copiat de model la scriere
+ *
+ * Fișierele TypeScript pleacă spre AI cu antetul din read_file
+ * (`--- FILE: src/foo.ts.txt ---` + nota „(TypeScript file, sent as .txt for
+ * compatibility)"), iar eticheta de limbaj e randată de chatul web. Unele
+ * modele (Gemini, testul HARD MODE din 7 Oct 2026) copiază antetul ca PRIMELE
+ * linii ale fișierului scris ⇒ `error TS2304: Cannot find name 'TypeScript'`
+ * și modelul se învârte rescriind fișierele. Antetul din read_file rămâne
+ * NESCHIMBAT (DeepSeek funcționează perfect cu el, 10/10) — curățăm doar la
+ * scriere, ca plasă de siguranță.
+ * ========================================================================= */
+
+/** Câte linii de antet recunoscute se elimină cel mult de la început. */
+export const MAX_AI_HEADER_LINES = 5;
+
+/** `--- FILE: src/foo.ts ---` (antetul din read_file/read_files) sau nota lui. */
+const AI_HEADER_LINE_RE =
+  /^(?:-{2,}\s*FILE\b[^\n]*|\([^()]{0,80}\bfile\b[^()]{0,80}\))$/i;
+
+/** Eticheta de limbaj rămasă singură pe rând („TypeScript", „Plaintext", …). */
+const AI_LANGUAGE_LINE_RE = new RegExp(
+  '^(?:typescript|javascript|plaintext|json|python|text|ts|js|tsx|jsx|astro|' +
+    'markdown|md|css|scss|html|jsonc|yaml|yml|xml|sql|bash|shell|sh|java|c|' +
+    'cpp|go|rust|php|ruby)$',
+  'i'
+);
+
+/** Gard de cod markdown izolat pe rând: ``` / ```ts / ~~~ (eticheta opțională). */
+const AI_OPEN_FENCE_RE = /^(?:`{3,}|~{3,})[ \t]*[A-Za-z0-9_.+#-]*$/;
+
+/** Gard de închidere, fără etichetă de limbaj (``` / ~~~). */
+const AI_CLOSE_FENCE_RE = /^(?:`{3,}|~{3,})[ \t]*$/;
+
+/** Fișiere la care un ``` final poate fi conținut legitim (README, .txt, …). */
+const DOC_FILE_RE = /\.(?:md|mdx|markdown|txt|rst|adoc)$/i;
+
+/**
+ * Curăță de la începutul conținutului primit de la AI liniile de antet pe care
+ * modelul le copiază din prompt (antetul Freekit, nota lui, eticheta de limbaj,
+ * gardul de cod) plus gardul de închidere rămas la final. Restul conținutului
+ * rămâne neatins: un fișier curat iese identic (`stripped` = 0).
+ */
+export function stripAiFileHeader(
+  content: string,
+  rel: string
+): { content: string; stripped: number } {
+  const text = String(content ?? '');
+  if (!text.trim()) return { content: text, stripped: 0 };
+
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const lines = text.split(/\r?\n/);
+  const skipBlanks = (from: number): number => {
+    let j = from;
+    while (j < lines.length && !lines[j].trim()) j++;
+    return j;
+  };
+
+  let stripped = 0;
+  let start = 0;
+
+  // 1) antetul + eticheta de limbaj de la început (rândurile goale dintre ele
+  //    intră în același „antet"); fără nicio linie recunoscută nu atingem nimic.
+  let headers = 0;
+  let j = 0;
+  while (headers < MAX_AI_HEADER_LINES && j < lines.length) {
+    const line = lines[j].trim();
+    if (!line) {
+      j++;
+      continue;
+    }
+    if (!AI_HEADER_LINE_RE.test(line) && !AI_LANGUAGE_LINE_RE.test(line)) break;
+    headers++;
+    j++;
+  }
+  if (headers) {
+    start = skipBlanks(j);
+    stripped += headers;
+  }
+
+  // 2) gardul de cod de la început (``` / ```ts), cu rândurile goale de dinainte
+  const open = skipBlanks(start);
+  let fenceStripped = false;
+  if (open < lines.length && AI_OPEN_FENCE_RE.test(lines[open].trim())) {
+    fenceStripped = true;
+    stripped++;
+    start = skipBlanks(open + 1);
+  }
+
+  // 3) gardul de închidere rămas la final: îl scoatem când e perechea gardului
+  //    de la început sau când fișierul e de cod (într-un .md/README un ``` final
+  //    poate fi conținut legitim — acolo nu-l atingem)
+  let end = lines.length;
+  let last = lines.length - 1;
+  while (last >= start && !lines[last].trim()) last--;
+  if (
+    last >= start &&
+    AI_CLOSE_FENCE_RE.test(lines[last].trim()) &&
+    (fenceStripped || !DOC_FILE_RE.test(rel))
+  ) {
+    end = last;
+    stripped++;
+  }
+
+  if (!stripped) return { content: text, stripped: 0 };
+
+  let out = lines.slice(start, end);
+  if (end < lines.length) {
+    while (out.length && !out[out.length - 1].trim()) out.pop();
+    if (out.length && /\r?\n$/.test(text)) out.push('');
+  }
+
+  logLine(
+    'write',
+    'stripped ' + stripped + ' language marker line(s) from ' + rel
+  );
+  return { content: out.length ? out.join(eol) : '', stripped };
+}
+
 /**
  * v2.5.29 FIX 3 (bug #67): corpul uneltei `write_file`, extras din `executeTool`
  * ca să putem adăuga avertismentul de nivel 2 al anti-spam-ului (al doilea
@@ -1814,7 +1934,12 @@ async function writeFileTool(
   // v0.2.1: anti-spam — verificăm ÎNAINTE de cardul de aprobare
   const limitErr = checkWriteLimit(args.path);
   if (limitErr) return { ok: false, error: limitErr };
-  const newContent = args.content as string;
+  // v2.5.37 (bug #88): strip defensiv — modelul poate copia antetul Freekit
+  // („--- FILE: … ---", nota, „TypeScript") ca primele linii ale fișierului
+  const newContent = stripAiFileHeader(
+    args.content as string,
+    String(args.path)
+  ).content;
   // v2.5.6: truncation guard — nu scriem (și nu cerem aprobare pentru)
   // un fișier scris doar parțial; cerem modelului conținutul COMPLET
   const truncErr = checkTruncation('write_file', args.path, newContent);
@@ -2294,10 +2419,13 @@ async function writeFilesBatch(
   userText?: string
 ): Promise<ToolResult> {
   const raw = Array.isArray(args.files) ? args.files : [];
-  const files = raw.filter(
-    (f: any) =>
-      f && typeof f.path === 'string' && typeof f.content === 'string'
-  ) as Array<{ path: string; content: string }>;
+  const files = (
+    raw.filter(
+      (f: any) =>
+        f && typeof f.path === 'string' && typeof f.content === 'string'
+    ) as Array<{ path: string; content: string }>
+    // v2.5.37 (bug #88): strip defensiv al antetului Freekit copiat de model
+  ).map((f) => ({ ...f, content: stripAiFileHeader(f.content, f.path).content }));
 
   if (!files.length) {
     return {

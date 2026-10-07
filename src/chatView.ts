@@ -75,7 +75,9 @@ import {
   CircuitBreaker,
   EDIT_TOOLS,
   EditLoopDetector,
-  SameErrorTracker
+  isTsconfigPath,
+  SameErrorTracker,
+  TsconfigRewriteTracker
 } from './circuitBreaker';
 import {
   formatReadFilesExcerpts,
@@ -492,6 +494,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * „TS6059") în task-ul curent — la 5, bucla e oprită.
    */
   private sameErrors = new SameErrorTracker();
+  /**
+   * v2.5.34 (bug #85): rescrierile de tsconfig.json se numără PESTE chat-uri —
+   * fix-ul #82 numără doar în chatul curent, iar rotirea (la 4 rezultate de
+   * unealtă) resetează contorul, deci „o scriere per chat" nu ajungea niciodată
+   * la 2. NU se reseta în resetVerifyState(): doar la un mesaj nou de user
+   * (vezi handleMessage), ca rotirea din același task să nu-l șteargă.
+   */
+  private tsconfigRewrites = new TsconfigRewriteTracker();
   /**
    * v2.5.0: a trecut vreodată verificarea? Fără o verificare verde nu există
    * un „verified-good state" real, iar rollback-ul ar readuce proiectul la
@@ -1507,6 +1517,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.verboseThinkOpen = false;
     // v1.3.0: starea de auto-verify/rollback se resetează la fiecare mesaj
     this.resetVerifyState();
+    // v2.5.34 (bug #85): contorul de rescrieri tsconfig ține minte DOAR task-ul
+    // curent, peste rotirile de chat — un mesaj nou de user îl resetează AICI,
+    // nu în resetVerifyState() (rotirea din același task nu are voie să-l șteargă).
+    this.tsconfigRewrites.reset();
 
     try {
       const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -2168,13 +2182,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           // (Gemini rescria tsconfig-ul cu versiuni greșite, de 4 ori la rând).
           const tsErrorText =
             lastToolError + '\n' + (this.getLastVerifyFailure()?.output ?? '');
+          let tsconfigTemplateSent = '';
           if (looksLikeTs6059(tsErrorText)) {
             const rewritten = targets.find(
-              (f) =>
-                /(^|\/)tsconfig\.json$/i.test(String(f).replace(/\\/g, '/')) &&
-                editLoop.count(f) >= 2
+              (f) => isTsconfigPath(f) && editLoop.count(f) >= 2
             );
             if (rewritten) {
+              tsconfigTemplateSent = rewritten;
               log('[loop] tsconfig rewritten twice — injecting exact template');
               this.post(
                 'heal',
@@ -2182,6 +2196,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                   '" was rewritten twice and TS6059 is still there — sending the exact tsconfig template.'
               );
               const injection = buildTsconfigRewriteInjection(rewritten);
+              loopNudge = loopNudge
+                ? loopNudge + '\n\n' + injection
+                : injection;
+            }
+          }
+          // v2.5.34 FIX (bug #85): contorul per chat al #82 e resetat de rotirea
+          // chatului (la 4 rezultate de unealtă) — Gemini a scris tsconfig.json
+          // O DATĂ în 8 chat-uri consecutive, deci #82 nu se declanșa niciodată.
+          // Numărăm scrierile PESTE chat-uri (fereastră 10 min): la a 2-a,
+          // template-ul exact pleacă spre AI chiar dacă scrierile au fost în
+          // chat-uri diferite. (`Written ` = write_files parțial reușit.)
+          const tsconfigWritten =
+            result.ok || (result.error ?? '').startsWith('Written ');
+          if (tsconfigWritten) {
+            for (const rel of targets) {
+              if (!isTsconfigPath(rel)) continue;
+              const tracked = this.tsconfigRewrites.record(rel);
+              // același chat ⇒ #82 a injectat deja (nu dublăm template-ul)
+              if (!tracked.inject || rel === tsconfigTemplateSent) continue;
+              log(
+                '[loop] tsconfig rewritten twice across chats — injecting exact template'
+              );
+              this.post(
+                'heal',
+                '⚠️ Loop detected: "' + rel + '" was rewritten ' + tracked.count +
+                  ' times across chats — sending the exact tsconfig template.'
+              );
+              const injection = buildTsconfigRewriteInjection(rel);
               loopNudge = loopNudge
                 ? loopNudge + '\n\n' + injection
                 : injection;

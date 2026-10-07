@@ -8,6 +8,8 @@ package-build.ps1
 tsconfig.json
 **/*.vsix
 test-output.txt
+# v2.5.34: scratch projects written by the AI during provider tests never ship
+bootcamp-test/**
 
 node_modules/typescript/**
 node_modules/@types/**

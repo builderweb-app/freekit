@@ -362,3 +362,76 @@ export class SameErrorTracker {
     return this.count;
   }
 }
+
+/* =========================================================================
+ * v2.5.34 FIX (bug #85) — rescrierile de tsconfig.json se numără PESTE chat-uri
+ * Fix-ul #82 („tsconfig rescris de 2 ori ⇒ template exact") număra doar în
+ * chatul curent, dar rotirea proactivă a chatului (v2.5.23, implicit la 4
+ * rezultate de unealtă) resetează contorul: în testul HARD MODE (7/10/2026),
+ * Gemini a scris tsconfig.json O DATĂ în fiecare din 8 chat-uri consecutive,
+ * deci #82 nu s-a declanșat niciodată. Aici ținem minte ultimele scrieri per
+ * cale PESTE chat-uri, într-o fereastră de 10 minute: la a 2-a scriere a
+ * aceluiași tsconfig.json chatView injectează template-ul exact (#82), fără să
+ * aștepte ca ambele scrieri să nimerească în același chat.
+ * ========================================================================= */
+
+/** Fereastra în care două rescrieri ale aceluiași tsconfig.json = aceeași buclă. */
+export const TSCONFIG_REWRITE_WINDOW_MS = 10 * 60_000;
+
+/** Calea e un `tsconfig.json`? (acceptă `\` și `/`, la orice adâncime) */
+export function isTsconfigPath(p: unknown): boolean {
+  return /(^|\/)tsconfig\.json$/i.test(
+    String(p ?? '').replace(/\\/g, '/').trim()
+  );
+}
+
+/** Cheia normalizată a unui tsconfig.json (separatori `/`, fără `./`), altfel ''. */
+function tsconfigKey(p: unknown): string {
+  const norm = String(p ?? '').trim().replace(/\\/g, '/').replace(/^\.\//, '');
+  return isTsconfigPath(norm) ? norm : '';
+}
+
+/**
+ * Ultimele rescrieri ale fiecărui `tsconfig.json`, cu timestamp — PERSISTENT
+ * peste rotirile de chat (o instanță = un task; chatView îl resetează doar la
+ * începutul unui mesaj nou de user, NU în resetVerifyState()).
+ */
+export class TsconfigRewriteTracker {
+  /** cale normalizată → timestamp-urile scrierilor din fereastra curentă */
+  private writes = new Map<string, number[]>();
+
+  /**
+   * Înregistrează o scriere a lui `path`. Timestamp-urile mai vechi de
+   * TSCONFIG_REWRITE_WINDOW_MS sunt aruncate. `inject` = true când același
+   * fișier a fost scris de ≥ 2 ori în fereastră (deci și peste chat-uri).
+   * `now` e injectabil pentru teste.
+   */
+  record(
+    path: string,
+    now: number = Date.now()
+  ): { count: number; inject: boolean } {
+    const key = tsconfigKey(path);
+    if (!key) return { count: 0, inject: false };
+    const recent = this.recent(key, now);
+    recent.push(now);
+    this.writes.set(key, recent);
+    return { count: recent.length, inject: recent.length >= 2 };
+  }
+
+  /** Câte scrieri are fișierul în fereastra curentă (pentru log/decizii). */
+  count(path: string, now: number = Date.now()): number {
+    const key = tsconfigKey(path);
+    return key ? this.recent(key, now).length : 0;
+  }
+
+  /** Task nou (mesaj nou de user) ⇒ uită tot (inclusiv peste chat-uri). */
+  reset(): void {
+    this.writes.clear();
+  }
+
+  /** Timestamp-urile din fereastra care se termină la `now`. */
+  private recent(key: string, now: number): number[] {
+    const cutoff = now - TSCONFIG_REWRITE_WINDOW_MS;
+    return (this.writes.get(key) ?? []).filter((t) => t > cutoff);
+  }
+}

@@ -342,7 +342,9 @@ export async function activate(ctx: vscode.ExtensionContext) {
   ctx.subscriptions.push(
     vscode.commands.registerCommand('freekit.resetSelectors', async () => {
       const removed = selectors.reset();
-      if (removed === 0) {
+      // v2.5.44 (bug #101): selecțiile scrise manual (user-locked) se păstrează
+      const kept = selectors.lockedCount();
+      if (removed === 0 && kept === 0) {
         vscode.window.showInformationMessage(
           'Freekit: no saved repaired selectors were found.'
         );
@@ -351,7 +353,12 @@ export async function activate(ctx: vscode.ExtensionContext) {
           'Freekit: removed ' +
             removed +
             ' saved repaired selectors. The configured selectors are being used again' +
-            ' (bundled or remote, if enabled).'
+            ' (bundled or remote, if enabled).' +
+            (kept
+              ? ' Kept ' +
+                kept +
+                ' manual (user-locked) selector(s) — edit selectors-user.json to change them.'
+              : '')
         );
       }
     })

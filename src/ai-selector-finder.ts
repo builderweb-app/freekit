@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { Page } from 'playwright';
@@ -9,6 +10,8 @@ import { isEmbeddingModel } from './hardware';
 import { getLastResponseText, promoPhraseHit, selectors, setAIFinder, SLOTS, SlotName } from './selectors';
 
 const log = (msg: string) => logLine('ai-finder', msg);
+/** v2.5.44 (bug #101): același tag ca healer-ul din selectors.ts. */
+const healLog = (msg: string) => logLine('healer', msg);
 
 /* =========================================================================
  * v0.9.5 — AI-POWERED SELECTOR DISCOVERY
@@ -1101,17 +1104,114 @@ export async function validateSelectors(
 const USER_FILE_NAME = 'selectors-user.json';
 let storageDir: string | null = null;
 
+/**
+ * v2.5.44 (bug #101): fișierul are DOUĂ categorii, clar separate.
+ *
+ *   - „locked"  = selectori scriși/adăugați MANUAL de utilizator. Chei plate
+ *                 `"<provider>.<slot>": "<selector>"` în rădăcină, dublate în
+ *                 `_meta.locked`. Healer-ul (fingerprint), AI finder-ul și
+ *                 override-urile de la server NU îi ating niciodată.
+ *   - „providers" = selectori descoperiți automat (how='ai') — pot fi suprascriși.
+ *
+ * `_meta.writtenHash` = amprenta ultimului conținut scris DE NOI. Dacă fișierul
+ * de pe disc nu corespunde, înseamnă că utilizatorul l-a editat manual: toate
+ * intrările lui devin „locked" (regula de migrare pentru fișierele v1, care
+ * fuseseră scrise manual de utilizator).
+ *
+ * `_meta` e ignorat la parsare ca „provider.slot" — nu e o intrare.
+ */
+const USER_FILE_VERSION = 2;
+
+/** Cheile rezervate din selectors-user.json (nu sunt „provider.slot"). */
+const USER_FILE_RESERVED = new Set(['version', 'updated', 'providers', '_meta']);
+
+/** Amprenta conținutului (fără `_meta`), ca să detectăm editarea manuală. */
+function hashUserPayload(payload: Record<string, unknown>): string {
+  return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 16);
+}
+
+/**
+ * v2.5.44: fișierul e editat de mână, deci acceptăm (doar ca FALLBACK, după
+ * JSON.parse) și comentarii (de linie sau de bloc) ori virgula finală.
+ */
+function parseUserJson(raw: string): any {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    /* încercăm varianta tolerantă */
+  }
+  try {
+    return JSON.parse(stripJsonComments(raw).replace(/,(\s*[}\]])/g, '$1'));
+  } catch {
+    return null;
+  }
+}
+
+/** Scoate comentariile fără să atingă conținutul dintre ghilimele. */
+function stripJsonComments(src: string): string {
+  let out = '';
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (inStr) {
+      out += c;
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') {
+      inStr = true;
+      out += c;
+      continue;
+    }
+    if (c === '/' && src[i + 1] === '/') {
+      while (i < src.length && src[i] !== '\n') i++;
+      out += '\n';
+      continue;
+    }
+    if (c === '/' && src[i + 1] === '*') {
+      i += 2;
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++;
+      i++;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+/** `"mistral.input"` → { provider: 'mistral', slot: 'input' } (sau null). */
+function splitSlotKey(key: string): { provider: string; slot: SlotName } | null {
+  const dot = key.lastIndexOf('.');
+  if (dot <= 0) return null;
+  const slot = key.slice(dot + 1);
+  if (!(SLOTS as readonly string[]).includes(slot)) return null;
+  return { provider: key.slice(0, dot), slot: slot as SlotName };
+}
+
 export function userSelectorsFilePath(): string | null {
   return storageDir ? path.join(storageDir, USER_FILE_NAME) : null;
 }
 
-/** Rescrie fișierul din override-urile învățate cu how='ai' (sursa de adevăr). */
+/**
+ * Rescrie fișierul: selecțiile „locked" (scrise manual) ca chei plate, cele
+ * descoperite de AI (how='ai') sub `providers`.
+ */
 export function saveUserSelectors(): void {
   const file = userSelectorsFilePath();
   if (!file) return;
+  const locked: Record<string, string> = {};
   const providers: Record<string, Record<string, unknown>> = {};
+  let lockedCount = 0;
   let count = 0;
   for (const item of selectors.listLearned()) {
+    if (item.locked) {
+      locked[item.provider + '.' + item.slot] = item.selector;
+      lockedCount++;
+      continue;
+    }
     if (item.how !== 'ai') continue;
     if (!providers[item.provider]) providers[item.provider] = {};
     providers[item.provider][item.slot] = {
@@ -1123,53 +1223,121 @@ export function saveUserSelectors(): void {
     };
     count++;
   }
-  const payload = { version: 1, updated: new Date().toISOString(), providers };
+  const payload: Record<string, unknown> = {
+    version: USER_FILE_VERSION,
+    updated: new Date().toISOString(),
+    ...locked
+  };
+  if (count) payload.providers = providers;
+  // amprenta se calculează ÎNAINTE de a adăuga `_meta` (altfel s-ar auto-include)
+  payload._meta = { locked: Object.keys(locked), writtenHash: hashUserPayload(payload) };
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify(payload, null, 2) + '\n', 'utf8');
-    log('selectors-user.json salvat (' + count + ' selectori AI)');
+    log(
+      'selectors-user.json salvat (' +
+        count +
+        ' selectori AI' +
+        (lockedCount ? ', ' + lockedCount + ' user-locked' : '') +
+        ')'
+    );
   } catch (e: any) {
     log('scrierea selectors-user.json a eșuat: ' + (e?.message ?? String(e)));
   }
 }
 
-/** Încarcă selectors-user.json la pornire (intrările invalide se șterg). */
+/**
+ * Încarcă selectors-user.json la pornire.
+ *
+ * v2.5.44 (bug #101): fișierul e tratat ca sursă de adevăr pentru selecțiile
+ * MANUALE. Dacă a fost editat de utilizator (sau e un fișier v1, scris de
+ * mână), tot ce conține e marcat „locked" și healer-ul nu se mai atinge de
+ * acele sloturi. Intrările automate respinse de validare se șterg doar dacă
+ * fișierul e al nostru (nu-l rescriem niciodată peste o editare manuală).
+ */
 function loadUserSelectorsFromDisk(): void {
   const file = userSelectorsFilePath();
   if (!file || !fs.existsSync(file)) return;
   let data: any;
   try {
-    data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    data = parseUserJson(fs.readFileSync(file, 'utf8'));
   } catch (e: any) {
     log('selectors-user.json invalid — ignorat: ' + (e?.message ?? String(e)));
     return;
   }
-  const providers = data?.providers;
-  if (!providers || typeof providers !== 'object') return;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    log('selectors-user.json invalid — ignorat (nu e un obiect JSON)');
+    return;
+  }
+
+  const meta = data._meta && typeof data._meta === 'object' ? data._meta : {};
+  const baseline: Record<string, unknown> = { ...data };
+  delete baseline._meta;
+  const storedHash = typeof meta.writtenHash === 'string' ? meta.writtenHash : '';
+  // fără amprenta noastră (fișier v1) sau cu altă amprentă => scris de mână
+  const userEdited = !storedHash || storedHash !== hashUserPayload(baseline);
+  const declaredLocked = new Set<string>(
+    Array.isArray(meta.locked) ? meta.locked.map((k: unknown) => String(k)) : []
+  );
 
   let loaded = 0;
+  let auto = 0;
   let pruned = 0;
-  for (const [pid, slots] of Object.entries<any>(providers)) {
-    if (!slots || typeof slots !== 'object') continue;
-    for (const slot of SLOTS) {
-      const entry = slots[slot];
-      const sel = typeof entry === 'string' ? entry : entry?.selector;
-      if (typeof sel !== 'string' || !sel.trim()) continue;
-      const meta =
-        entry && typeof entry === 'object'
-          ? { confidence: Number(entry.confidence), reasoning: String(entry.reasoning || '') }
-          : undefined;
-      const ok = selectors.learn(pid, slot, sel.trim(), 'ai', meta);
-      if (ok) {
-        loaded++;
-      } else {
-        pruned++;
-        log('selectors-user.json: „' + pid + '.' + slot + '” respins la încărcare — ' + sel);
+
+  // (a) chei plate „provider.slot" = selecții scrise manual → locked implicit
+  for (const [key, value] of Object.entries<any>(data)) {
+    if (USER_FILE_RESERVED.has(key)) continue;
+    const parsed = splitSlotKey(key);
+    if (!parsed) continue;
+    const sel = typeof value === 'string' ? value : value?.selector;
+    if (typeof sel !== 'string' || !sel.trim()) continue;
+    if (selectors.learnLocked(parsed.provider, parsed.slot, sel)) loaded++;
+  }
+
+  // (b) `providers` = descoperite automat; la o editare manuală devin și ele
+  // locked (migrarea v1: tot ce exista în fișier fusese scris de utilizator)
+  const providers = data.providers;
+  if (providers && typeof providers === 'object') {
+    for (const [pid, slots] of Object.entries<any>(providers)) {
+      if (!slots || typeof slots !== 'object') continue;
+      for (const slot of SLOTS) {
+        const entry = slots[slot];
+        const sel = typeof entry === 'string' ? entry : entry?.selector;
+        if (typeof sel !== 'string' || !sel.trim()) continue;
+        if (userEdited || entry?.locked === true || declaredLocked.has(pid + '.' + slot)) {
+          if (selectors.learnLocked(pid, slot, sel)) loaded++;
+          continue;
+        }
+        const meta2 =
+          entry && typeof entry === 'object'
+            ? { confidence: Number(entry.confidence), reasoning: String(entry.reasoning || '') }
+            : undefined;
+        if (selectors.learn(pid, slot, sel.trim(), 'ai', meta2)) {
+          loaded++;
+          auto++;
+        } else {
+          pruned++;
+          log('selectors-user.json: „' + pid + '.' + slot + '” respins la încărcare — ' + sel);
+        }
       }
     }
   }
-  if (loaded) log('selectors-user.json: ' + loaded + ' selectori încărcați');
-  if (pruned) saveUserSelectors(); // rescrie fără intrările respinse
+
+  if (loaded) {
+    log(
+      'selectors-user.json: ' + loaded + ' selectori încărcați (' +
+        (loaded - auto) + ' user-locked' + (auto ? ', ' + auto + ' auto' : '') + ')'
+    );
+  }
+  if (userEdited) {
+    log(
+      'selectors-user.json editat manual — toate intrările lui sunt user-locked ' +
+        '(healer-ul nu le mai atinge; șterge o intrare ca să reactivezi auto-repararea)'
+    );
+    saveUserSelectors(); // adaugă marcajul „locked" + amprenta
+  } else if (pruned) {
+    saveUserSelectors(); // rescrie fără intrările respinse
+  }
 }
 
 /* ---------------- 5) adaptorul pentru healSlot ---------------- */
@@ -1191,11 +1359,12 @@ export function resetAIFinderCache(): void {
  * `candidates()`, umbrește selectorul static din selectors.json la citirea
  * răspunsului. Îl ștergem, ca să rămână selectorul original (bundled/remote).
  * Override-urile publicate de server (how='server') NU se ating — nu sunt
- * ghicite pe DOM-ul curent.
+ * ghicite pe DOM-ul curent. Nici cele scrise manual de utilizator (v2.5.44,
+ * bug #101): „curățenia" automată nu are ce căuta peste ele.
  */
 function dropStaleOverride(providerId: string, slot: SlotName): void {
   const learned = selectors.learned(providerId, slot);
-  if (!learned || learned.how === 'server') return;
+  if (!learned || learned.how === 'server' || learned.locked) return;
   if (!selectors.forget(providerId, slot)) return;
   log(
     'AI finder nu a produs un selector pentru ' +
@@ -1251,6 +1420,11 @@ async function discoverForHealer(
   slot: SlotName,
   echoText?: string
 ): Promise<string | null> {
+  // v2.5.44 (bug #101): slot cu selecție manuală → AI finder-ul nu propune nimic
+  if (selectors.isLocked(providerId, slot)) {
+    healLog('skip ' + providerId + ':' + slot + ' — user-locked');
+    return null;
+  }
   const settings = finderSettings();
   if (!settings.enabled) {
     log('AI finder dezactivat (freekit.aiSelectorFinder=false)');

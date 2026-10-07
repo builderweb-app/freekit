@@ -108,7 +108,10 @@ export async function runDiagnostics(
   const learned = selectors.listLearned();
   lines.push('Auto-repaired selectors (overrides): ' + learned.length);
   for (const l of learned) {
-    lines.push('  - ' + l.provider + '.' + l.slot + ' → ' + l.selector);
+    // v2.5.44 (bug #101): selecțiile scrise manual sunt marcate ca atare
+    lines.push(
+      '  - ' + l.provider + '.' + l.slot + ' → ' + l.selector + (l.locked ? ' [user-locked]' : '')
+    );
   }
 
   // v1.1.0: starea serverelor MCP (active, unelte expuse, erori de pornire)

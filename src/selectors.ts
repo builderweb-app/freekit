@@ -6,6 +6,8 @@ import rawConfig from './selectors.json';
 import { logLine } from './log';
 
 const log = (msg: string) => logLine('selectors', msg);
+/** v2.5.44 (bug #101): mesajele healer-ului, ca să fie ușor de filtrat în Output. */
+const healLog = (msg: string) => logLine('healer', msg);
 
 /* =========================================================================
  * FAZA I — SELECTOARE MODULARE + AUTO-REPARARE
@@ -81,7 +83,7 @@ export interface SelectorConfig {
   providers: Record<string, ProviderConfig>;
 }
 
-export type LearnHow = 'alternative' | 'fingerprint' | 'ai' | 'server';
+export type LearnHow = 'alternative' | 'fingerprint' | 'ai' | 'server' | 'user';
 
 export interface LearnedSelector {
   provider: string;
@@ -92,6 +94,13 @@ export interface LearnedSelector {
   /** v0.9.5: metadate din descoperirea AI (copiate și în selectors-user.json). */
   confidence?: number;
   reasoning?: string;
+  /**
+   * v2.5.44 (bug #101): selector scris/adăugat MANUAL de utilizator în
+   * selectors-user.json. Healer-ul (fingerprint), AI finder-ul și
+   * override-urile de la server NU îl suprascriu și NU îl șterg niciodată —
+   * utilizatorul are ultimul cuvânt pe acel slot. Vezi learn()/learnLocked().
+   */
+  locked?: boolean;
 }
 
 /** Configul "bundled" din selectors.json — baza de comparație + fallback. */
@@ -459,6 +468,13 @@ export class SelectorStore {
     let purged = 0;
     for (const item of saved) {
       if (!(item && item.provider && item.slot && item.selector)) continue;
+      // v2.5.44 (bug #101): intrările scrise manual de utilizator se încarcă
+      // neatinse — nu trec prin filtrele euristice (fragil/generic/blacklist),
+      // altfel o reparație manuală corectă ar fi „curățată" de healer.
+      if (item.locked) {
+        this.overrides.set(this.key(item.provider, item.slot), item);
+        continue;
+      }
       // FIX healer: override-urile care indică disclaimer/cookie/footer
       // (ex: div.capabilities-disclaimer ales greșit de Gemini) sunt eliminate.
       // v0.9.1: + selectori de temă/UI chrome (ex: „Toggle theme” → newChat)
@@ -546,6 +562,50 @@ export class SelectorStore {
   }
 
   /**
+   * v2.5.44 (bug #101): true dacă slotul are un selector scris MANUAL de
+   * utilizator („user-locked"). Healer-ul verifică asta înainte de orice
+   * reparație automată (vezi healSlot()).
+   */
+  isLocked(providerId: string, slot: SlotName): boolean {
+    return this.overrides.get(this.key(providerId, slot))?.locked === true;
+  }
+
+  /** v2.5.44 (bug #101): câte override-uri sunt user-locked (pentru mesaje/log). */
+  lockedCount(): number {
+    let n = 0;
+    for (const entry of this.overrides.values()) if (entry.locked) n++;
+    return n;
+  }
+
+  /**
+   * v2.5.44 (bug #101): înregistrează un selector scris MANUAL de utilizator
+   * (inclusiv migrarea fișierelor vechi, v1). Îl marchează `locked` și NU îl
+   * trece prin filtrele euristice (fragil / prea generic / blacklist / UI
+   * chrome): pe acel slot decizia userului e suverană. Se ignoră doar ce nu
+   * poate fi folosit deloc (gol sau absurd de lung).
+   */
+  learnLocked(providerId: string, slot: SlotName, selector: string): boolean {
+    const sel = String(selector || '').trim();
+    if (!sel || sel.length > 400) return false;
+    const key = this.key(providerId, slot);
+    if (this.overrides.get(key)?.selector === sel) {
+      this.overrides.get(key)!.locked = true;
+      return true;
+    }
+    this.overrides.set(key, {
+      provider: providerId,
+      slot,
+      selector: sel,
+      how: 'user',
+      at: Date.now(),
+      locked: true
+    });
+    log('user-locked selector: ' + key + ' -> ' + sel + ' (healer will not touch it)');
+    void this.persist();
+    return true;
+  }
+
+  /**
    * Marchează selectorul care a funcționat. Dacă e un selector static
    * (primary/alternative) nu avem ce învăța; dacă e unul nou (reparat prin
    * fingerprint) îl salvăm pentru sesiunile viitoare.
@@ -567,6 +627,20 @@ export class SelectorStore {
     how: LearnHow,
     meta?: { confidence?: number; reasoning?: string }
   ): boolean {
+    const key = this.key(providerId, slot);
+    const existing = this.overrides.get(key);
+    // v2.5.44 (bug #101): un selector scris manual de utilizator e „locked" —
+    // NICIUN learn automat (fingerprint/healer, AI finder, server remote) nu-l
+    // suprascrie. Fără asta, reparația automată cădea exact peste selecția
+    // manuală (ex: mistral.newChat → cookie banner / id Radix instabil).
+    if (existing?.locked) {
+      if (existing.selector === selector) return true;
+      healLog(
+        'skip ' + providerId + ':' + slot + ' — user-locked (keeping "' + existing.selector +
+          '", refused "' + selector + '" from ' + how + ')'
+      );
+      return false;
+    }
     if (!isUsableSelector(selector)) {
       log('ignoring overly generic selector for ' + providerId + '.' + slot + ': ' + selector);
       return false;
@@ -583,8 +657,6 @@ export class SelectorStore {
       log('ignoring blocked selector (blacklist/UI chrome) for ' + providerId + '.' + slot + ': ' + selector);
       return false;
     }
-    const key = this.key(providerId, slot);
-    const existing = this.overrides.get(key);
     if (existing && existing.selector === selector) return true;
 
     const entry: LearnedSelector = {
@@ -610,6 +682,15 @@ export class SelectorStore {
   /** Uită un singur override (ex: repararea a fost respinsă de provider). */
   forget(providerId: string, slot: SlotName): boolean {
     const key = this.key(providerId, slot);
+    const existing = this.overrides.get(key);
+    // v2.5.44 (bug #101): curățenia automată (dropStaleOverride, reparații
+    // respinse) nu are voie să șteargă o selecție scrisă manual.
+    if (existing?.locked) {
+      healLog(
+        'skip ' + providerId + ':' + slot + ' — user-locked (keeping "' + existing.selector + '")'
+      );
+      return false;
+    }
     if (!this.overrides.delete(key)) return false;
     log('override removed: ' + key);
     void this.persist();
@@ -619,11 +700,19 @@ export class SelectorStore {
   /** Șterge override-urile (toate, sau doar pentru un provider). */
   reset(providerId?: string): number {
     let removed = 0;
+    let kept = 0;
     for (const [key, entry] of Array.from(this.overrides.entries())) {
       if (providerId && entry.provider !== providerId) continue;
+      // v2.5.44 (bug #101): reselecțiile manuale ale utilizatorului rămân —
+      // altfel „uită selectorii învățați" ar șterge exact reparația lui.
+      if (entry.locked) {
+        kept++;
+        continue;
+      }
       this.overrides.delete(key);
       removed++;
     }
+    if (kept) log('reset: kept ' + kept + ' user-locked selector(s)');
     if (removed) void this.persist();
     return removed;
   }
@@ -1431,6 +1520,12 @@ export async function healSlot(
   slot: SlotName,
   echoText?: string
 ): Promise<string | null> {
+  // v2.5.44 (bug #101): slot cu selector scris manual → healer-ul nu se atinge
+  // de el (nici scanare de fingerprint, nici AI finder).
+  if (selectors.isLocked(providerId, slot)) {
+    healLog('skip ' + providerId + ':' + slot + ' — user-locked');
+    return null;
+  }
   const fp = selectors.fingerprint(providerId, slot);
   if (!fp) {
     log('heal: ' + providerId + '.' + slot + ' has no fingerprint defined');

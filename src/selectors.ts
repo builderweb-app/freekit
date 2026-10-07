@@ -526,6 +526,33 @@ export class SelectorStore {
     }
   }
 
+  /** v2.5.45 (bug #102): providerii cunoscuți în configul activ. */
+  providerIds(): string[] {
+    return Object.keys(this.active.providers);
+  }
+
+  /**
+   * v2.5.45 (bug #102): providerul căruia îi aparține URL-ul dat — folosit de
+   * comanda „Freekit: Re-discover Selectors", care pornește de la tab-ul
+   * deschis în Chrome (nu știe ce provider e activ).
+   */
+  providerIdForUrl(url: string): string | null {
+    let host = '';
+    try {
+      host = new URL(String(url || '')).origin;
+    } catch {
+      return null;
+    }
+    for (const pid of this.providerIds()) {
+      try {
+        if (new URL(this.url(pid)).origin === host) return pid;
+      } catch {
+        /* URL invalid în config — trecem la următorul provider */
+      }
+    }
+    return null;
+  }
+
   slotConfig(providerId: string, slot: SlotName): SlotConfig | undefined {
     return this.config(providerId)[slot];
   }
@@ -1509,6 +1536,87 @@ let aiFinderFn: AIFinderFn | null = null;
 /** Înregistrează fallback-ul AI (null = dezactivat). */
 export function setAIFinder(fn: AIFinderFn | null) {
   aiFinderFn = fn;
+}
+
+/* -------------------------------------------------------------------------
+ * v2.5.45 (bug #102) — DESCOPERIRE PROACTIVĂ + REPARAREA INPUTULUI (hook-uri)
+ *
+ * Aceleași două funcții sunt implementate în ai-selector-finder.ts și
+ * înregistrate din initAISelectorFinder(). Nu le importăm direct din
+ * providers/base.ts: ai-selector-finder importă providers/index (etichetele
+ * providerilor), care importă providers/base — un import invers ar închide un
+ * ciclu de module.
+ * ------------------------------------------------------------------------- */
+
+/** Rezultatul unei descoperiri proactive (bug #102). */
+export interface DiscoveryOutcome {
+  /** S-a rulat analiza AI? (false = nu era momentul / pagina nu e gata) */
+  ran: boolean;
+  /** Ce s-a salvat: „slot=selector" pentru fiecare slot validat. */
+  applied: string[];
+  /** Motivul (pentru log/comandă): poate fi și motivul pentru care nu s-a rulat. */
+  reason: string;
+}
+
+export type ProactiveDiscoveryFn = (
+  page: Page,
+  providerId: string,
+  opts?: { force?: boolean }
+) => Promise<DiscoveryOutcome>;
+
+/** Rezultatul unei reparații țintite a căsuței de chat (bug #102). */
+export interface InputRepairResult {
+  /** Selectorul nou, validat în pagină (null = n-a găsit nimic). */
+  selector: string | null;
+  /** true = au fost epuizate încercările din sesiune → card în chat. */
+  gaveUp: boolean;
+  reason: string;
+}
+
+export type InputRepairFn = (page: Page, providerId: string) => Promise<InputRepairResult>;
+
+/** v2.5.45 (bug #102): pagina nu e gata (login/CAPTCHA/chat gol). */
+export type NotReadyFn = (providerId: string, reason: string) => void;
+
+let proactiveDiscoveryFn: ProactiveDiscoveryFn | null = null;
+let inputRepairFn: InputRepairFn | null = null;
+let notReadyFn: NotReadyFn | null = null;
+
+/** Înregistrează descoperirea proactivă (null = dezactivată). */
+export function setProactiveDiscovery(fn: ProactiveDiscoveryFn | null) {
+  proactiveDiscoveryFn = fn;
+}
+
+/** Înregistrează repararea țintită a inputului (null = dezactivată). */
+export function setInputRepair(fn: InputRepairFn | null) {
+  inputRepairFn = fn;
+}
+
+/** Înregistrează notificarea „pagina nu e gata" (null = dezactivată). */
+export function setNotReadyNotifier(fn: NotReadyFn | null) {
+  notReadyFn = fn;
+}
+
+/** Descoperirea proactivă înregistrată (sau null). */
+export function proactiveDiscovery(): ProactiveDiscoveryFn | null {
+  return proactiveDiscoveryFn;
+}
+
+/** Repararea de input înregistrată (sau null). */
+export function inputRepair(): InputRepairFn | null {
+  return inputRepairFn;
+}
+
+/**
+ * Fix 2 (bug #102): pagina nu e gata (login/CAPTCHA/chat gol) — AI finder-ul
+ * ține minte că descoperirea e datorată și o reia la următoarea conectare.
+ */
+export function notifyNotReady(providerId: string, reason: string): void {
+  try {
+    notReadyFn?.(providerId, reason);
+  } catch {
+    /* fail-open: semnalarea nu are voie să strice fluxul de conectare */
+  }
 }
 
 /** Reparare prin fingerprint: caută elementul după semnale "moi".

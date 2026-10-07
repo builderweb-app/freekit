@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.5.44",
+  "version": "2.5.45",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -109,6 +109,11 @@
         "command": "freekit.updateSelectors",
         "title": "Freekit: Update Selectors",
         "icon": "$(cloud-download)"
+      },
+      {
+        "command": "freekit.rediscoverSelectors",
+        "title": "Freekit: Re-discover Selectors",
+        "icon": "$(search)"
       },
       {
         "command": "freekit.mcpManage",

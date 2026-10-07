@@ -6,7 +6,7 @@ import { configInfo, selectors, selectorsUrlFromSettings } from './selectors';
 import { initLogChannel, logLine } from './log';
 import { runDiagnostics } from './diagnostics';
 import { checkAndApplyRemote, shouldAutoCheck } from './remoteSelectors';
-import { initAISelectorFinder } from './ai-selector-finder';
+import { initAISelectorFinder, rediscoverSelectors } from './ai-selector-finder';
 import { mcp } from './mcp/manager';
 import { setupWhisperAssets } from './stt';
 import { stopDevServers } from './devServers';
@@ -22,7 +22,7 @@ import {
   workspaceRoot
 } from './indexer';
 import { ollamaBaseUrl, OLLAMA_DOWNLOAD_URL } from './providers/ollama';
-import { getProviderStatus, ollamaInstallState } from './providers';
+import { getProviderStatus, ollamaInstallState, PROVIDER_LABELS } from './providers';
 import { ReportingService } from './reporting';
 import { isRestricted, promptForTrust, showRestrictedNotification } from './trust';
 
@@ -393,6 +393,55 @@ export async function activate(ctx: vscode.ExtensionContext) {
           'Freekit: updating the selectors failed — ' + (r.message ?? 'unknown error')
         );
       }
+    })
+  );
+
+  // v2.5.45 (bug #102): re-descoperirea manuală a selectorilor (Fix 5) —
+  // ocolește cache-ul de 7 zile. Pornește de la tab-ul deschis în Chrome:
+  // providerul e dedus din URL (nu există o „selecție activă" în extensie).
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand('freekit.rediscoverSelectors', async () => {
+      if (isRestricted()) {
+        showRestrictedNotification(true);
+        return;
+      }
+      const page = await browser.ensureOpen().catch((e: any) => {
+        vscode.window.showErrorMessage(
+          'Freekit: could not open the browser — ' + (e?.message ?? String(e))
+        );
+        return null;
+      });
+      if (!page) return;
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'Freekit: discovering selectors for the provider open in Chrome…'
+        },
+        async () => {
+          const { providerId, outcome } = await rediscoverSelectors(page);
+          if (!providerId) {
+            vscode.window.showWarningMessage(
+              'Freekit: no provider chat is open in the Chrome window — open one ' +
+                '(DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) and run the command again.'
+            );
+            return;
+          }
+          const label = PROVIDER_LABELS[providerId] || providerId;
+          if (outcome?.applied.length) {
+            vscode.window.showInformationMessage(
+              'Freekit: ' + label + ' → ' + outcome.applied.join(', ') + ' (saved as auto).'
+            );
+          } else {
+            vscode.window.showWarningMessage(
+              'Freekit: no usable selector was found for ' +
+                label +
+                ' (' +
+                (outcome?.reason ?? 'discovery did not run') +
+                '). Check the “Freekit” output for details.'
+            );
+          }
+        }
+      );
     })
   );
 

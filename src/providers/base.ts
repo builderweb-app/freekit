@@ -6,6 +6,9 @@ import {
   getLastResponseText,
   healSlot,
   inputAvailable,
+  inputRepair,
+  notifyNotReady,
+  proactiveDiscovery,
   resolveSlot,
   selectors
 } from '../selectors';
@@ -169,7 +172,14 @@ export async function findInput(
 ): Promise<Locator> {
   const found = await resolveSlot(page, providerId, 'input', timeoutMs);
   if (found) {
-    log(label + ': input via ' + found.selector);
+    log(
+      label +
+        ': input via ' +
+        found.selector +
+        // v2.5.45 (bug #102): inputul care a trunchiat un mesaj în sesiunea
+        // curentă rămâne „suspect" până se dovedește că scrie corect.
+        (isInputSuspect(providerId) ? ' (suspect — truncated a message earlier)' : '')
+    );
     return found.locator;
   }
   // v2.0.4: inputul lipsește — dacă pagina e de fapt una de login, semnalăm
@@ -178,8 +188,15 @@ export async function findInput(
   if (await detectLoginPage(page)) {
     const url = page.url();
     log(label + ': input missing, login page detected (' + url + ')');
+    // v2.5.45 (bug #102): descoperirea proactivă nu se poate face pe pagina de
+    // login — o lăsăm „în așteptare" și se reia singură după autentificare
+    // (chatView reia open() când login-ul reușește).
+    notifyNotReady(providerId, 'login page?');
     throw loginError(providerId, url);
   }
+  // v2.5.45 (bug #102): CAPTCHA / chat gol = tot „nu e gata", nu „selector stricat".
+  if (await detectCaptcha(page)) notifyNotReady(providerId, 'CAPTCHA challenge');
+  notifyNotReady(providerId, 'no chat input in the DOM');
   throw new Error(
     'I could not find the input box for ' +
       label +
@@ -187,6 +204,36 @@ export async function findInput(
       selectors.candidates(providerId, 'input').join(', ') +
       '). Are you logged in to Chrome with the Freekit profile?'
   );
+}
+
+/* =========================================================================
+ * v2.5.45 (bug #102) — DESCOPERIRE PROACTIVĂ LA CONECTARE
+ * AI finder-ul rula doar reactiv (când un slot cădea deja), deci pe providerii
+ * noi inputul se trunchia înainte ca cineva să observe. Acum, imediat după ce
+ * pagina s-a încărcat și sesiunea e autentificată, primește o șansă să
+ * descopere TOATE sloturile dintr-o dată (o dată per provider la 7 zile — vezi
+ * proactiveDiscover()). Best-effort: fără hook sau cu eroare, fluxul continuă.
+ * ========================================================================= */
+
+async function runProactiveDiscovery(
+  page: Page,
+  providerId: string,
+  label: string
+): Promise<void> {
+  const discover = proactiveDiscovery();
+  if (!discover) return;
+  try {
+    const outcome = await discover(page, providerId);
+    if (outcome.ran) {
+      log(
+        label +
+          ': proactive discovery — ' +
+          (outcome.applied.length ? 'saved ' + outcome.applied.join(', ') : outcome.reason)
+      );
+    }
+  } catch (e: any) {
+    log(label + ': proactive discovery failed — ' + (e?.message ?? String(e)));
+  }
 }
 
 /* =========================================================================
@@ -556,7 +603,13 @@ export async function openProvider(page: Page, providerId: string, label: string
   if (current.startsWith(host)) {
     // v1.8.0: popup-uri de consimțământ care pot bloca inputul
     await autoAcceptPopups(page, { log }).catch(() => []);
-    if (await inputAvailable(page, providerId, 20000)) return;
+    if (await inputAvailable(page, providerId, 20000)) {
+      // v2.5.45 (bug #102): pagina e deja încărcată și logată — descoperirea
+      // proactivă pornește și pe această ramură (altfel ar fi sărită exact la
+      // reconectare, unde selectors-user.json se poate completa).
+      await runProactiveDiscovery(page, providerId, label);
+      return;
+    }
     log(label + ': input not found on ' + current + ', navigating to ' + url);
   }
 
@@ -566,9 +619,13 @@ export async function openProvider(page: Page, providerId: string, label: string
   // FIX v2: dacă aterizăm tot pe login (ex: Claude fără sesiune), nu mai
   // lăsăm healer-ul să rătăcească prin pagina de login (#email).
   if (isLoginUrl(page.url())) {
+    notifyNotReady(providerId, 'login page?');
     throw loginError(providerId, page.url());
   }
   await findInput(page, providerId, label, 60000);
+  // v2.5.45 (bug #102): pagină încărcată + sesiune autentificată → descoperire
+  // proactivă (Fix 1), cu cache de 7 zile (Fix 5).
+  await runProactiveDiscovery(page, providerId, label);
 }
 
 /** Chat nou: buton dedicat -> auto-reparare (DOAR dacă butonul nu mai există) -> navigare. */
@@ -684,9 +741,15 @@ export async function resumeConversation(
     await page.goto(url, { waitUntil: 'domcontentloaded' });
     await autoAcceptPopups(page, { log }).catch(() => []);
     // v0.9.1: sesiunea poate expira între mesaje — același flux de login ca la open()
-    if (isLoginUrl(page.url())) throw loginError(providerId, page.url());
+    if (isLoginUrl(page.url())) {
+      notifyNotReady(providerId, 'login page?');
+      throw loginError(providerId, page.url());
+    }
   }
   await findInput(page, providerId, label, 30000);
+  // v2.5.45 (bug #102): URL schimbat = chat real (nu pagina de login) →
+  // descoperirea proactivă rămasă în așteptare se reia aici (Fix 2).
+  await runProactiveDiscovery(page, providerId, label);
 }
 
 /** Apasă butonul de Stop al site-ului (best-effort, folosit la anulare). */
@@ -756,19 +819,74 @@ export async function clearComposer(
 }
 
 /**
+ * v2.5.45 (bug #102): providerii la care composerul a trunchiat un mesaj în
+ * sesiunea curentă — inputul lor rămâne „suspect" (se vede în log la
+ * următoarea folosire), iar AI finder-ul e chemat SPECIFIC pe el, imediat.
+ */
+const suspectInput = new Set<string>();
+
+/** true dacă în sesiunea curentă composerul a trunchiat un mesaj la providerul dat. */
+export function isInputSuspect(providerId: string): boolean {
+  return suspectInput.has(providerId);
+}
+
+/**
+ * v2.5.45 (bug #102): cere AI finder-ului un input nou pentru sesiunea curentă
+ * (fără să așteptăm ca alt slot să cadă) și întoarce selectorul găsit, dacă a
+ * fost validat în pagină. Implementarea stă în ai-selector-finder.ts și vine
+ * prin hook (importul direct ar închide un ciclu de module).
+ */
+async function repairInput(
+  page: Page,
+  providerId: string,
+  label: string,
+  onNotice?: (text: string) => void
+): Promise<string | null> {
+  const repair = inputRepair();
+  if (!repair) return null;
+  try {
+    const r = await repair(page, providerId);
+    if (r.selector) {
+      log(label + ': input repaired by the AI finder -> ' + r.selector);
+      return r.selector;
+    }
+    log(label + ': input repair found nothing — ' + r.reason);
+    if (r.gaveUp) {
+      onNotice?.(
+        '⚠️ ' + label + ': nu pot găsi input-ul de chat. Show Browser → DevTools → fix manual.'
+      );
+    }
+    return null;
+  } catch (e: any) {
+    log(label + ': input repair failed — ' + (e?.message ?? String(e)));
+    return null;
+  }
+}
+
+/**
  * Verifică înainte de Enter că în composer e exact `message`; la nepotrivire
  * (mesaj trunchiat, paste pierdut) golește și relipește mesajul dintr-o bucată.
+ *
+ * v2.5.45 (bug #102): dacă nici după relipire composerul nu conține mesajul
+ * întreg, inputul e marcat „suspect" pentru sesiunea curentă și AI finder-ul
+ * caută IMEDIAT un altul (doar pe input — nu așteptăm ca alt slot să cadă), ca
+ * mesajul să poată fi retrimis în căsuța corectă. Întoarce locatorul în care se
+ * află mesajul (cel primit sau cel reparat).
  */
 export async function ensureComposerHasMessage(
   page: Page,
+  providerId: string,
   input: Locator,
   message: string,
   label: string,
   onNotice?: (text: string) => void
-): Promise<void> {
+): Promise<Locator> {
   const actual = await readComposerText(input);
-  if (actual === null) return; // nu putem verifica — mergem ca înainte
-  if (composerTextMatches(actual, message)) return;
+  if (actual === null) return input; // nu putem verifica — mergem ca înainte
+  if (composerTextMatches(actual, message)) {
+    suspectInput.delete(providerId); // scrie corect → inputul nu mai e suspect
+    return input;
+  }
 
   log(
     label + ': composer mismatch — ' + actual.length + '/' + message.length +
@@ -782,13 +900,35 @@ export async function ensureComposerHasMessage(
   await page.keyboard.insertText(message);
   await sleep(200);
   const after = await readComposerText(input);
-  if (after !== null && !composerTextMatches(after, message)) {
-    log(
-      label + ': composer STILL mismatched after re-paste (' +
-        after.length + '/' + message.length + ')'
-    );
-  } else {
+  if (after !== null && composerTextMatches(after, message)) {
     log(label + ': composer verified after re-paste');
+    return input;
+  }
+
+  log(
+    label + ': composer STILL mismatched after re-paste (' +
+      (after === null ? 'unreadable' : after.length + '/' + message.length) + ')'
+  );
+  suspectInput.add(providerId);
+  const repaired = await repairInput(page, providerId, label, onNotice);
+  if (!repaired) return input;
+
+  const replacement = page.locator(repaired).first();
+  try {
+    await humanClickButton(page, replacement, 15000);
+    await clearComposer(page, replacement, label);
+    await page.keyboard.insertText(message);
+    await sleep(200);
+    const retry = await readComposerText(replacement);
+    if (retry !== null && !composerTextMatches(retry, message)) {
+      log(label + ': composer STILL mismatched with the repaired input — sending what is in the box');
+    } else {
+      log(label + ': composer verified with the repaired input (' + repaired + ')');
+    }
+    return replacement;
+  } catch (e: any) {
+    log(label + ': using the repaired input failed — ' + (e?.message ?? String(e)));
+    return input;
   }
 }
 
@@ -1006,10 +1146,20 @@ export async function sendAndWait(
 
     // v2.5.14 (bug #39): verificăm că în composer e EXACT mesajul, înainte de
     // Enter — altfel (trunchiere/draft/paste pierdut) îl relipim dintr-o bucată.
-    await ensureComposerHasMessage(page, box, text, label, cfg.onNotice);
+    // v2.5.45 (bug #102): întoarce căsuța în care se află mesajul — poate fi una
+    // reparată de AI finder după un composer trunchiat (Enter merge în ea, iar
+    // re-trimiterea de la 25s folosește același locator).
+    const target = await ensureComposerHasMessage(
+      page,
+      providerId,
+      box,
+      text,
+      label,
+      cfg.onNotice
+    );
 
     await page.keyboard.press('Enter');
-    return box;
+    return target;
   };
 
   let input = await findInput(page, providerId, label, 15000);

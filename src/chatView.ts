@@ -2303,7 +2303,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               this.scopeTsconfigRel(root)
             ) +
             // v2.5.32 FIX (bug #78): rm/ls/cp/mv/cat/touch/mkdir -p nu există pe Windows
-            buildUnixCommandHint(toolCall.args.command);
+            // v2.5.38 (bug #89): doar dacă NU a fost tradusă automat (altfel eșecul
+            // vine din altă cauză, iar hint-ul „comandă Unix" ar induce în eroare).
+            (result.commandRun?.translatedFrom
+              ? ''
+              : buildUnixCommandHint(toolCall.args.command));
           if (commandHints) {
             log('command error context added for: ' + toolCall.args.command);
           }
@@ -2335,6 +2339,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // comenzile eșuate (eroarea completă e deja în TOOL_ERROR, din tools.ts)
         const cr = result.commandRun;
         if (cr) {
+          // v2.5.38 (bug #89): când comanda a fost tradusă automat (Unix → Windows),
+          // o menționăm în cardul de auto-reparare — utilizatorul vede exact ce a rulat.
+          const trFrom = cr.translatedFrom
+            ? ' (⚙️ auto-translated Unix → Windows: "' + cr.translatedFrom + '")'
+            : '';
           if (cr.blocked) {
             this.post(
               'heal',
@@ -2347,7 +2356,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               '⟳ Auto-healing ' + cr.attempt + '/' + cr.max + ': "' + cr.command +
                 '" failed (exit ' + cr.exitCode + ', ' +
                 (cr.duration / 1000).toFixed(1) +
-                's). Sending the full error to the AI: analyze → fix → re-run.'
+                's)' + trFrom + '. Sending the full error to the AI: analyze → fix → re-run.'
             );
           } else if (cr.attempt > 1) {
             this.post(

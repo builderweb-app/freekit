@@ -25,6 +25,7 @@ import {
   truncateContent
 } from './payload';
 import { RESTRICTED_TOOL_ERROR } from './trust';
+import { translateUnixCommandToWindows } from './unixTranslate';
 import { commandErrorFiles } from './verifier';
 import { logLine } from './log';
 import {
@@ -96,6 +97,8 @@ export interface CommandRunInfo {
   final: boolean;
   /** true = comanda NU a fost executată (încercările erau deja epuizate). */
   blocked?: boolean;
+  /** v2.5.38 (bug #89): comanda Unix a modelului, când cea executată e tradusă. */
+  translatedFrom?: string;
 }
 
 // contoare de încercări per comandă (normalizată), resetate per mesaj
@@ -174,10 +177,15 @@ function formatCommandOutcome(
   res: CommandResult,
   attempt: number,
   /** v1.7.4: notă suplimentară (ex. dev server oprit imediat după pornire). */
-  note?: string
+  note?: string,
+  /** v2.5.38 (bug #89): comanda Unix originală, când cea executată e tradusă. */
+  translatedFrom?: string
 ): ToolResult {
   const seconds = (res.duration / 1000).toFixed(1);
   const attemptTag = 'attempt ' + attempt + '/' + MAX_COMMAND_ATTEMPTS;
+  const trNote = translatedFrom
+    ? '(⚙️ auto-translated from Unix: ' + translatedFrom + ')'
+    : '';
 
   if (res.ok) {
     const note = attempt > 1 ? ' — ✓ fixed after ' + attempt + ' attempts' : '';
@@ -187,6 +195,7 @@ function formatCommandOutcome(
       // 20k caractere către web app (răspuns lent la toate modelele).
       result: clipPayload(
         '✓ ' + toolLabel + ': ' + command + ' (exit 0, ' + seconds + 's' + note + ')\n' +
+          (trNote ? trNote + '\n' : '') +
           res.combined,
         MAX_CHARS_TOTAL
       ),
@@ -196,7 +205,8 @@ function formatCommandOutcome(
         max: MAX_COMMAND_ATTEMPTS,
         exitCode: 0,
         duration: res.duration,
-        final: false
+        final: false,
+        ...(translatedFrom ? { translatedFrom } : {})
       }
     };
   }
@@ -243,6 +253,7 @@ function formatCommandOutcome(
       'COMMAND FAILED — exit ' + res.exitCode +
       (res.exitCode === 124 ? ' [TIMEOUT — the process was stopped]' : '') +
       ', ' + seconds + 's (' + attemptTag + ')\n\n' +
+      (trNote ? trNote + '\n\n' : '') +
       (note ? note + '\n\n' : '') +
       directive + '\n\n' + parts.join('\n\n'),
       MAX_CHARS_TOTAL
@@ -253,7 +264,8 @@ function formatCommandOutcome(
       max: MAX_COMMAND_ATTEMPTS,
       exitCode: res.exitCode,
       duration: res.duration,
-      final
+      final,
+      ...(translatedFrom ? { translatedFrom } : {})
     }
   };
 }
@@ -617,6 +629,10 @@ export function buildRootTsconfigHint(
  * aceeași comandă până se termină încercările. La eșecul unei `run_command`
  * adăugăm un hint explicit cu echivalentele Windows (sau Node), ca modelul să
  * treacă direct la varianta corectă.
+ * v2.5.38 (bug #89): comenzile simple sunt acum TRADUSE automat înainte de
+ * execuție (src/unixTranslate.ts), deci hint-ul rămâne doar pentru cazurile
+ * neacoperite (pipe, redirect, wildcard, flaguri necunoscute) — acolo comanda
+ * ajunge la shell neschimbată și eșecul chiar vine din „comandă Unix".
  * ========================================================================= */
 
 /** Comenzi care NU există în cmd/PowerShell (echivalente greșite). */
@@ -1624,24 +1640,40 @@ export async function executeTool(
 
       case 'run_command': {
         // v0.6.0: dacă limita de auto-reparare e atinsă, comanda nu mai rulează
+        // (cheia e comanda ORIGINALĂ a modelului, tradusă sau nu — vezi runCommand)
         if (isCommandBlocked(normCommandKey(call.args.command))) {
           return blockedCommandResult(call.args.command);
         }
+        // v2.5.38 FIX (bug #89): traducere automată Unix → Windows ÎNAINTE de
+        // aprobare (utilizatorul vede exact ce se execută) și de execuție.
+        const tr = translateUnixCommandToWindows(call.args.command, {
+          cwd: workspaceRoot
+        });
+        if (tr.translated) {
+          log('[run] auto-translated Unix to Windows: ' + tr.notes.join('; '));
+        }
+        const execCommand = tr.command;
         // v1.8.1: comenzile long-running (dev/serve/start/watch) pornesc
         // vizibil, într-un terminal VS Code dedicat (nu mai rămân invizibile)
-        const lrNote = isLongRunningCommand(call.args.command)
+        const lrNote = isLongRunningCommand(execCommand)
           ? '\n(long-running command — development server: starts in a VISIBLE VS Code TERMINAL; you immediately get the URL + the first seconds of output)'
+          : '';
+        const trNote = tr.translated
+          ? '\n\n⚙️ Auto-translated for Windows: ' + execCommand
           : '';
         if (
           !(await approve(
             'run_command',
             call.args.command,
-            call.args.command + lrNote
+            call.args.command + trNote + lrNote
           ))
         ) {
           return { ok: false, error: 'User rejected' };
         }
-        return await runCommand(call.args.command);
+        return await runCommand(
+          execCommand,
+          tr.translated ? call.args.command : undefined
+        );
       }
 
       case 'search_files':
@@ -2024,9 +2056,16 @@ async function listFiles(rel: string, root: string): Promise<ToolResult> {
   };
 }
 
-async function runCommand(command: string): Promise<ToolResult> {
+async function runCommand(
+  command: string,
+  /** v2.5.38 (bug #89): comanda scrisă de model, când cea executată e tradusă. */
+  translatedFrom?: string
+): Promise<ToolResult> {
   // v0.6.0: fiecare rulare a unei comenzi consumă o încercare de auto-reparare
-  const key = normCommandKey(command);
+  // v2.5.38: contorul rămâne pe comanda ORIGINALĂ a modelului (aceeași cheie pe
+  // care o verifică `isCommandBlocked`), ca anti-bucla să funcționeze și după
+  // traducerea automată (rm → del).
+  const key = normCommandKey(translatedFrom ?? command);
   const attempt = beginCommandAttempt(key);
   const started = Date.now();
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -2057,7 +2096,9 @@ async function runCommand(command: string): Promise<ToolResult> {
         combined: combinedOutput(String(stdout ?? ''), String(stderr ?? '')),
         duration: Date.now() - started
       },
-      attempt
+      attempt,
+      undefined,
+      translatedFrom
     );
   } catch (e: any) {
     // v0.6.0: eroarea COMPLETĂ (stdout + stderr + exit code + durată) — nu
@@ -2079,7 +2120,9 @@ async function runCommand(command: string): Promise<ToolResult> {
         combined: combinedOutput(stdout, stderr) || e?.message || String(e),
         duration: Date.now() - started
       },
-      attempt
+      attempt,
+      undefined,
+      translatedFrom
     );
   }
 }

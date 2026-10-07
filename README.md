@@ -182,6 +182,7 @@ Additional safeguards:
 | `freekit.whisperModelPath` | *(empty)* | Path to the Whisper ggml model (e.g. `ggml-base.bin`); empty = auto-detect |
 | `freekit.whisperTimeoutSeconds` | `180` | Timeout for one Whisper transcription (10–1200 s) |
 | `freekit.aiSelectorFinder` | `true` | AI selector-discovery fallback: when the classic healer finds nothing, a cleaned DOM snapshot is analyzed by local Ollama; validated selectors are saved to `selectors-user.json` |
+| `freekit.aiFinderModel` | `auto` | Ollama model for the AI selector finder (independent of `freekit.ollamaModel`). `auto` = best installed chat model (`gemma3:12b` when available, else `qwen2.5-coder` → `qwen-coder` → `qwen` → `llama` → `mistral` → any other); embeddings models are never used |
 | `freekit.aiFinderTimeoutSeconds` | `120` | Timeout (5–300 s) for the AI selector analysis; on expiry the stale locally learned selector is dropped and the static `selectors.json` one is used again |
 | `freekit.mcpEnabled` | `true` | Start the configured MCP servers and expose their tools to the AI (`mcp_<server>_<tool>`) |
 | `freekit.mcpServers` | `{}` | MCP servers to launch (stdio), e.g. `{"filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]}}` |

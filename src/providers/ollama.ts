@@ -268,6 +268,15 @@ export async function pullOllamaModel(
  * (localhost:11434), FĂRĂ browser / Playwright.
  * `page` e ignorat complet (chatView sare peste Chrome când vede `local`).
  */
+/** v2.5.40 (bug #93): opțiuni de construcție pentru providerul local. */
+export interface OllamaProviderOptions {
+  /**
+   * Model explicit (AI selector finder, care își alege singur modelul).
+   * Gol/absent = `freekit.ollamaModel`, ca până acum.
+   */
+  model?: string;
+}
+
 export class OllamaProvider implements AIProvider {
   readonly name = 'ollama';
   /** v1.7.1: thinking-ul modelului (câmpul `thinking` din API) → callback chatView. */
@@ -281,8 +290,21 @@ export class OllamaProvider implements AIProvider {
 
   private history: Array<{ role: string; content: string }> = [];
 
-  /** v2.5.11: modelul local configurat (freekit.ollamaModel). */
+  /** v2.5.40 (bug #93): model explicit, dacă a fost cerut la construcție. */
+  private readonly modelOverride?: string;
+
+  constructor(opts: OllamaProviderOptions = {}) {
+    this.modelOverride = String(opts.model ?? '').trim() || undefined;
+  }
+
+  /**
+   * v2.5.11: modelul local configurat (freekit.ollamaModel).
+   * v2.5.40 (bug #93): override-ul de la construcție are prioritate (folosit de
+   * AI selector finder, care își rezolvă singur modelul — vezi
+   * `resolveAiFinderModel`).
+   */
   private configuredModel(): string {
+    if (this.modelOverride) return this.modelOverride;
     return vscode.workspace
       .getConfiguration('freekit')
       .get<string>('ollamaModel', 'qwen2.5-coder:7b');

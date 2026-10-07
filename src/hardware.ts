@@ -865,7 +865,8 @@ export function fitsThisMachine(model: string, hw: HardwareInfo): boolean {
  * folosite doar de indexul semantic (`freekit.semanticIndex.model`).
  */
 export function isEmbeddingModel(model: string): boolean {
-  return /embed|nomic/i.test(String(model ?? ''));
+  // v2.5.40 (bug #93): `bge-*` (BAAI General Embedding) lipsea din listă.
+  return /embed|nomic|bge/i.test(String(model ?? ''));
 }
 
 /** Sub pragul ăsta modelul scrie prost cod real (improvizează, trunchiază). */

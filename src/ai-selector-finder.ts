@@ -2,8 +2,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { Page } from 'playwright';
 import { logLine } from './log';
-import { OllamaProvider } from './providers/ollama';
+import { listOllamaModelsDetailed, OllamaProvider } from './providers/ollama';
 import { PROVIDER_LABELS } from './providers';
+import { AI_FINDER_MODEL_AUTO, isAutoAiFinderModel, pickAiFinderModel } from './aiFinderModel';
+import { isEmbeddingModel } from './hardware';
 import { getLastResponseText, promoPhraseHit, selectors, setAIFinder, SLOTS, SlotName } from './selectors';
 
 const log = (msg: string) => logLine('ai-finder', msg);
@@ -75,6 +77,70 @@ function finderSettings(): FinderSettings {
   } catch {
     return { enabled: true, timeoutMs: DEFAULT_AI_FINDER_TIMEOUT_SECONDS * 1000 };
   }
+}
+
+/* ------------------- modelul Ollama pentru AI finder ------------------- */
+
+/** v2.5.40 (bug #93): valoarea setării `freekit.aiFinderModel`. */
+function aiFinderModelSetting(): string {
+  try {
+    const v = require('vscode') as typeof import('vscode');
+    const raw = v.workspace
+      .getConfiguration('freekit')
+      .get<string>('aiFinderModel', AI_FINDER_MODEL_AUTO);
+    return String(raw ?? '').trim();
+  } catch {
+    return AI_FINDER_MODEL_AUTO;
+  }
+}
+
+/**
+ * v2.5.40 (bug #93) — rezolvă modelul folosit de AI selector finder.
+ *
+ * Înainte finder-ul folosea `freekit.ollamaModel`; dacă acolo era un model
+ * neinstalat (ex. `gemma3:12b`), analiza nu mai pornea deloc deși pe mașină
+ * existau modele utilizabile. Acum:
+ *   - `auto` (implicit) → `gemma3:12b` dacă e instalat, altfel primul model de
+ *     chat după preferință (qwen2.5-coder > qwen-coder > qwen > llama >
+ *     mistral > orice altul), embeddings excluse;
+ *   - model explicit instalat → îl folosim;
+ *   - model explicit lipsă, sau doar embeddings instalate → warning clar în log
+ *     și `null` (fail-open, ca înainte, dar fără eroarea înșelătoare de 404).
+ */
+export async function resolveAiFinderModel(): Promise<string | null> {
+  const requested = aiFinderModelSetting();
+  const installed = (await listOllamaModelsDetailed()).map((m) => m.name);
+
+  if (!isAutoAiFinderModel(requested)) {
+    // Lista goală = Ollama oprit: lăsăm providerul să dea eroarea lui tipizată
+    // („Ollama down"), nu una de model lipsă.
+    if (installed.length && !installed.includes(requested)) {
+      log(
+        'model "' +
+          requested +
+          '" (freekit.aiFinderModel) is not installed — installed: ' +
+          installed.join(', ')
+      );
+      return null;
+    }
+    log('using model ' + requested + ' (freekit.aiFinderModel)');
+    return requested;
+  }
+
+  const choice = pickAiFinderModel(installed);
+  if (!choice) {
+    const embeddings = installed.filter((m) => isEmbeddingModel(m));
+    log(
+      'no chat model available for the AI analysis' +
+        (embeddings.length
+          ? ' — only embeddings installed: ' + embeddings.join(', ')
+          : ' — installed: ' + (installed.join(', ') || 'none')) +
+        '; install one (e.g. `ollama pull qwen2.5-coder:7b`) or set freekit.aiFinderModel'
+    );
+    return null;
+  }
+  log('using model ' + choice.model + ' (' + choice.reason + ')');
+  return choice.model;
 }
 
 /* ---------------- 1) snapshot DOM curățat ---------------- */
@@ -235,6 +301,11 @@ export async function findSelectorsWithAI(
 ): Promise<DiscoveredSelectors | null> {
   log('caut selectori cu AI pentru ' + providerName + ' (lipsesc: ' + missingSlots.join(',') + ')');
 
+  // v2.5.40 (bug #93): modelul se rezolvă ÎNAINTE de capturarea DOM-ului — cu
+  // doar embeddings instalate nu mai plătim snapshot-ul degeaba.
+  const model = await resolveAiFinderModel();
+  if (!model) return null;
+
   let url = '';
   try {
     url = page.url();
@@ -253,7 +324,7 @@ export async function findSelectorsWithAI(
 
   const prompt = buildPrompt(providerName, url, missingSlots, dom);
   const settings = finderSettings();
-  const ollama = new OllamaProvider();
+  const ollama = new OllamaProvider({ model });
   const controller = new AbortController();
   let timer: NodeJS.Timeout | undefined;
   try {

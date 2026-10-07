@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.5.39",
+  "version": "2.5.40",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -192,7 +192,12 @@
         "freekit.aiSelectorFinder": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "When the classic selector healer fails completely (no valid candidate), sends a cleaned DOM snapshot to **local Ollama** (`freekit.ollamaModel`) to discover new selectors. Proposed selectors are validated in the real page, used immediately and saved to `selectors-user.json` (globalStorage). Requires Ollama running; any failure does not block the normal flow."
+          "markdownDescription": "When the classic selector healer fails completely (no valid candidate), sends a cleaned DOM snapshot to **local Ollama** (`freekit.aiFinderModel`) to discover new selectors. Proposed selectors are validated in the real page, used immediately and saved to `selectors-user.json` (globalStorage). Requires Ollama running; any failure does not block the normal flow."
+        },
+        "freekit.aiFinderModel": {
+          "type": "string",
+          "default": "auto",
+          "markdownDescription": "Ollama model used by the **AI selector finder** (independent of `freekit.ollamaModel`). `auto` = the best installed chat model: `gemma3:12b` when available, otherwise the first match by preference (`qwen2.5-coder` → `qwen-coder` → `qwen` → `llama` → `mistral` → any other). Embeddings models (`nomic-embed-*`, `bge-*`, …) are never used. Set a specific name (e.g. `qwen2.5-coder:7b`) to force one; when it is not installed the analysis is skipped with a warning in the log."
         },
         "freekit.aiFinderTimeoutSeconds": {
           "type": "number",

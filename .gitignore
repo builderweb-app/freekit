@@ -13,3 +13,5 @@ chrome-profile/
 .DS_Store
 Thumbs.db
 *.log
+
+bootcamp-test*/

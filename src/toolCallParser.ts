@@ -15,9 +15,11 @@ import { mapToolCallAliases, queueAliasLog } from './tsAlias';
 const pendingLogs: string[] = [];
 const loggedMessages = new Set<string>();
 
-function queueParserLog(msg: string): void {
-  if (loggedMessages.has(msg)) return;
-  loggedMessages.add(msg);
+function queueParserLog(msg: string, dedupe = true): void {
+  if (dedupe) {
+    if (loggedMessages.has(msg)) return;
+    loggedMessages.add(msg);
+  }
   pendingLogs.push(msg);
 }
 
@@ -399,7 +401,11 @@ function normalizeToolCall(parsed: any): ToolCall | null {
       return { tool: name, args: normalizeWriteFilesArgs(name, rest) };
     }
 
-    return { tool: parsed.tool, args: {} };
+    // v2.5.39 (bug #90): args-urile pot veni „pe verticală" — cheile de args stau
+    // direct lângă „tool": `{"tool":"run_command","command":"rm x"}` sau
+    // `{"tool":"write_files","files":[…]}` (înainte args ieșea gol ⇒ respins).
+    const { tool, ...rest } = parsed;
+    return { tool, args: normalizeWriteFilesArgs(tool, rest) };
   }
 
   // v2.5.26 (bug #51): promptul vorbește de „actions", deci modelele trimit
@@ -710,10 +716,118 @@ export function looksLikeMarkerToolCallAttempt(text: string): boolean {
     });
 }
 
+/* =========================================================================
+ * v2.5.39 FIX (bug #90) — recuperarea tool call-urilor „malformed"
+ * În testul v2.5.37 (Gemini) pașii 1–8 au mers, dar la pasul 9 modelul a
+ * trimis `TOOL: run_command` urmat de JSON-ul pe linia următoare:
+ *
+ *     TOOL: run_command
+ *     {"command": "rm bootcamp-test2/test.ts"}
+ *
+ * Markerul era recunoscut doar pentru uneltele cu conținut liber (write_file /
+ * edit_file / write_files), iar JSON-ul fără cheia „tool" era respins ⇒ apelul
+ * PERFECT VALID ajungea la auto-retry, modelul renunța, iar cleanup-ul nu se
+ * mai făcea (raport final fals „10/10"). Aici, DUPĂ ce formatul exact a
+ * eșuat, căutăm tolerant în tot răspunsul:
+ *   1. un marker `TOOL:` / `ACTION: <nume>` urmat de un obiect JSON (pe linia
+ *      următoare, în fence ```json sau lipit de nume);
+ *   2. obiectul JSON respectiv poate avea el însuși forma `{"tool"/"action":
+ *      …, "args": {…}}` sau cheile de args direct (`{"command": "…"}`);
+ * textul dinaintea / de după JSON e ignorat, indentarea nu contează.
+ * Dacă nici așa nu iese un apel valid ⇒ comportamentul de dinainte (auto-retry
+ * + MALFORMED_TOOL_CALL_ERROR).
+ * ========================================================================= */
+
+/** Câte caractere după marker căutăm JSON-ul (payload-ul e oricum mic). */
+const RECOVERY_JSON_WINDOW = 4000;
+
+/**
+ * `TOOL: nume` / `ACTION: nume` — tolerant la text după nume pe aceeași linie
+ * (`TOOL: run_command {"command": "…"}`), spre deosebire de
+ * MARKER_TOOL_LINE_RE, care cere linia să se termine după nume.
+ */
+const MARKER_TOOL_HEAD_RE = new RegExp(
+  '^[ \\t]*' + MARKER_PREFIX + '[ \\t]*:[ \\t]*([A-Za-z_][A-Za-z0-9_]*)\\b',
+  'im'
+);
+
+/** Args obligatorii ale uneltelor cu conținut liber (vezi MARKER_TOOLS). */
+const RECOVERY_REQUIRED_ARGS: Record<string, string[]> = {
+  write_file: ['path', 'content'],
+  edit_file: ['path', 'old_text', 'new_text'],
+  write_files: ['files']
+};
+
+/** Primul obiect JSON echilibrat din text, parsat tolerant (sau null). */
+function firstJsonObject(text: string): any | null {
+  const spans = scanObjects(text);
+  if (!spans.length) return null;
+  let first = spans[0];
+  for (const span of spans) {
+    if (span.start < first.start) first = span;
+  }
+  return tryParseJsonObject(text.slice(first.start, first.end + 1));
+}
+
+/** Args-urile dintr-un payload JSON: `{"args": {…}}` sau cheile directe. */
+function payloadArgs(parsed: any): any {
+  const args = parsed?.args;
+  if (args && typeof args === 'object' && !Array.isArray(args)) return args;
+  if (Array.isArray(args)) return args; // write_files trimis ca array (bug #65)
+  const { tool, action, ...rest } = parsed ?? {};
+  return rest;
+}
+
+/** true când uneltele cu conținut liber au TOATE args-urile obligatorii. */
+function hasRequiredArgs(tool: string, args: any): boolean {
+  const required = RECOVERY_REQUIRED_ARGS[tool];
+  if (!required) return true;
+  if (!args || typeof args !== 'object') return false;
+  return required.every((key) => (args as Record<string, unknown>)[key] !== undefined);
+}
+
+/**
+ * Recuperează apelul din forma `TOOL: <nume>` + JSON. Întoarce null când nu
+ * există un JSON valid după marker sau când lipsesc args-urile obligatorii
+ * (atunci răspunsul rămâne tratat ca malformed, ca înainte).
+ */
+function recoverToolCallFromMarker(text: string): ToolCall | null {
+  const m = MARKER_TOOL_HEAD_RE.exec(text);
+  if (!m) return null;
+  const name = m[1].toLowerCase();
+  const after = text.slice(
+    m.index + m[0].length,
+    m.index + m[0].length + RECOVERY_JSON_WINDOW
+  );
+  const parsed = firstJsonObject(after);
+  if (!parsed) return null;
+
+  // JSON-ul poate conține el însuși apelul (`TOOL: x` + `{"tool":"y", …}`)
+  const inner = normalizeToolCall(parsed);
+  if (inner) return hasRequiredArgs(inner.tool, inner.args) ? inner : null;
+
+  const args = normalizeWriteFilesArgs(name, payloadArgs(parsed));
+  if (!hasRequiredArgs(name, args)) return null;
+  return { tool: name, args };
+}
+
+/**
+ * true când textul are un marker `TOOL: <nume>` urmat de începutul unui JSON
+ * (chiar dacă acel JSON e trunchiat și nu poate fi recuperat) — tot o
+ * ÎNCERCARE de tool call, deci merită auto-retry-ul de „malformed".
+ */
+function looksLikeMarkerPayloadAttempt(text: string): boolean {
+  const m = MARKER_TOOL_HEAD_RE.exec(text);
+  if (!m) return false;
+  return text.slice(m.index + m[0].length).includes('{');
+}
+
 /**
  * Extrage tool call-ul din răspunsul modelului, oricât de mult text l-ar
  * înconjura (proză, fence markdown, JSON nested în `content`).
  * v2.4.9: întâi formatul marker-based (conținut RAW, fără escape), apoi JSON.
+ * v2.5.39 (bug #90): dacă ambele eșuează, încercăm recuperarea tolerantă
+ * (`TOOL: <nume>` + JSON oriunde în răspuns) înainte de a declara malformed.
  */
 export function parseToolCallText(text: string): ToolCall | null {
   const src = String(text ?? '');
@@ -729,6 +843,15 @@ export function parseToolCallText(text: string): ToolCall | null {
     if (call) return withCommandTabsFixed(withResolvedPaths(call));
   }
 
+  const recovered = recoverToolCallFromMarker(src);
+  if (recovered) {
+    queueParserLog(
+      '[parser] recovered tool call from malformed input: ' + recovered.tool,
+      false
+    );
+    return withCommandTabsFixed(withResolvedPaths(recovered));
+  }
+
   return null;
 }
 
@@ -737,6 +860,7 @@ export function parseToolCallText(text: string): ToolCall | null {
  * `{"action":`, eventual în fence markdown — sau conține un bloc marker-based
  * `TOOL:` / `ACTION:`) care nu a putut fi parsat — merită un mesaj de eroare
  * clar, nu afișarea JSON-ului brut ca răspuns final.
+ * v2.5.39 (bug #90): și `TOOL: <nume necunoscut>` + JSON e tot o încercare.
  */
 export function looksLikeToolCallAttempt(text: string): boolean {
   const src = String(text ?? '');
@@ -744,6 +868,7 @@ export function looksLikeToolCallAttempt(text: string): boolean {
   return (
     TOOL_MARKER_HEAD_RE.test(head) ||
     ACTION_MARKER_HEAD_RE.test(head) ||
-    looksLikeMarkerToolCallAttempt(src)
+    looksLikeMarkerToolCallAttempt(src) ||
+    looksLikeMarkerPayloadAttempt(src)
   );
 }

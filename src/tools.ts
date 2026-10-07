@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as fs from 'fs';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import {
@@ -498,6 +499,165 @@ export function checkAutoApproveScope(
   if (!files.length) return { blocked: true, outside: [] };
   const outside = files.filter((f) => !isPathInScope(f, scope));
   return { blocked: outside.length > 0, outside };
+}
+
+/* =========================================================================
+ * v2.5.39 FIX (bug #91) — verificarea „adevărului" după task
+ * În testul v2.5.37 modelul a ratat pasul 9 (cleanup-ul `rm bootcamp-test2/…`)
+ * și a raportat totuși „10/10", deși folderul rămăsese pe disc cu 7 fișiere:
+ * raportul final e doar text și nimeni nu verifica realitatea. Aici detectăm
+ * din cerința utilizatorului intenția de cleanup („șterge", "delete", "remove",
+ * "rm", "del", "cleanup") și, la final, ce a mai rămas din scope-ul task-ului.
+ * chatView afișează un avertisment — NU blochează nimic.
+ * ========================================================================= */
+
+/** Verbele de cleanup din cerință (RO + EN, cu diacritice sau fără). */
+const CLEANUP_INTENT_RE =
+  /(?:șterg\w*|sterg\w*|delete\w*|remov(?:e|es|ed|ing)\b|\brmdir\b|\bcleanup\b|\bclean-up\b|\brm\b|\bdel\b)/i;
+
+/** true când cerința utilizatorului vorbește despre ștergere / curățare. */
+export function hasCleanupIntent(userText: string): boolean {
+  return CLEANUP_INTENT_RE.test(String(userText ?? ''));
+}
+
+/** Literele cu semnificație specială într-un regex. */
+function escapeRe(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * v2.5.39 (bug #91): verbul de cleanup LIPIT de chiar calea dată
+ * („delete bootcamp-test2/test.ts", „șterge folderul bootcamp-test2"). Pentru
+ * FIȘIERE cuvântul singur nu e destul: „remove the unused import from src/x.ts"
+ * nu cere ștergerea fișierului, iar fișierul rămâne (corect) pe disc — acolo un
+ * avertisment ar fi o alarmă falsă.
+ */
+export function cleanupTargetsPath(userText: string, relPath: string): boolean {
+  const text = String(userText ?? '').replace(/\\/g, '/');
+  const full = escapeRe(relPath.replace(/\\/g, '/').replace(/\/+$/, ''));
+  if (!full) return false;
+  const base = escapeRe(scopeBasename(relPath).replace(/\/+$/, ''));
+  const re = new RegExp(
+    // `[^\w]` în loc de `\b`: verbele românești încep cu diacritice („șterge"),
+    // care nu sunt caractere de cuvânt pentru \b, deci \b ar rata la început.
+    '(?:^|[^\\w])(?:șterg\\w*|sterg\\w*|delete\\w*|remov\\w*|rmdir|rm|del|cleanup|clean-up)' +
+      '(?:[ \\t]*-[A-Za-z]+)*' +
+      '(?:[ \\t]+(?:the|this|that|all|a|an|my|our|file|files|fisier|fișier|fisierul|fișierul|folder|folders|folderul|dir|directory|subfolder|and|then))*' +
+      '[ \\t]*[:,-]?[ \\t]*(?:["\'`])?(?:' + full + '|' + base + ')',
+    'i'
+  );
+  return re.test(text);
+}
+
+/**
+ * v2.5.39 (bug #91): merită verificat cleanup-ul pentru intrarea rămasă în
+ * scope? Folderele: orice verb de cleanup din cerință (cerința bug #91).
+ * Fișierele: doar când verbul vizează exact acea cale (anti-alarmă-falsă).
+ */
+export function cleanupIntentTargets(
+  userText: string,
+  leftover: ScopeLeftover
+): boolean {
+  if (leftover.directory) return hasCleanupIntent(userText);
+  return cleanupTargetsPath(userText, leftover.path);
+}
+
+/** Ce a mai rămas din scope-ul task-ului după ce AI-ul a declarat „gata". */
+export interface ScopeLeftover {
+  /** Intrarea din scope care încă există (cale relativă la root). */
+  path: string;
+  /** true = folder, false = fișier. */
+  directory: boolean;
+  /** Fișiere găsite în folder (recursiv), sau 1 pentru un fișier. */
+  files: number;
+}
+
+/** Plafon de siguranță la numărătoarea fișierelor rămase. */
+const SCOPE_COUNT_LIMIT = 2000;
+
+/** Foldere ignorate la numărătoare (nu sunt „rezultatul" task-ului). */
+const SCOPE_IGNORED_DIRS = new Set(['.git', 'node_modules']);
+
+/** Câte fișiere (recursiv) sunt în folderul `dir`, cu un buget de siguranță. */
+function countFilesIn(dir: string, budget: { left: number }): number {
+  if (budget.left <= 0) return 0;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let count = 0;
+  for (const entry of entries) {
+    if (budget.left <= 0) break;
+    budget.left--;
+    if (entry.isDirectory()) {
+      if (SCOPE_IGNORED_DIRS.has(entry.name)) continue;
+      count += countFilesIn(path.join(dir, entry.name), budget);
+    } else {
+      count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * v2.5.39 (bug #91): avertismentul din chat când scope-ul task-ului încă
+ * există după un task care cerea cleanup. `claim` = scorul declarat de AI
+ * („10/10"), dacă există în răspunsul final.
+ */
+export function buildPostTaskWarning(
+  leftover: ScopeLeftover,
+  claim?: string
+): string {
+  const target = leftover.path.replace(/\\/g, '/');
+  const found =
+    leftover.files === 1 ? '1 fișier' : leftover.files + ' fișiere';
+  const what = leftover.directory
+    ? 'folderul ' + target + '/ încă există (' + found + ')'
+    : 'fișierul ' + target + ' încă există';
+  return (
+    '⚠️ Verificare post-task: ' +
+    what +
+    ' — AI-ul a declarat ' +
+    (claim ?? 'task-ul terminat') +
+    ', dar cleanup-ul nu s-a executat.'
+  );
+}
+
+/**
+ * v2.5.39 (bug #91): ce a mai rămas din scope-ul task-ului. Intrările dispărute
+ * sunt rezultatul bun (cleanup reușit) și se sar; rădăcina proiectului nu e
+ * niciodată raportată. `null` = nimic rămas (sau scope nedeterminat).
+ */
+export function inspectScopeLeftover(
+  root: string,
+  scope: string[] | null | undefined
+): ScopeLeftover | null {
+  if (!scope || !scope.length) return null;
+  const rootAbs = path.resolve(root);
+  for (const entry of scope) {
+    const rel = String(entry ?? '')
+      .replace(/\\/g, '/')
+      .replace(/\/+$/, '');
+    if (!rel) continue;
+    const abs = path.resolve(rootAbs, rel);
+    // scope-ul e mereu în interiorul root-ului; rădăcina însăși nu e „rămasă"
+    if (abs === rootAbs || !abs.startsWith(rootAbs + path.sep)) continue;
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(abs);
+    } catch {
+      continue; // șters — exact ce trebuia să se întâmple
+    }
+    if (stat.isDirectory()) {
+      const files = countFilesIn(abs, { left: SCOPE_COUNT_LIMIT });
+      if (files > 0) return { path: rel, directory: true, files };
+      continue; // folder gol: nu-l raportăm ca „rămas cu fișiere"
+    }
+    return { path: rel, directory: false, files: 1 };
+  }
+  return null;
 }
 
 /** Eticheta scope-ului pentru log/notificări. */

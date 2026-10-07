@@ -57,6 +57,10 @@ import {
   buildUnixCommandHint,
   checkAutoApproveScope,
   detectTaskScope,
+  buildPostTaskWarning,
+  hasCleanupIntent,
+  cleanupIntentTargets,
+  inspectScopeLeftover,
   isPathInScope,
   scopeLabel
 } from './tools';
@@ -2490,6 +2494,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.appendHistory('assistant', aiReply);
           // v2.5.27 (bug #63): în chat calea rămâne cea originală (`.ts`)
           this.post('reply', stripTsAliasesInText(aiReply));
+          // v2.5.39 (bug #91): AI-ul a declarat task-ul terminat — verificăm
+          // dacă un cleanup cerut de utilizator chiar s-a făcut (doar avertizare)
+          this.postTaskTruthCheck(root, aiReply);
         }
       }
     } catch (e: any) {
@@ -2585,6 +2592,43 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (scope) return scope;
     }
     return null;
+  }
+
+  /**
+   * v2.5.39 (bug #91): mesajul utilizatorului din care vine scope-ul task-ului.
+   * Intenția de cleanup se citește din ACELAȘI mesaj, ca un mesaj ulterior
+   * („continue") sau o cerință veche din conversație să nu inducă în eroare.
+   */
+  private cleanupTaskText(): string | null {
+    const texts = this.taskScopeTexts();
+    for (const text of texts) {
+      if (detectTaskScope(text)) return text;
+    }
+    return texts[0] ?? null;
+  }
+
+  /**
+   * v2.5.39 (bug #91): verificarea „adevărului" după task — dacă cerința
+   * utilizatorului cerea un cleanup („șterge", "delete", "remove", "rm"…), dar
+   * scope-ul task-ului încă există cu fișiere când AI-ul declară că a terminat,
+   * raportul lui e inexact (test v2.5.37: „10/10" cu `bootcamp-test2/` încă pe
+   * disc). Doar avertizăm în chat — nu blocăm și nu anulăm nimic.
+   */
+  private postTaskTruthCheck(root: string, aiReply: string): void {
+    try {
+      const taskText = this.cleanupTaskText();
+      if (!taskText || !hasCleanupIntent(taskText)) return;
+      const leftover = inspectScopeLeftover(root, this.taskScope());
+      if (!leftover || !cleanupIntentTargets(taskText, leftover)) return;
+
+      log(
+        '[verify] post-task check: scope still exists — AI report may be inaccurate'
+      );
+      const claim = /\b\d+\s*\/\s*\d+\b/.exec(String(aiReply ?? ''))?.[0];
+      this.post('notice', buildPostTaskWarning(leftover, claim));
+    } catch (e: any) {
+      log('[verify] post-task check failed: ' + (e?.message ?? String(e)));
+    }
   }
 
   /**

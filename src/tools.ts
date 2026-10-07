@@ -2067,41 +2067,121 @@ function makeDiff(filePath: string, oldText: string, newText: string): string {
  * deschise în workspace (multi-root). Un folder adăugat cu „Add Folder to
  * Workspace" (ex: Z:\ proiectat prin RaiDrive) devine astfel accesibil.
  */
+/**
+ * v2.5.49 (FIX 1) — acces la path-uri externe.
+ *
+ * Rădăcinile acceptate = rădăcina primară + TOATE folderele deschise în
+ * workspace (multi-root) + `freekit.allowExternalPaths` (ex. `Z:\home`,
+ * un WordPress proiectat prin RaiDrive). Comparația e CANONICĂ
+ * (`path.resolve` + `path.normalize`, plus case-insensitive pe Windows), deci
+ * `Z:\home\x`, `Z:/home/x` și `z:\HOME\X` sunt aceeași cale.
+ */
+
+/** Cheia canonică de comparație: separatori + trailing separator + caz. */
+export function canonPath(p: string): string {
+  let s = path.normalize(String(p ?? '').trim());
+  const rootLen = path.parse(s).root.length;
+  if (s.length > rootLen) s = s.replace(/[\\/]+$/, '');
+  if (!s) s = path.sep;
+  return process.platform === 'win32' ? s.toLowerCase() : s;
+}
+
+/** v2.5.49 (FIX 1): path-urile externe permise de utilizator. */
+export function externalRoots(): string[] {
+  let raw: unknown = [];
+  try {
+    raw = vscode.workspace
+      .getConfiguration('freekit')
+      .get<string[]>('allowExternalPaths', []);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((p) => String(p ?? '').trim())
+    .filter(Boolean)
+    .map((p) => path.normalize(p));
+}
+
+/** Rădăcinile acceptate (deduplicate canonic), în ordine de prioritate. */
 function allowedRoots(primary: string): string[] {
-  const roots = [primary];
+  const roots: string[] = [];
+  const seen = new Set<string>();
+  const push = (p?: string) => {
+    const value = String(p ?? '').trim();
+    if (!value) return;
+    const key = canonPath(value);
+    if (seen.has(key)) return;
+    seen.add(key);
+    roots.push(path.normalize(value));
+  };
+  push(primary);
   for (const folder of vscode.workspace.workspaceFolders ?? []) {
     if (folder.uri.scheme !== 'file') continue;
-    if (!folder.uri.fsPath) continue;
-    roots.push(folder.uri.fsPath);
+    push(folder.uri.fsPath);
   }
+  for (const extra of externalRoots()) push(extra);
   return roots;
 }
 
 function isInsideRoot(target: string, root: string): boolean {
-  const r = path.normalize(root);
-  if (target === r) return true;
-  return target.startsWith(r.endsWith(path.sep) ? r : r + path.sep);
+  const t = canonPath(target);
+  const r = canonPath(root);
+  if (t === r) return true;
+  return t.startsWith(r.endsWith(path.sep) ? r : r + path.sep);
+}
+
+/** v2.5.49: comparație de încadrare în rădăcină, case-insensitive pe Windows. */
+export function isPathInsideRoot(target: string, root: string): boolean {
+  return isInsideRoot(target, root);
+}
+
+/** Path-urile externe, ca set canonic (pentru logging-ul dedicat). */
+function externalKeySet(): Set<string> {
+  return new Set(externalRoots().map((p) => canonPath(p)));
 }
 
 function safePath(rel: string, root: string): string {
-  const abs = path.resolve(root, rel);
-  const normalized = path.normalize(abs);
-  if (isInsideRoot(normalized, root)) return normalized;
-  // v2.5.48: multi-root workspace — acceptăm și celelalte foldere deschise
-  for (const extra of allowedRoots(root)) {
-    if (extra === root) continue;
-    if (isInsideRoot(normalized, extra)) {
+  const requested = String(rel ?? '').trim() || '.';
+  const primary = path.normalize(root);
+  const roots = allowedRoots(primary);
+  const normalized = path.normalize(path.resolve(primary, requested));
+
+  const owner = roots.find((r) => isInsideRoot(normalized, r));
+  if (owner) {
+    if (externalKeySet().has(canonPath(owner))) {
+      // FIX 1: citire/scriere într-un path extern permis explicit
+      logLine('scope', 'allowed external path: ' + normalized);
+    } else if (canonPath(owner) !== canonPath(primary)) {
       logLine(
         'scope',
         'allowed path outside primary root: ' +
           normalized +
           ' (multi-root workspace)'
       );
-      return normalized;
     }
+    return normalized;
   }
-  throw new Error('Path outside workspace: ' + rel);
+
+  logLine(
+    'scope',
+    'refused: ' + normalized + ' — not in workspace or allowExternalPaths'
+  );
+  throw new Error(
+    'Path outside workspace: ' +
+      requested +
+      ' — not in workspace or allowExternalPaths. Allowed: ' +
+      roots.join(' ; ') +
+      ' (add the folder to the freekit.allowExternalPaths setting to allow it).'
+  );
 }
+
+/** v2.5.49 (FIX 1): rădăcinile permise, pentru log/erori/teste. */
+export function workspaceRoots(): string[] {
+  const primary = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  return allowedRoots(primary ?? '.');
+}
+
 
 async function readFile(
   rel: string,

@@ -255,6 +255,48 @@ END_CONTENT`;
  */
 const ROTATION_PROTOCOL_REMINDER = `Action protocol (this chat is new and has no system prompt yet): answer EVERY step with EXACTLY ONE action — a single-line JSON {"action":"NAME","args":{...}} (read_file, read_files, list_files, search_files, search_semantic, run_command, run_npm, delete_file, delete_directory, git_*, project_info), or the marker format below for write_file / edit_file / write_files. No introductions, no explanations. When the task is fully done, answer with plain text.`;
 
+/* =========================================================================
+ * v2.5.49 (FIX 2) — SCRIERE ÎN BUCĂȚI (compatibilitate cu web chat)
+ *
+ * Un răspuns de chat web are ~8k tokeni de output: un fișier mare se trunchiază
+ * și ajunge la Freekit ca un tool call malformat. Protocolul: modelul scrie
+ * prima parte și termină cu un marker de continuare; Freekit îi cere automat
+ * partea următoare (`edit_file` care înlocuiește markerul cu restul + marker),
+ * până când markerul dispare. Generic: markerele sunt comentarii valide în
+ * limbajul respectiv, deci funcționează pe orice tip de fișier.
+ * ======================================================================= */
+
+/** Câte bucăți acceptăm pentru un fișier (plasa de siguranță anti-buclă). */
+export const MAX_WRITE_PARTS = 10;
+
+/** Markere de continuare acceptate (ultima linie ne-goală de la final). */
+const CONTINUATION_MARKERS = [
+  '// CONTINUARE',
+  '<!-- CONTINUARE -->',
+  '/* CONTINUARE */',
+  '# CONTINUARE',
+  '// CONTINUE',
+  '<!-- CONTINUE -->',
+  '/* CONTINUE */',
+  '# CONTINUE'
+];
+
+/**
+ * v2.5.49 (FIX 2): markerul de continuare scris pe ULTIMA linie ne-goală a
+ * conținutului (exact cum a apărut), sau `null` dacă fișierul e complet.
+ */
+export function trailingContinuationMarker(text: string): string | null {
+  const lines = String(text ?? '').split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const upper = line.toUpperCase();
+    const found = CONTINUATION_MARKERS.find((m) => upper === m.toUpperCase());
+    return found ? line : null;
+  }
+  return null;
+}
+
 // v1.7.1: verbose mode — pașii AI afișați în chat (persistat în globalState)
 const VERBOSE_KEY = 'freekit.verboseMode';
 
@@ -533,6 +575,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * la hint-urile de eroare pentru tsc („eroarea e în alt fișier").
    */
   private lastEditTargets: string[] = [];
+  /**
+   * v2.5.49 (FIX 2): câte bucăți s-au scris deja din fiecare fișier în tura
+   * curentă (cheie = calea relativă) — plafon MAX_WRITE_PARTS per fișier.
+   */
+  private writeParts = new Map<string, number>();
   /** v1.3.0: câte auto-repair-uri am cerut pentru seria curentă de verificări eșuate. */
   private verifyRepairs = 0;
   /**
@@ -1727,6 +1774,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         '\n\n---\nUSER MESSAGE:\n' + userText;
       // v1.1.0: uneltele MCP disponibile se adaugă la prompt (listă dinamică,
       // mai scurtă pentru modelele locale)
+      // v2.5.49 (FIX 3): plan înainte de execuție (se cere o dată per mesaj)
+      const planSection = this.planFirstEnabled() ? this.planPromptSection() : '';
       const messageFor = (p: AIProvider) => {
         const mcpSection = mcp.promptSection(!!p.local);
         let prompt = p.local ? SYSTEM_PROMPT_LOCAL : SYSTEM_PROMPT;
@@ -1743,7 +1792,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         return (
           prompt +
           (p.local ? '' : '\n\n' + MARKER_FORMAT_EXAMPLE) +
+          (p.local ? '' : this.chunkedWritePromptSection()) +
           (mcpSection ? '\n\n---\n' + mcpSection : '') +
+          planSection +
           contextBlock
         );
       };
@@ -1904,6 +1955,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       /** v2.5.31 (bug #74): ultima eroare a unei unelte (mesajul de buclă). */
       let lastToolError = '';
       /**
+       * v2.5.49 (FIX 3): planul se cere o singură dată per mesaj (la început);
+       * `planHandled` = planul a fost deja afișat și aprobat.
+       */
+      let planRequested = this.planFirstEnabled();
+      let planHandled = false;
+      /**
        * v2.5.48: când un `write_file` / `write_files` chiar a reușit dar a
        * depășit `LARGE_OUTPUT_CHARS`, atașăm sugestia de împărțire la mesajul
        * următor (site-ul trunchiază paste-urile mari). Se resetează per pas.
@@ -1954,6 +2011,47 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const toolCall = this.parseToolCall(aiReply);
 
         if (!toolCall) {
+          // v2.5.49 (FIX 3): plan înainte de execuție. Modelul a răspuns cu un
+          // plan (listă numerotată) în loc de un tool call: îl arătăm în chat,
+          // cerem aprobarea (card) dacă `autoApprovePlan` e oprit, apoi îi
+          // cerem să execute pasul 1. Se întâmplă O SINGURĂ dată per mesaj.
+          if (planRequested && !planHandled) {
+            const steps = this.planStepCount(aiReply);
+            if (steps >= 2) {
+              planHandled = true;
+              planRequested = false;
+              const planText = aiReply.trim();
+              log('plan generated (' + steps + ' steps) — waiting for the decision');
+              this.postVerboseStep({
+                kind: 'decision',
+                title: 'Plan (' + steps + ' steps)',
+                text: planText,
+                status: 'done'
+              });
+              const ok = await this.approvePlan(planText, steps);
+              if (!ok) {
+                planHandled = false; // poate veni un plan revizuit
+                planRequested = true;
+                logLine('plan', 'rejected by the user — asking for a revised plan');
+                this.post('notice', '📋 Plan rejected — asking for a revised plan.');
+                aiReply = await provider.send(
+                  page,
+                  'The user REJECTED the plan above. Reply with a REVISED numbered plan only (no tool calls, no files written), taking the rejection into account.',
+                  signal,
+                  followUpOpts
+                );
+                continue;
+              }
+              logLine('plan', 'approved — executing step 1');
+              aiReply = await provider.send(
+                page,
+                'Plan approved. Execute step 1 now (one tool call), then continue with the remaining steps.',
+                signal,
+                followUpOpts
+              );
+              continue;
+            }
+          }
           // v2.5.14 (bug #38): refuz al protocolului de unelte („the tools you
           // specified are not available in this session", „I can't access the
           // workspace") — de obicei providerul nu era complet logat la
@@ -2535,6 +2633,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           ? 'TOOL_RESULT for ' + toolCall.tool + ':\n' + result.result
           : 'TOOL_ERROR for ' + toolCall.tool + ':\n' + result.error;
 
+        // v2.5.49 (FIX 2): fișier scris în bucăți → cerem continuarea
+        const chunkHint = this.chunkContinuationHint(toolCall, result);
+
         // v2.5.23: pașii recenți (în memorie) pentru handoff-ul de rotire
         const stepSummary =
           vSummary + ' — ' + (result.ok ? 'ok' : 'failed');
@@ -2573,6 +2674,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             (loopNudge ? '\n\n' + loopNudge : '') +
             // v2.5.48: scriere prea mare → cere împărțirea în apeluri mici
             (splitHint ? '\n\n' + splitHint : '') +
+            // v2.5.49 (FIX 2): continuarea scrierii în bucăți
+            (chunkHint ? '\n\n' + chunkHint : '') +
             commandHints,
           signal,
           followUpOpts
@@ -3713,6 +3816,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.verifyRepairs = 0;
     this.lastVerifyFailure = undefined;
     this.lastEditTargets = [];
+    // v2.5.49 (FIX 2): numărătoarea bucăților e per mesaj
+    this.writeParts.clear();
     // v2.5.33 (bug #84): seria de erori identice e per task (mesaj)
     this.sameErrors.reset();
   }
@@ -3727,6 +3832,157 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     | { command: string; output: string; seconds: string }
     | undefined {
     return this.lastVerifyFailure;
+  }
+
+  /** v2.5.49 (FIX 2): setarea `freekit.chunkedWrites` (implicit pornită). */
+  private chunkedWritesEnabled(): boolean {
+    return (
+      vscode.workspace
+        .getConfiguration('freekit')
+        .get<boolean>('chunkedWrites', true) !== false
+    );
+  }
+
+  /** v2.5.49 (FIX 3): setarea `freekit.planFirst` (implicit pornită). */
+  private planFirstEnabled(): boolean {
+    return (
+      vscode.workspace
+        .getConfiguration('freekit')
+        .get<boolean>('planFirst', true) !== false
+    );
+  }
+
+  /** v2.5.49 (FIX 3): setarea `freekit.autoApprovePlan` (implicit pornită). */
+  private autoApprovePlanEnabled(): boolean {
+    return (
+      vscode.workspace
+        .getConfiguration('freekit')
+        .get<boolean>('autoApprovePlan', true) !== false
+    );
+  }
+
+  /**
+   * v2.5.49 (FIX 3): numărul de pași dintr-un plan numerotat, sau 0 dacă
+   * răspunsul nu e un plan. Generic: orice listă numerotată (`1.`/`1)`), cu
+   * minim 2 pași — chiar dacă modelul nu scrie cuvântul „plan".
+   */
+  private planStepCount(reply: string): number {
+    const lines = String(reply ?? '').split(/\r?\n/);
+    const steps = lines.filter((l) => /^\s{0,4}(?:\d{1,2}[.)]|[-*]\s+\*\*)/.test(l));
+    const numbered = lines.filter((l) => /^\s{0,4}\d{1,2}[.)]\s+\S/.test(l));
+    if (numbered.length >= 2) return numbered.length;
+    if (/\bplan\b/i.test(reply) && steps.length >= 2) return steps.length;
+    return 0;
+  }
+
+  /** v2.5.49 (FIX 3): instrucțiunea de plan, atașată la promptul principal. */
+  private planPromptSection(): string {
+    return (
+      '\n\n---\nPLAN FIRST:\nBefore executing, generate a numbered plan of steps. ' +
+      (this.autoApprovePlanEnabled()
+        ? 'Ask for as many steps as the task needs; after the plan, start immediately with step 1 — no approval is needed.'
+        : 'Wait for user approval before executing the first step (the user accepts or rejects the plan in the chat).')
+    );
+  }
+
+  /**
+   * v2.5.49 (FIX 3): cere aprobarea planului (cardul Accept/Reject din chat).
+   * `autoApprovePlan` (implicit pornit) sare peste card.
+   */
+  private async approvePlan(planText: string, steps: number): Promise<boolean> {
+    this.post('notice', '📋 Plan (' + steps + ' steps) — ' + planText.split(/\r?\n/)[0]);
+    if (this.autoApprovePlanEnabled()) {
+      logLine('plan', 'generated ' + steps + ' steps — auto-approved');
+      this.post('notice', '📋 Plan auto-approved — executing step 1.');
+      return true;
+    }
+    logLine('plan', 'generated ' + steps + ' steps — waiting for user approval');
+    return this.askApproval('plan', 'Plan (' + steps + ' steps)', planText);
+  }
+
+  /** v2.5.49 (FIX 2): setarea `freekit.chunkedWrites` — secțiunea de prompt. */
+  private chunkedWritePromptSection(): string {
+    return (
+      '\n\n---\nCHUNKED WRITES (large files):\n' +
+      'If the file you are writing is large (roughly more than ~6k characters), write it in PARTS. ' +
+      'Part 1: write_file with the beginning of the file, ending with a continuation marker on its own last line ' +
+      "('// CONTINUARE' for JS/TS/Java/C#, '<!-- CONTINUARE -->' for HTML/Astro, '/* CONTINUARE */' for CSS, '# CONTINUARE' for Python/shell/YAML). " +
+      'Then, for every following part, reply with ONE edit_file call: old_text = the marker line, ' +
+      'new_text = the next chunk of the file ending AGAIN with the same marker. ' +
+      'The LAST part must not contain any marker. Never repeat content that is already in the file.'
+    );
+  }
+
+  /**
+   * v2.5.49 (FIX 2): după o scriere, dacă fișierul se termină cu un marker de
+   * continuare, întoarce instrucțiunea de continuare trimisă modelului (și
+   * loghează `[write] file <path> part K/MAX`). Fără marker → șterge
+   * numărătoarea fișierului și nu trimite nimic (scrierea e completă).
+   */
+  private chunkContinuationHint(toolCall: ToolCall, result: ToolResult): string {
+    if (!result.ok || !this.chunkedWritesEnabled()) return '';
+    const targets: Array<{ path: string; text: string }> = [];
+    if (toolCall.tool === 'write_files') {
+      const files = Array.isArray(toolCall.args?.files) ? toolCall.args.files : [];
+      for (const f of files) {
+        if (f && typeof f.path === 'string' && typeof f.content === 'string') {
+          targets.push({ path: f.path, text: f.content });
+        }
+      }
+    } else if (toolCall.tool === 'write_file' || toolCall.tool === 'edit_file') {
+      const p = toolCall.args?.path;
+      const text =
+        toolCall.tool === 'edit_file' ? toolCall.args?.new_text : toolCall.args?.content;
+      if (typeof p === 'string' && p && typeof text === 'string') {
+        targets.push({ path: p, text });
+      }
+    }
+
+    const pending: string[] = [];
+    for (const { path: rel, text } of targets) {
+      const marker = trailingContinuationMarker(text);
+      const previous = this.writeParts.get(rel) ?? 0;
+      // limita atinsă deja → nu mai cerem continuarea și nu mai numărăm
+      // (fără spam de loguri la fiecare reluare a modelului)
+      if (previous >= MAX_WRITE_PARTS) continue;
+      if (!marker) {
+        if (previous) {
+          // ultima bucată: fără marker ⇒ fișierul e complet
+          logLine(
+            'write',
+            'file ' + rel + ' part ' + (previous + 1) + '/' + MAX_WRITE_PARTS + ' (final)'
+          );
+          this.writeParts.delete(rel);
+        }
+        continue;
+      }
+      const part = previous + 1;
+      logLine('write', 'file ' + rel + ' part ' + part + '/' + MAX_WRITE_PARTS);
+      if (part >= MAX_WRITE_PARTS) {
+        logLine(
+          'write',
+          'file ' + rel + ' — reached the limit of ' + MAX_WRITE_PARTS + ' parts, no further continuation requested'
+        );
+        this.writeParts.set(rel, MAX_WRITE_PARTS);
+        this.post(
+          'notice',
+          '⚠️ ' + rel + ': ' + MAX_WRITE_PARTS +
+            ' chunks written — the file may still be incomplete. Ask for the rest if needed.'
+        );
+        continue;
+      }
+      this.writeParts.set(rel, part);
+      pending.push(
+        'CONTINUE THE SAME FILE — ' +
+          rel +
+          ' is incomplete (part ' + part + '/' + MAX_WRITE_PARTS + ' written). ' +
+          'Reply with ONE edit_file call: old_text = "' + marker + '" (the marker, on its own line) and ' +
+          'new_text = the NEXT part of the file, ending AGAIN with "' + marker + '" on its own line. ' +
+          'Do not repeat what is already written. When the file is complete, write the last part WITHOUT any marker.'
+      );
+    }
+    if (!pending.length) return '';
+    return 'CHUNKED WRITE — continue the file:\n' + pending.join('\n');
   }
 
   /** Snapshot (o singură dată per fișier) înainte de prima editare a mesajului. */

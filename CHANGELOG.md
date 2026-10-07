@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.5.49
+
+- **FIX 1 — external paths (scope).** New `freekit.allowExternalPaths` setting (array of folders, e.g. `Z:\home`). `safePath()` now validates every tool path against the workspace folders **and** this list, so files outside the workspace (a WordPress install on `Z:` via RaiDrive, another disk) can be read — and written, with the usual approval. Comparison is canonical (`path.resolve` + `path.normalize`, case-insensitive on Windows), so `Z:\home`, `Z:/home` and `z:\HOME` are the same folder — the old bug where a `Z:` path was rejected (or resolved into the wrong project) is gone. Output logs `[scope] allowed external path: <path>` on every allowed external path and `[scope] refused: <path> — not in workspace or allowExternalPaths` on every refusal.
+- **FIX 2 — chunked writes.** New `freekit.chunkedWrites` setting (on by default). When a written file ends with a continuation marker (`// CONTINUARE`, `<!-- CONTINUARE -->`, `/* CONTINUARE */`, `# CONTINUARE` — `CONTINUE` also accepted), Freekit automatically sends "continue the file" with the exact `edit_file` call to make (old_text = the marker, new_text = the next part + marker), so a large file survives the ~8k-token web-chat output limit instead of arriving truncated as a malformed tool call. Max **10** parts per file, each logged as `[write] file <path> part K/10` (the final part logs `(final)`), with a chat notice if the limit is reached. The prompt documents the protocol for every part.
+- **FIX 3 — plan step.** New `freekit.planFirst` (on) and `freekit.autoApprovePlan` (on) settings. With `planFirst`, the prompt asks for a numbered plan before any tool call; a detected plan is shown in the chat (`📋 Plan (N steps)`) and logged as `[plan] generated N steps`. With `autoApprovePlan` off, the plan opens an **Accept / Reject** card and nothing executes until you approve — rejecting asks the model for a revised plan. With it on, the plan is displayed and executed immediately (log: `[plan] approved — executing step 1`). Generic: any numbered list counts as a plan, no stack-specific wording.
+
 ## v2.5.48
 
 - FIX: **provider connect no longer runs full proactive AI selector discovery.** Connect checks bundled selectors for `input`, `response` and `newChat` immediately; only missing slots enter fingerprint healing, with AI discovery remaining a reactive fallback.

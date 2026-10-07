@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.5.48",
+  "version": "2.5.49",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -233,12 +233,35 @@
           "default": 20,
           "description": "Total time budget (minutes) for one message in the agentic loop."
         },
+        "freekit.allowExternalPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "List of external paths Freekit may use, even though they are not open in the workspace — e.g. `Z:\\home` (a WordPress install on a RaiDrive/network drive) or `D:\\projects`. Both reads and writes are allowed inside them (writes still require approval), so the AI can inspect and, if you ask it to, modify that folder. Every allowed external path is logged in **Output → Freekit** as `[scope] allowed external path: <path>`; anything outside the workspace and this list is refused with `[scope] refused: <path>`."
+        },
         "freekit.handoffThreshold": {
           "type": "number",
           "default": 20,
           "minimum": 0,
           "maximum": 100,
           "markdownDescription": "Number of tool results pasted into the **same** browser chat before starting a **new chat** with a full handoff. A large tool payload makes ChatGPT/Claude/Gemini process every later message slowly, and the accumulated context can hit the site's „Chat memory full” limit — a fresh chat keeps the paste small and fast. Raise it for long tasks (more context kept in one chat); lower it if the web app gets slow. **0** disables the handoff entirely (the chat is only restarted when the site reports a full context). Note: the handoff is never triggered for tasks that read *many* files and summarize them („read every file in src/ and summarize”), because the new chat would have to re-read everything."
+        },
+        "freekit.chunkedWrites": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Splits large files into chunks so a browser chat (≈8k tokens per reply) does not truncate them. When a written file ends with a continuation marker (`// CONTINUARE`, `<!-- CONTINUARE -->`, `/* CONTINUARE */` or `# CONTINUARE`), Freekit automatically asks the model to continue with an `edit_file` that replaces the marker — repeating until the marker is gone (max **10** parts per file, logged as `[write] file <path> part K/10`)."
+        },
+        "freekit.planFirst": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "For complex tasks, asks the model for a numbered **plan** before it executes anything. The plan is shown in the chat and counted in Output as `[plan] generated N steps`. With `freekit.autoApprovePlan` on (default) the plan is executed immediately; turn that setting off to review and accept/reject each plan first."
+        },
+        "freekit.autoApprovePlan": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When on, a generated plan is shown in the chat and executed **without waiting** for approval. Turn it off to keep the plan card and approve (or reject) it manually before the AI starts writing files."
         },
         "freekit.autoVerify": {
           "type": "boolean",

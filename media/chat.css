@@ -936,20 +936,6 @@ pre.code code {
   text-overflow: ellipsis;
 }
 
-/* v2.5.26 (bug #51): badge-ul de reliability (stele) din chip-ul de model —
-   mic și nesimțit lângă numele providerului; explicația stă în tooltip. */
-.chip .rel {
-  flex: none;
-  font-size: 8px;
-  line-height: 1;
-  letter-spacing: -1px;
-  opacity: 0.9;
-}
-
-.chip .rel[hidden] {
-  display: none;
-}
-
 .dot {
   width: 7px;
   height: 7px;

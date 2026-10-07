@@ -11,8 +11,6 @@ import {
   BROWSER_PROVIDER_IDS,
   getProviderStatus,
   ollamaInstallState,
-  providerReliability,
-  reliabilityNote,
   ProviderStatusInfo
 } from './providers';
 import { pullOllamaModel, startOllamaServer } from './providers/ollama';
@@ -4300,8 +4298,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       modelLabel?: string;
       /** v2.2.0: modelele web ale providerului activ (sub-rânduri în meniu). */
       models?: Array<{ id: string; label: string; badge?: string; active?: boolean }>;
-      /** v2.5.26 (bug #51): 0-5 — cât de rar refuză providerul protocolul. */
-      reliability?: number;
     }
 
     const browserDot = (id: string): 'green' | 'orange' => {
@@ -4467,26 +4463,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (!configuredInstalled) offerDownload(activeModel);
     }
 
-    // v2.5.26 (bug #51): reliability per rând (badge în chip + note în meniu).
-    const autoChain = this.autoChainIds();
     for (const p of providers) {
-      p.reliability = providerReliability(p.id, autoChain);
       p.active =
         p.group === 'local'
           ? selected === 'ollama' && (p.modelId ? p.modelId === activeModel : true)
           : p.id === selected;
     }
-    const activeReliability =
-      providers.find((p) => p.active)?.reliability ??
-      providerReliability(selected, autoChain);
 
     this.view?.webview.postMessage({
       type: 'providers_list',
       providers,
-      reliability: {
-        value: activeReliability,
-        note: reliabilityNote(activeReliability)
-      },
       hardware: {
         summary: hardwareSummary(hw),
         gpu: hw.gpus[0]?.name ?? '',
@@ -5284,7 +5270,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <div class="ctx">
       <div class="pop">
         <button class="chip" id="modelChip" data-menu="menuModel" aria-haspopup="true" aria-expanded="false" title="Provider and model">
-          <span class="dot" id="modelDot"></span><span class="lbl" id="modelLabel">Auto</span><span class="rel" id="modelRel" hidden></span><svg class="ic sm"><use href="#i-chev"/></svg>
+          <span class="dot" id="modelDot"></span><span class="lbl" id="modelLabel">Auto</span><svg class="ic sm"><use href="#i-chev"/></svg>
         </button>
         <div class="menu up" id="menuModel" role="menu">
           <div class="mh">Browser accounts</div>

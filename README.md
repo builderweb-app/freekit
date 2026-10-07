@@ -78,21 +78,22 @@ Unlike other AI coding agents, Freekit works with your existing web AI accounts:
 
 ## Provider reliability for agentic tasks
 
-| Provider | Reliability | Notes |
-|----------|-------------|-------|
-| Gemini | ⭐⭐⭐⭐⭐ | Accepts from first message |
-| DeepSeek | ⭐⭐⭐⭐⭐ | Accepts from first message |
-| Ollama (local) | ⭐⭐⭐⭐⭐ | Always compliant |
-| Claude | ⭐⭐⭐⭐ | Rarely refuses |
-| Mistral | ⭐⭐⭐⭐ | Rarely refuses |
-| Qwen | ⭐⭐⭐⭐ | Rarely refuses |
-| ChatGPT free | ⭐⭐⭐ | May refuse complex multi-step tasks |
+Some providers occasionally refuse to emit an action, or lose the format on
+long, multi-step tasks (reading many files, multi-file edits). In practice:
 
-For complex tasks (reading many files, multi-file edits), prefer
-Gemini, DeepSeek, or Ollama.
+| Provider | Behaviour |
+|----------|-----------|
+| Gemini | Accepts from first message |
+| DeepSeek | Accepts from first message |
+| Ollama (local) | Always compliant |
+| Claude | Rarely refuses |
+| Mistral | Rarely refuses |
+| Qwen | Rarely refuses |
+| ChatGPT free | May refuse complex multi-step tasks |
 
-The same rating is shown in the **model chip** in the composer (the stars next
-to the provider name; hover for the explanation).
+For complex tasks, prefer Gemini, DeepSeek, or Ollama. If a provider refuses
+mid-task, switch the **model chip** in the composer to another provider and
+press Retry.
 
 ## How it works
 

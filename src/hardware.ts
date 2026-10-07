@@ -610,7 +610,7 @@ interface CatalogEntry {
   size: string;
   /** Memorie aproximativă necesară (GB) — Q4_K_M + KV cache la ~8-16k context. */
   needGb: number;
-  /** Rating de calitate curat (0-100), comparabil în interiorul catalogului. */
+  /** Scor de calitate curat (0-100), comparabil în interiorul catalogului. */
   quality: number;
   tags: string[];
   /** Parametri activi (B), doar la modelele MoE — cheia vitezei pe CPU. */
@@ -624,7 +624,7 @@ interface CatalogEntry {
  *
  * `needGb` = blob-ul real Q4_K_M (verificat în registry-ul Ollama) + rezerva
  * pentru KV cache/context. Id-urile sunt tag-uri Ollama existente.
- * `quality` e un rating intern comparabil (capacitate de cod/raționament).
+ * `quality` e un scor intern comparabil (capacitate de cod/raționament).
  */
 const MODEL_CATALOG: CatalogEntry[] = [
   // — până în 2 GB: rulează pe orice, inclusiv pe CPU fără GPU —
@@ -871,7 +871,7 @@ export function isEmbeddingModel(model: string): boolean {
 
 /** Sub pragul ăsta modelul scrie prost cod real (improvizează, trunchiază). */
 export const WEAK_MODEL_QUALITY = 45;
-/** Și sub atâția parametri — indiferent de rating-ul din catalog. */
+/** Și sub atâția parametri — indiferent de scorul din catalog. */
 export const WEAK_MODEL_PARAMS_B = 3;
 
 export interface ModelQuality {
@@ -879,7 +879,7 @@ export interface ModelQuality {
   size: string;
   /** Memoria aproximativă necesară (GB, Q4_K_M) — 0 dacă modelul nu e în catalog. */
   needGb: number;
-  /** Rating de calitate comparabil (0-100) — 0 dacă modelul nu e în catalog. */
+  /** Scor de calitate comparabil (0-100) — 0 dacă modelul nu e în catalog. */
   quality: number;
   /** Numărul de parametri dedus din `size` (ex. `3B MoE` → 3). */
   paramsB: number;
@@ -891,7 +891,7 @@ export interface ModelQuality {
 
 /**
  * v2.5.11 (bug #28): „recommended" însemna doar „încape pe mașină" — un model
- * de 1.5B apărea recomandat, deși scrie prost. Întoarce rating-ul din catalog
+ * de 1.5B apărea recomandat, deși scrie prost. Întoarce scorul din catalog
  * (sau `embedding: true` pentru un id de embeddings necunoscut), ca UI-ul să
  * poată avertiza. `null` = model necunoscut, fără date.
  */

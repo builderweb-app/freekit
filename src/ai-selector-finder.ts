@@ -23,6 +23,12 @@ const log = (msg: string) => logLine('ai-finder', msg);
  *      siguranță ca healer-ul (blacklist/fragile/promo/ecou/user);
  *   5. îi salvează (learn + selectors-user.json) și îi folosește imediat.
  *
+ * v2.5.41 (bug #95/#96): pasul 1 trimite DOAR elementele interactive (plus
+ * strămoșii lor) în loc de tot HTML-ul, iar pasul 4 e strict pentru căsuța de
+ * chat (vizibil, activ, acceptă text, în viewport, în jumătatea de jos). Dacă
+ * selectorul propus nu trece, analiza se reia cu un prompt mai specific (max
+ * AI_FINDER_MAX_ATTEMPTS) și, dacă nici așa nu iese nimic, NU se salvează nimic.
+ *
  * Fail-open: orice eroare => null, fluxul normal continuă. Rate limiting:
  * cel mult o încercare per provider/slot/site la fiecare 5 minute.
  * ========================================================================= */
@@ -43,8 +49,46 @@ const NON_ACTION_RE = /(^|[^a-z])(sign|signin|sign-in|signup|sign-up|login|log-i
  * Limita de caractere a snapshot-ului. Ollama rulează implicit cu
  * num_ctx 8192 (vezi providers/ollama.ts), deci păstrăm DOM-ul sub ~7k
  * tokeni: head + tail (zonele utile sunt de obicei capul și coada paginii).
+ *
+ * v2.5.41 (bug #96): lista candidaților interacți are prioritate în acest
+ * buget; doar DOM-ul filtrat de după ea se trunchiază (head + tail).
  */
 export const DOM_MAX_CHARS = 18000;
+
+/**
+ * v2.5.41 (bug #95): câte încercări de analiză facem pentru un set de sloturi.
+ * Prima are promptul normal; următoarele primesc în plus motivul respingerii
+ * („prompt mai specific"), ca modelul să nu propună din nou același element.
+ */
+export const AI_FINDER_MAX_ATTEMPTS = 3;
+
+/**
+ * v2.5.41 (bug #96): ce ajunge în snapshot. HTML-ul complet al unui chat
+ * înseamnă mii de div-uri — modelul local se pierde în ele și alege exact ce
+ * nu trebuie (ex: inputul ascuns `aria-label="Line wrap"` din ChatGPT). Trimitem
+ * doar elementele interactive, plus strămoșii lor (ca modelul să poată compune
+ * selectorul); butoanele rămân incluse, altfel sloturile newChat/stopButton ar
+ * rămâne fără nicio informație. Textul conversației se adaugă separat, doar când
+ * căutăm containerul de răspuns (acolo e chiar informația utilă).
+ */
+export const INTERACTIVE_FILTER = [
+  'textarea',
+  'input',
+  'button',
+  '[role="button"]',
+  '[contenteditable="true"]',
+  '[role="textbox"]',
+  '[aria-label*="message" i]',
+  '[aria-label*="chat" i]',
+  '[aria-label*="prompt" i]',
+  '[aria-label*="input" i]'
+].join(', ');
+
+/** Câți candidați interacți încăpem în prompt (restul e zgomot). */
+const MAX_SNAPSHOT_CANDIDATES = 25;
+
+/** Un nod de text mai scurt de atât nu ajută la găsirea răspunsului. */
+const MIN_TEXT_CHARS = 40;
 
 /**
  * v2.5.17 (bug #44): 45 s era insuficient pentru un snapshot de ~19k caractere
@@ -143,82 +187,485 @@ export async function resolveAiFinderModel(): Promise<string | null> {
   return choice.model;
 }
 
-/* ---------------- 1) snapshot DOM curățat ---------------- */
+/* ---------------- 1) snapshot DOM filtrat ---------------- */
 
-export async function captureCleanDom(page: Page): Promise<string> {
-  return page.evaluate<string, number>((max) => {
-    const clone = (document.body ? document.body.cloneNode(true) : document.createElement('body')) as HTMLElement;
+/** Datele brute ale unui element interactiv, citite din pagină (bug #95/#96). */
+export interface InputCandidateProbe {
+  tagName: string;
+  /** `type` de <input>, lower-case; '' dacă atributul lipsește (= text). */
+  type: string;
+  role: string;
+  contenteditable: string;
+  isContentEditable: boolean;
+  className: string;
+  disabled: boolean;
+  ariaDisabled: boolean;
+  display: string;
+  visibility: string;
+  opacity: string;
+  rect: { x: number; y: number; width: number; height: number };
+  /** id/name/type/role/aria-label/placeholder/data-testid/contenteditable/class */
+  attrs: string;
+}
 
-    // zgomot: scripturi, stiluri, media, cookie/GDPR/ads
-    clone
-      .querySelectorAll(
-        'script, style, noscript, iframe, svg, link, meta, template, canvas, video, audio, [class*="cookie"], [class*="gdpr"], [class*="consent"], [class*="advert"]'
-      )
-      .forEach((el) => el.remove());
+export interface InputCandidateCheck {
+  visible: boolean;
+  enabled: boolean;
+  acceptsText: boolean;
+  inViewport: boolean;
+  nearBottom: boolean;
+  ok: boolean;
+  /** Primul criteriu picat — ajunge în log și în promptul de reîncercare. */
+  reason?: string;
+}
 
-    // atribute irelevante (style, on*, data-react*, payload-uri de imagine)
-    clone.querySelectorAll('*').forEach((el) => {
-      const attrs = Array.from(el.attributes);
-      for (const attr of attrs) {
-        const n = attr.name;
-        if (
-          n === 'style' ||
-          n.startsWith('on') ||
-          n.startsWith('data-react') ||
-          n === 'srcset' ||
-          n === 'sizes'
-        ) {
-          el.removeAttribute(n);
+/** Tipurile de <input> care acceptă text ('' = atribut lipsă → text implicit). */
+const TEXT_INPUT_TYPES = ['text', 'search', ''];
+
+/** Editori bogați (Claude/Gemini etc.): rădăcina lor nu are contenteditable. */
+const EDITOR_CLASS_RE = /ProseMirror|ql-editor|contenteditable/i;
+
+/**
+ * v2.5.41 (bug #95): „acceptă text" — singura definiție a căsuței de chat,
+ * folosită și la pre-filtrarea DOM-ului (bug #96) și la validarea strictă.
+ */
+export function acceptsTextInput(
+  p: Pick<
+    InputCandidateProbe,
+    'tagName' | 'type' | 'contenteditable' | 'isContentEditable' | 'className'
+  >
+): boolean {
+  const tag = String(p.tagName || '').toUpperCase();
+  if (tag === 'TEXTAREA') return true;
+  if (tag === 'INPUT') return TEXT_INPUT_TYPES.indexOf(p.type) >= 0;
+  if (p.contenteditable === 'true' || p.isContentEditable === true) return true;
+  return EDITOR_CLASS_RE.test(p.className || '');
+}
+
+/**
+ * v2.5.41 (bug #95): toate criteriile unui candidat de căsuță de chat. La
+ * rulare e folosit întotdeauna PRIMUL element al selectorului (vezi
+ * resolveSlot), deci exact primul element trebuie să treacă de toate.
+ */
+export function checkInputCandidate(
+  p: InputCandidateProbe,
+  viewport: { width: number; height: number }
+): InputCandidateCheck {
+  const r = p.rect;
+  const visible =
+    r.width >= 6 &&
+    r.height >= 6 &&
+    p.display !== 'none' &&
+    p.visibility !== 'hidden' &&
+    Number(p.opacity) > 0;
+  const enabled = !p.disabled && !p.ariaDisabled;
+  const acceptsText = acceptsTextInput(p);
+  const inViewport =
+    r.y + r.height > 0 && r.y < viewport.height && r.x + r.width > 0 && r.x < viewport.width;
+  // căsuța de chat e „lipită" de marginea de jos a paginii
+  const nearBottom = r.y > viewport.height * 0.5;
+
+  let reason: string | undefined;
+  if (!visible) reason = 'not visible';
+  else if (!enabled) reason = 'disabled';
+  else if (!acceptsText) reason = 'does not accept text';
+  else if (!inViewport) reason = 'outside the viewport';
+  else if (!nearBottom) reason = 'not near the bottom of the page';
+
+  return { visible, enabled, acceptsText, inViewport, nearBottom, ok: !reason, reason };
+}
+
+/** Linia din snapshot pe care o citește modelul pentru un candidat (bug #96). */
+export function formatCandidateLine(
+  n: number,
+  p: InputCandidateProbe,
+  viewport: { width: number; height: number }
+): string {
+  const c = checkInputCandidate(p, viewport);
+  const yn = (b: boolean) => (b ? 'yes' : 'no');
+  return (
+    '#' +
+    n +
+    ' <' +
+    String(p.tagName || '').toLowerCase() +
+    '> ' +
+    (p.attrs || '(fără atribute)') +
+    ' | visible=' +
+    yn(c.visible) +
+    ' enabled=' +
+    yn(c.enabled) +
+    ' acceptsText=' +
+    yn(c.acceptsText) +
+    ' inViewport=' +
+    yn(c.inViewport) +
+    ' y=' +
+    Math.round(p.rect.y) +
+    ' x=' +
+    Math.round(p.rect.x) +
+    ' w=' +
+    Math.round(p.rect.width) +
+    ' h=' +
+    Math.round(p.rect.height)
+  );
+}
+
+/** Citește din pagină datele brute ale elementelor care potrivesc un selector. */
+async function probeInputCandidates(
+  page: Page,
+  selector: string,
+  limit = MAX_SNAPSHOT_CANDIDATES
+): Promise<{
+  count: number;
+  viewport: { width: number; height: number };
+  probes: InputCandidateProbe[];
+}> {
+  return page.evaluate<
+    {
+      count: number;
+      viewport: { width: number; height: number };
+      probes: InputCandidateProbe[];
+    },
+    { selector: string; limit: number }
+  >(
+    (args) => {
+      const viewport = { width: window.innerWidth, height: window.innerHeight };
+      let nodes: NodeListOf<Element>;
+      try {
+        nodes = document.querySelectorAll(args.selector);
+      } catch {
+        return { count: -1, viewport, probes: [] };
+      }
+      const attrKeys = [
+        'id',
+        'name',
+        'type',
+        'role',
+        'aria-label',
+        'placeholder',
+        'data-testid',
+        'contenteditable'
+      ];
+      const probes: InputCandidateProbe[] = [];
+      for (let i = 0; i < nodes.length && probes.length < args.limit; i++) {
+        const el = nodes[i] as HTMLElement;
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        const cls = typeof el.className === 'string' ? el.className : '';
+        const attrs: string[] = [];
+        for (const key of attrKeys) {
+          const v = el.getAttribute(key);
+          if (v) attrs.push(key + '="' + String(v).slice(0, 80) + '"');
+        }
+        if (cls) attrs.push('class="' + cls.slice(0, 120) + '"');
+        probes.push({
+          tagName: el.tagName,
+          type: (el.getAttribute('type') || '').toLowerCase(),
+          role: el.getAttribute('role') || '',
+          contenteditable: el.getAttribute('contenteditable') || '',
+          isContentEditable: el.isContentEditable === true,
+          className: cls,
+          disabled: (el as HTMLInputElement).disabled === true,
+          ariaDisabled: el.getAttribute('aria-disabled') === 'true',
+          display: style.display,
+          visibility: style.visibility,
+          opacity: style.opacity,
+          rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+          attrs: attrs.join(' ')
+        });
+      }
+      return { count: nodes.length, viewport, probes };
+    },
+    { selector, limit }
+  );
+}
+
+/**
+ * HTML-ul curățat: doar candidații interacți (plus strămoșii lor, ca selectorul
+ * să poată fi compus) și — opțional — nodurile cu text. Cu `skipFilter` întoarce
+ * tot DOM-ul curățat (comportamentul dinainte de v2.5.41, folosit de raportarea
+ * de bug).
+ */
+async function captureFilteredHtml(
+  page: Page,
+  opts: { includeText: boolean; skipFilter?: boolean }
+): Promise<string> {
+  return page.evaluate<
+    string,
+    { filter: string; includeText: boolean; minText: number; skipFilter: boolean }
+  >(
+    (cfg) => {
+      const body = document.body;
+      if (!body) return '(fără body)';
+
+      const noiseTags = [
+        'SCRIPT',
+        'STYLE',
+        'NOSCRIPT',
+        'IFRAME',
+        'SVG',
+        'LINK',
+        'META',
+        'TEMPLATE',
+        'CANVAS',
+        'VIDEO',
+        'AUDIO'
+      ];
+      const noiseClassRe = /cookie|gdpr|consent|advert/i;
+
+      const clone = body.cloneNode(true) as HTMLElement;
+      // cloneNode păstrează ordinea: indexul din `keep` e valabil pentru ambele
+      // liste (clonatul e încă intact, nu am șters nimic)
+      const live = Array.from(body.querySelectorAll('*'));
+      const cloned = Array.from(clone.querySelectorAll('*'));
+      const index = new Map<Element, number>();
+      for (let i = 0; i < live.length; i++) index.set(live[i], i);
+
+      const keep = new Uint8Array(live.length);
+      const mark = (el: Element | null) => {
+        let node: Element | null = el;
+        while (node && node !== body) {
+          const i = index.get(node);
+          if (i === undefined || keep[i]) return;
+          keep[i] = 1;
+          node = node.parentElement;
+        }
+      };
+
+      if (!cfg.skipFilter) {
+        for (let i = 0; i < live.length; i++) {
+          const el = live[i];
+          if (noiseTags.indexOf(el.tagName) >= 0) continue;
+          if (noiseClassRe.test(el.getAttribute('class') || '')) continue;
+          let interactive = false;
+          try {
+            interactive = el.matches(cfg.filter);
+          } catch {
+            interactive = false;
+          }
+          if (interactive) mark(el);
+        }
+
+        if (cfg.includeText) {
+          const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+          let t: Node | null = walker.nextNode();
+          while (t) {
+            const parent = t.parentElement;
+            if (
+              (t.nodeValue || '').trim().length >= cfg.minText &&
+              parent &&
+              noiseTags.indexOf(parent.tagName) < 0
+            ) {
+              mark(parent);
+            }
+            t = walker.nextNode();
+          }
         }
       }
-    });
 
-    // valorile din input pot conține date sensibile (parole etc.)
-    clone.querySelectorAll('input, textarea').forEach((el) => el.removeAttribute('value'));
+      // zgomot: scripturi, stiluri, media, cookie/GDPR/ads
+      clone
+        .querySelectorAll(
+          'script, style, noscript, iframe, svg, link, meta, template, canvas, video, audio, [class*="cookie"], [class*="gdpr"], [class*="consent"], [class*="advert"]'
+        )
+        .forEach((el) => el.remove());
 
-    let html = clone.outerHTML;
-    if (html.length > max) {
-      html = html.slice(0, max / 2) + '\n...[truncat]...\n' + html.slice(-max / 2);
+      // atribute irelevante (style, on*, data-react*, payload-uri de imagine)
+      clone.querySelectorAll('*').forEach((el) => {
+        const attrs = Array.from(el.attributes);
+        for (const attr of attrs) {
+          const n = attr.name;
+          if (
+            n === 'style' ||
+            n.startsWith('on') ||
+            n.startsWith('data-react') ||
+            n === 'srcset' ||
+            n === 'sizes'
+          ) {
+            el.removeAttribute(n);
+          }
+        }
+      });
+
+      // valorile din input pot conține date sensibile (parole etc.)
+      clone.querySelectorAll('input, textarea').forEach((el) => el.removeAttribute('value'));
+
+      // v2.5.41 (bug #96): aruncăm tot ce nu e candidat sau strămoș al unuia —
+      // de la coadă spre cap (un nod fără descendenți păstrați nu are ce șterge)
+      if (!cfg.skipFilter) {
+        for (let i = cloned.length - 1; i >= 0; i--) {
+          if (!keep[i]) cloned[i].remove();
+        }
+      }
+
+      return clone.outerHTML;
+    },
+    {
+      filter: INTERACTIVE_FILTER,
+      includeText: opts.includeText,
+      minText: MIN_TEXT_CHARS,
+      skipFilter: opts.skipFilter === true
     }
-    return html;
-  }, DOM_MAX_CHARS);
+  );
+}
+
+/** Marcajul de trunchiere (ține lungimea sub buget, vezi truncateHtml). */
+const TRUNC_MARK = '\n...[truncat]...\n';
+
+/** Head + tail, ca înainte: zonele utile sunt capul și coada paginii. */
+function truncateHtml(html: string, max: number): string {
+  if (html.length <= max) return html;
+  const half = Math.floor(Math.max(0, max - TRUNC_MARK.length) / 2);
+  return html.slice(0, half) + TRUNC_MARK + html.slice(-half);
+}
+
+export interface DomCaptureOptions {
+  /**
+   * Păstrează și nodurile cu text (implicit `true`). Se dezactivează când
+   * căutăm căsuța de input / butoanele: textul conversației e exact zgomotul
+   * care face un model mic să aleagă alt element.
+   */
+  includeText?: boolean;
+  /**
+   * v2.5.41: snapshot-ul COMPLET curățat (fără pre-filtrare, fără lista de
+   * candidați) — comportamentul de dinainte, folosit de raportarea de bug
+   * (`probeProviderSelectors`), unde dezvoltatorul vrea toată structura
+   * paginii. Analiza AI nu îl folosește niciodată.
+   */
+  full?: boolean;
+}
+
+/**
+ * Snapshot-ul trimis modelului (bug #96): lista candidaților interacți, cu
+ * vizibilitatea/poziția deja calculate (ca modelul să nu ghicească), urmată de
+ * DOM-ul filtrat (candidații și strămoșii lor). Lista are prioritate la
+ * trunchiere, ca să nu rămână modelul fără elementele în care trebuie să aleagă.
+ */
+export async function captureCleanDom(page: Page, opts: DomCaptureOptions = {}): Promise<string> {
+  if (opts.full) {
+    return truncateHtml(
+      await captureFilteredHtml(page, { includeText: true, skipFilter: true }),
+      DOM_MAX_CHARS
+    );
+  }
+  const includeText = opts.includeText !== false;
+  const snapshot = await probeInputCandidates(page, INTERACTIVE_FILTER);
+  const html = await captureFilteredHtml(page, { includeText });
+
+  const lines = snapshot.probes.map((p, i) => formatCandidateLine(i + 1, p, snapshot.viewport));
+  if (snapshot.count > snapshot.probes.length) {
+    lines.push(
+      '... +' + (snapshot.count - snapshot.probes.length) + ' more interactive elements'
+    );
+  }
+  const candidates =
+    'VIEWPORT: ' +
+    Math.round(snapshot.viewport.width) +
+    'x' +
+    Math.round(snapshot.viewport.height) +
+    '\nINTERACTIVE CANDIDATES (' +
+    Math.max(0, snapshot.count) +
+    ', in DOM order):\n' +
+    (lines.join('\n') || '(none)');
+
+  const budget = Math.max(2000, DOM_MAX_CHARS - candidates.length);
+  let out =
+    candidates +
+    '\n\nFILTERED DOM (only those candidates, their ancestors' +
+    (includeText ? ' and text blocks' : '') +
+    '; noise removed):\n' +
+    truncateHtml(html, budget);
+  if (out.length > DOM_MAX_CHARS) {
+    out = out.slice(0, DOM_MAX_CHARS - TRUNC_MARK.length) + TRUNC_MARK;
+  }
+  return out;
 }
 
 /* ---------------- 2) prompt + apel Ollama ---------------- */
 
-function buildPrompt(providerName: string, url: string, missingSlots: string[], dom: string): string {
-  return `You are a DOM analysis expert. Find CSS selectors for a website UI.
+export interface PromptContext {
+  providerName: string;
+  url: string;
+  missingSlots: string[];
+  dom: string;
+  /** 1 = prima încercare; 2+ = reîncercare după un selector respins. */
+  attempt: number;
+  /** De ce a fost respinsă încercarea anterioară („prompt mai specific"). */
+  failureReason?: string;
+  rejectedSelector?: string;
+}
 
-WEBSITE: ${providerName}
-URL: ${url}
+/**
+ * v2.5.41 (bug #96): promptul spune exact ce e căsuța de chat (jos, vizibilă,
+ * activă, acceptă text), cum se citește lista de candidați și ce NU are voie să
+ * aleagă (inputuri ascunse, upload, căutare, „Line wrap" etc.). La reîncercare
+ * primește și motivul respingerii, ca să nu repete același element.
+ */
+export function buildPrompt(ctx: PromptContext): string {
+  const lines: string[] = [
+    'You are a DOM analysis expert. Find CSS selectors for a website UI.',
+    '',
+    'WEBSITE: ' + ctx.providerName,
+    'URL: ' + ctx.url,
+    'I need selectors for these elements: ' + ctx.missingSlots.join(', '),
+    '',
+    'Element meanings:',
+    '- input: THE CHAT INPUT — the text box where the user types a message. It sits in the',
+    "  BOTTOM HALF of the page and it is VISIBLE, ENABLED and accepts typed text: a <textarea>,",
+    '  an <input type="text">/<input type="search">, a <div contenteditable="true"> (often with',
+    '  class ProseMirror or ql-editor) or an element with role="textbox".',
+    "- response: the container holding the AI assistant's LATEST reply (NOT the user's message bubble, NOT the input box, NOT promo/marketing cards)",
+    '- newChat: button to start a new conversation',
+    '- stopButton: button to stop AI generation (visible only while generating)',
+    '',
+    'HOW TO READ THE SNAPSHOT:',
+    '1. INTERACTIVE CANDIDATES lists the interactive elements of the page (inputs, editors,',
+    '   buttons) in DOM order, with their attributes and with flags already computed for you.',
+    '2. FILTERED DOM shows those elements inside their real ancestor chain — take the selector',
+    '   from there (prefer id, then aria-label/data-testid, then role, then a stable class).',
+    '',
+    'INSTRUCTIONS:',
+    '1. For "input" pick ONLY a candidate with visible=yes, enabled=yes, acceptsText=yes and',
+    '   inViewport=yes, and prefer the one with the LARGEST y — the composer is at the bottom.',
+    '2. NEVER pick: hidden inputs (type="hidden"), file/upload inputs, off-screen, zero-size or',
+    '   disabled controls, search boxes, theme/spellcheck/"Line wrap" helpers, cookie banners,',
+    '   sidebars, headers, footers or promotional cards.',
+    '3. The selector must match the element in the REAL page (the snapshot comes from it):',
+    '   never invent ids/classes, and do not use the candidate numbering.',
+    '4. Use STABLE selectors: prefer data-testid > id > aria-label > role > semantic tag > class.',
+    '   Use at most 1-2 classes; NEVER :nth-child / :nth-of-type / positional paths.',
+    '5. If an element does not exist in the snapshot, return null for it.'
+  ];
 
-I need selectors for these elements: ${missingSlots.join(', ')}
+  if (ctx.attempt > 1 && ctx.failureReason) {
+    lines.push(
+      '',
+      'ATTEMPT ' + ctx.attempt + ' OF ' + AI_FINDER_MAX_ATTEMPTS + ' — YOUR PREVIOUS ANSWER WAS REJECTED:',
+      '- rejected selector: ' + (ctx.rejectedSelector || '(none)'),
+      '- why it was rejected: ' + ctx.failureReason,
+      'That element is NOT the chat input. Read INTERACTIVE CANDIDATES again and answer with a',
+      'DIFFERENT element that satisfies rule 1 (visible=yes, enabled=yes, acceptsText=yes,',
+      'inViewport=yes, largest y). If no candidate qualifies, return null.'
+    );
+  }
 
-Element meanings:
-- input: the text box where the user types a message
-- response: the container holding the AI assistant's LATEST reply (NOT the user's message bubble, NOT the input box, NOT promo/marketing cards)
-- newChat: button to start a new conversation
-- stopButton: button to stop AI generation (visible only while generating)
-
-DOM SNAPSHOT (cleaned):
-\`\`\`html
-${dom}
-\`\`\`
-
-INSTRUCTIONS:
-1. Find each requested element in the snapshot.
-2. Use STABLE selectors: prefer data-testid > id > aria-label > role > semantic tag > class. Use at most 1-2 classes; NEVER :nth-child / :nth-of-type / positional paths.
-3. AVOID: deeply nested CSS, obfuscated/hashed classes, cookie banners, sidebars, headers, footers, promotional/upsell cards.
-4. If an element does not exist in the snapshot, return null for it.
-5. Respond with ONLY one JSON object (no markdown fences, no explanation):
-{
-  "input": "css selector or null",
-  "response": "css selector or null",
-  "newChat": "css selector or null",
-  "stopButton": "css selector or null",
-  "confidence": 0.0,
-  "reasoning": "short explanation"
-}`;
+  lines.push(
+    '',
+    'DOM SNAPSHOT:',
+    '```',
+    ctx.dom,
+    '```',
+    '',
+    'Respond with ONLY one JSON object (no markdown fences, no explanation):',
+    '{',
+    '  "input": "css selector or null",',
+    '  "response": "css selector or null",',
+    '  "newChat": "css selector or null",',
+    '  "stopButton": "css selector or null",',
+    '  "confidence": 0.0,',
+    '  "reasoning": "short explanation"',
+    '}'
+  );
+  return lines.join('\n');
 }
 
 /** Extrage primul obiect JSON echilibrat din text (ignoră string-urile). */
@@ -291,8 +738,66 @@ export function parseAIResponse(reply: string): DiscoveredSelectors | null {
   return result;
 }
 
+/** Un apel complet (open + send) cu timeout-ul din setări. */
+async function askOllama(
+  ollama: OllamaProvider,
+  prompt: string,
+  timeoutMs: number
+): Promise<string> {
+  const controller = new AbortController();
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const work = (async () => {
+      await ollama.open();
+      return await ollama.send(undefined, prompt, controller.signal);
+    })();
+    // v2.5.17 (bug #44): la timeout promisiunea pierzătoare e abandonată —
+    // fără handler, reject-ul ei ajunge „unhandled rejection" în extension host.
+    work.catch(() => undefined);
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error('timeout after ' + Math.round(timeoutMs / 1000) + 's'));
+      }, timeoutMs);
+    });
+    return await Promise.race([work, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * v2.5.41 (bug #95): verifică strict sloturile cerute. Doar căsuța de chat are
+ * criterii proprii (vizibil, activ, acceptă text, în viewport, în jumătatea de
+ * jos); restul sloturilor trec mai departe de regulile generale din
+ * validateSelectors().
+ */
+async function checkRequestedSlots(
+  page: Page,
+  discovered: DiscoveredSelectors,
+  missingSlots: string[]
+): Promise<{ ok: true } | { ok: false; reason: string; selector?: string }> {
+  for (const slot of SLOTS) {
+    if (missingSlots.indexOf(slot) < 0) continue;
+    const sel = discovered[slot];
+    if (!sel) {
+      return { ok: false, reason: 'the AI answered null for "' + slot + '"' };
+    }
+    if (slot !== 'input') continue;
+    const check = await validateChatInputSelector(page, sel);
+    if (!check.ok) return { ok: false, reason: String(check.reason), selector: sel };
+  }
+  return { ok: true };
+}
+
 /**
  * Trimite snapshot-ul DOM la Ollama și întoarce selectorii propuși (sau null).
+ *
+ * v2.5.41 (bug #95): ce s-a propus e verificat în pagină înainte de a fi
+ * întors; dacă pică, analiza se reia cu un prompt care spune ce a fost respins
+ * (max AI_FINDER_MAX_ATTEMPTS). După ultima încercare nu se întoarce nimic.
+ * Timeout-ul/eroarea de provider NU se reîncearcă (un model care nu termină în
+ * 120 s nu termină nici la reluare), ca să nu blocăm fluxul de 3 ori.
  */
 export async function findSelectorsWithAI(
   page: Page,
@@ -315,41 +820,71 @@ export async function findSelectorsWithAI(
 
   let dom = '';
   try {
-    dom = await captureCleanDom(page);
+    // v2.5.41 (bug #96): textul conversației se păstrează doar când căutăm
+    // containerul de răspuns — la input/butoane e exact zgomotul care strică.
+    dom = await captureCleanDom(page, { includeText: missingSlots.indexOf('response') >= 0 });
   } catch (e: any) {
     log('captura DOM a eșuat: ' + (e?.message ?? String(e)));
     return null;
   }
   log('DOM capturat: ' + dom.length + ' caractere');
 
-  const prompt = buildPrompt(providerName, url, missingSlots, dom);
   const settings = finderSettings();
   const ollama = new OllamaProvider({ model });
-  const controller = new AbortController();
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    const work = (async () => {
-      await ollama.open();
-      return await ollama.send(undefined, prompt, controller.signal);
-    })();
-    // v2.5.17 (bug #44): la timeout promisiunea pierzătoare e abandonată —
-    // fără handler, reject-ul ei ajunge „unhandled rejection" în extension host.
-    work.catch(() => undefined);
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        controller.abort();
-        reject(new Error('timeout after ' + Math.round(settings.timeoutMs / 1000) + 's'));
-      }, settings.timeoutMs);
-    });
-    const reply = await Promise.race([work, timeout]);
+  let failureReason: string | undefined;
+  let rejectedSelector: string | undefined;
+
+  for (let attempt = 1; attempt <= AI_FINDER_MAX_ATTEMPTS; attempt++) {
+    let reply = '';
+    try {
+      // fără istoric între încercări: promptul conține deja tot ce trebuie
+      // (altfel cele 18k caractere de snapshot s-ar aduna peste num_ctx 8192)
+      await ollama.newChat();
+      reply = await askOllama(
+        ollama,
+        buildPrompt({
+          providerName,
+          url,
+          missingSlots,
+          dom,
+          attempt,
+          failureReason,
+          rejectedSelector
+        }),
+        settings.timeoutMs
+      );
+    } catch (e: any) {
+      log('analiza AI a eșuat: ' + (e?.message ?? String(e)));
+      return null;
+    }
     log('răspuns AI: ' + reply.length + ' caractere');
-    return parseAIResponse(reply);
-  } catch (e: any) {
-    log('analiza AI a eșuat: ' + (e?.message ?? String(e)));
-    return null;
-  } finally {
-    if (timer) clearTimeout(timer);
+
+    const parsed = parseAIResponse(reply);
+    if (!parsed) {
+      failureReason = 'your reply was not a valid JSON object';
+      rejectedSelector = undefined;
+      log('încercarea ' + attempt + '/' + AI_FINDER_MAX_ATTEMPTS + ' a eșuat: răspuns fără JSON');
+      continue;
+    }
+
+    const verdict = await checkRequestedSlots(page, parsed, missingSlots);
+    if (verdict.ok) return parsed;
+
+    failureReason = verdict.reason;
+    rejectedSelector = verdict.selector;
+    log(
+      'încercarea ' +
+        attempt +
+        '/' +
+        AI_FINDER_MAX_ATTEMPTS +
+        ' respinsă: ' +
+        verdict.reason +
+        (verdict.selector ? ' (' + verdict.selector + ')' : '')
+    );
   }
+
+  log('all proposed selectors failed validation — manual fix required');
+  return null;
 }
 
 /* ---------------- 3) validare în pagina reală ---------------- */
@@ -389,6 +924,55 @@ function assignSlot(target: DiscoveredSelectors, slot: SlotName, selector: strin
 }
 
 /**
+ * v2.5.41 (bug #95): validarea strictă a unui selector de căsuță de chat.
+ * Testat în pagină cu `page.locator(selector)` (primul element e cel folosit și
+ * la rulare, vezi resolveSlot) + criteriile din `checkInputCandidate`: vizibil
+ * (nu display:none / width:0 / opacity:0), activ, acceptă text, în viewport și
+ * în jumătatea de jos a paginii. Fără ele, AI-ul a salvat un input ascuns din
+ * UI (`input[aria-label="Line wrap"]`) și a stricat ChatGPT până la fix manual.
+ */
+export async function validateChatInputSelector(
+  page: Page,
+  selector: string
+): Promise<InputCandidateCheck & { count: number }> {
+  const fail = (reason: string, count = 0): InputCandidateCheck & { count: number } => ({
+    count,
+    visible: false,
+    enabled: false,
+    acceptsText: false,
+    inViewport: false,
+    nearBottom: false,
+    ok: false,
+    reason
+  });
+
+  let count = 0;
+  try {
+    const loc = page.locator(selector);
+    count = await loc.count();
+    if (count === 0) return fail('no element matches', 0);
+    if (count > 20) return fail('too generic (' + count + ' matches)', count);
+    if (!(await loc.first().isVisible())) return fail('not visible', count);
+    if (!(await loc.first().isEnabled())) return fail('disabled', count);
+  } catch (e: any) {
+    return fail('invalid selector (' + (e?.message ?? String(e)) + ')', count);
+  }
+
+  let probe: InputCandidateProbe | undefined;
+  let viewport = { width: 0, height: 0 };
+  try {
+    const probed = await probeInputCandidates(page, selector, 1);
+    probe = probed.probes[0];
+    viewport = probed.viewport;
+  } catch {
+    /* mai jos raportăm „cannot be inspected" */
+  }
+  if (!probe) return fail('cannot be inspected', count);
+
+  return { ...checkInputCandidate(probe, viewport), count };
+}
+
+/**
  * Validează selectorii propuși de AI în pagina reală (fără să învețe nimic).
  * Aplică aceleași reguli de siguranță ca scanul healer-ului: nu acceptăm
  * căsuța de input ca „response”, bula userului, texte promo sau ecouri.
@@ -406,6 +990,19 @@ export async function validateSelectors(
   for (const slot of SLOTS) {
     const sel = discovered[slot];
     if (!sel) continue;
+    if (slot === 'input') {
+      // v2.5.41 (bug #95): căsuța de chat are criterii proprii (vizibil, activ,
+      // acceptă text, în viewport, în jumătatea de jos) — vezi
+      // checkInputCandidate(). Regulile generale de mai jos nu se mai aplică.
+      const check = await validateChatInputSelector(page, sel);
+      if (!check.ok) {
+        log('respins input (' + check.reason + '): ' + sel);
+        continue;
+      }
+      assignSlot(valid, slot, sel);
+      log('validat ' + slot + ': ' + sel + ' (' + check.count + ' potriviri)');
+      continue;
+    }
     try {
       const probe = await page.evaluate<SlotProbe, { s: string; sl: string }>(
         (args) => {
@@ -460,10 +1057,6 @@ export async function validateSelectors(
       }
       if (!probe.visible) {
         log('respins ' + slot + ' (invizibil): ' + sel);
-        continue;
-      }
-      if (slot === 'input' && !probe.editable) {
-        log('respins input (nu e editabil): ' + sel);
         continue;
       }
       if (slot === 'response') {
@@ -711,7 +1304,12 @@ async function discoverForHealer(
       });
       if (stored) {
         applied.push(s + '=' + sel);
-        if (s === slot) found = sel;
+        if (s === slot) {
+          found = sel;
+          // v2.5.41 (bug #95): linia care lipsea — se vede negru pe alb ce s-a
+          // validat în pagină și s-a salvat
+          log('validated selector for ' + providerId + '.' + s + ': ' + sel);
+        }
       } else {
         log('AI finder: respins la salvare (' + s + '): ' + sel);
       }

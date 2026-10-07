@@ -269,7 +269,9 @@ export async function probeProviderSelectors(
     if (!snapshotTaken) {
       snapshotTaken = true;
       try {
-        snapshot = (await captureCleanDom(page)).slice(0, MAX_DOM_SNAPSHOT_CHARS);
+        // v2.5.41: `full` = snapshot-ul complet curățat (ca înainte de filtrarea
+        // pentru AI finder) — raportul de bug are nevoie de toată structura
+        snapshot = (await captureCleanDom(page, { full: true })).slice(0, MAX_DOM_SNAPSHOT_CHARS);
       } catch (e: any) {
         log('dom snapshot failed: ' + (e?.message ?? String(e)));
       }

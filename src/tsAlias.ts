@@ -99,7 +99,14 @@ export interface TsAliasMapping {
 }
 
 /** Uneltele cu o singură cale în `args.path`. */
-const PATH_TOOLS = new Set(['read_file', 'write_file', 'edit_file']);
+const PATH_TOOLS = new Set([
+  'read_file',
+  'write_file',
+  'edit_file',
+  // v2.5.42 (bug #98): AI-ul vede fișierele TS ca `.ts.txt`, deci și ștergerea
+  // trebuie tradusă înapoi în calea reală
+  'delete_file'
+]);
 
 /**
  * v2.5.27 (bug #63) FIX 2: traduce căile-alias primite de la AI în căile reale,

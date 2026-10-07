@@ -311,11 +311,17 @@ export type ApprovalFn = (
  * fișier e tratat ca în afara scope-ului (fail-closed).
  * ========================================================================= */
 
-/** Căile care modifică fișiere (target-ul aprobării = o cale de fișier). */
+/**
+ * Căile care modifică fișiere (target-ul aprobării = o cale de fișier).
+ * v2.5.42 (bug #98): și ștergerile intră aici — sunt tot operații distructive
+ * cu o singură cale, deci trec prin aceleași garduri de scope (bug #68).
+ */
 export const FILE_WRITE_TOOLS: ReadonlySet<string> = new Set([
   'write_file',
   'write_files',
-  'edit_file'
+  'edit_file',
+  'delete_file',
+  'delete_directory'
 ]);
 
 /** Extensiile considerate „fișier" la scanarea textului task-ului. */
@@ -341,6 +347,38 @@ const SCOPE_DOTFILE_RE = /(?:^|[\s"'`(\[<,])(\.[\w-]+)\b/g;
 /** Token care pare URL (domeniu), nu cale de proiect. */
 const SCOPE_URL_LIKE_RE =
   /^(?:[\w-]+\.)+(?:com|org|net|io|dev|ai|app|co|me|edu|gov)(?:\/|$)/i;
+
+/**
+ * v2.5.42 (bug #97): formulările care INTERZIC atingerea unei căi. O cale
+ * menționată într-o propoziție negativă („Nu folosi src/") NU e o țintă a
+ * task-ului: inclusă fiind în scope, warning-ul de post-task (bug #91) raporta
+ * „folderul src/ încă există (52 fișiere)" după fiecare task cu cleanup.
+ */
+const SCOPE_NEGATION_RE = new RegExp(
+  '(?:^|[^\\w])(?:' +
+    'nu\\s+(?:folosi|folosi[tț]i|utiliza|utiliza[tț]i|modifica|modifica[tț]i|' +
+    'atinge|atinge[tț]i|edita|edita[tț]i|schimba|schimba[tț]i|[sș]terge|[sș]terge[tț]i|' +
+    'crea|crea[tț]i|rescrie|rescrie[tț]i)' +
+    "|(?:do\\s+not|don'?t|never)\\s+(?:use|modify|touch|edit|change|delete|remove|create|rewrite)" +
+    '|leave\\s+(?:it\\s+)?alone' +
+    '|avoid' +
+    '|f[ăa]r[ăa]' +
+    ')' +
+    '(?:\\s+(?:the|a|an|any|this|that|folder|file|dir|directory|' +
+    'folderul|fisierul|fi[sș]ierul|directorul|din|from))*' +
+    '\\s*[:,\\-–]?\\s*["\'`(\\[<]?\\s*$',
+  'i'
+);
+
+/** v2.5.42 (bug #97): mențiunea de la `pathStart` vine după o interdicție? */
+function isNegatedScopeMention(text: string, pathStart: number): boolean {
+  return SCOPE_NEGATION_RE.test(text.slice(0, pathStart));
+}
+
+/** Indexul din text unde începe chiar calea (nu separatorul prins de regex). */
+function scopePathStart(m: RegExpExecArray): number {
+  return m.index + m[0].length - m[1].length;
+}
 
 /** Normalizează o cale pentru comparații (separatori, `./`, bară finală, caz). */
 function normalizeScopePath(p: string): string {
@@ -379,6 +417,12 @@ function looksLikeFileEntry(p: string): boolean {
  * rădăcină (`bootcamp-test/` → `bootcamp-test`) și numele de fișiere FĂRĂ cale
  * (`index.ts`, `test.ts`, `changelog.md`, `package.json`, `tsconfig.json`) sunt
  * ignorate — sunt fișierele din folderul deja inclus, nu ținte separate.
+ *
+ * v2.5.42 FIX (bug #97): căile menționate NEGATIV („Nu folosi src/", „do not
+ * modify src/", „avoid src/") nu mai intră în scope — altfel „Lucrează în
+ * bootcamp-test2/. Nu folosi src/" dădea scope `[bootcamp-test2, src]` și
+ * verificarea post-task (bug #91) raporta fals „folderul src/ încă există
+ * (52 fișiere)". Scope-ul se extrage doar din instrucțiunea principală.
  */
 export function detectTaskScope(userText: string): string[] | null {
   const text = String(userText ?? '');
@@ -402,6 +446,8 @@ export function detectTaskScope(userText: string): string[] | null {
     while ((m = re.exec(text)) !== null) {
       const raw = m[1];
       if (SCOPE_URL_LIKE_RE.test(raw)) continue;
+      // v2.5.42 (bug #97): „Nu folosi src/" nu face din src o țintă a task-ului
+      if (isNegatedScopeMention(text, scopePathStart(m))) continue;
       const n = normalizeScopePath(raw);
       if (!n || n === '.' || n === '..' || n === '/') continue;
       if (looksLikeFileEntry(n)) {
@@ -423,6 +469,8 @@ export function detectTaskScope(userText: string): string[] | null {
     while ((m = re.exec(text)) !== null) {
       const raw = m[1];
       if (SCOPE_URL_LIKE_RE.test(raw)) continue;
+      // v2.5.42 (bug #97): nici un nume de fișier negat nu e o țintă
+      if (isNegatedScopeMention(text, scopePathStart(m))) continue;
       const n = normalizeScopePath(raw);
       if (!n || n === '.' || n === '..' || n === '/') continue;
       // „index.ts" extras din „bootcamp-test/index.ts" nu e o țintă separată
@@ -1316,8 +1364,8 @@ escaped, never truncated, never JSON-quoted. The fences themselves are NOT
 part of the file — the chat UI hides them when rendering.
 
 For ALL OTHER actions (read_file, read_files, list_files, search_files,
-search_semantic, run_command, run_npm, git_*, project_info, open_workspace),
-use the JSON format:
+search_semantic, run_command, run_npm, delete_file, delete_directory, git_*,
+project_info, open_workspace), use the JSON format:
 {"action":"NAME","args":{...}}
 
 ## Available actions:
@@ -1337,6 +1385,23 @@ use the JSON format:
 11. project_info() - detected project info
 12. search_semantic(query) - semantic code search (if indexed)
 13. open_workspace(path) - open folder in new window
+14. delete_file(path) - delete ONE file (needs approval)
+    {"action":"delete_file","args":{"path":"bootcamp-test2/test.ts"}}
+15. delete_directory(path, recursive?) - delete a folder (needs approval);
+    recursive:true deletes the folder WITH all its contents (only when the
+    task asks for it)
+    {"action":"delete_directory","args":{"path":"bootcamp-test2","recursive":true}}
+
+## DELETING FILES AND FOLDERS
+- Use delete_file / delete_directory — NEVER run_command with "rm", "del",
+  "rmdir" or "Remove-Item" to delete.
+- Delete ONLY inside the task scope (the paths the user named); a deletion
+  outside it is refused by the client.
+- delete_file works on files only (on a folder you get a hint to use
+  delete_directory); delete_directory without recursive fails on a non-empty
+  folder — pass recursive:true to delete the folder with its contents.
+- If a deletion is refused or rejected, STOP and report it — do not look for
+  another way to delete the same path.
 
 NOTE (TypeScript): .ts / .tsx / .mts / .cts files are shown to you with a ".txt"
 suffix (e.g. "src/file.ts.txt") because web chat backends refuse plain ".ts"
@@ -1672,6 +1737,8 @@ const TRUST_REQUIRED_TOOLS = new Set([
   'write_file',
   'edit_file',
   'write_files',
+  'delete_file',
+  'delete_directory',
   'run_command',
   'run_npm'
 ]);
@@ -1850,6 +1917,26 @@ export async function executeTool(
 
       case 'write_files':
         return await writeFilesBatch(call.args, workspaceRoot, approve, userText);
+
+      // v2.5.42 (bug #98): ștergerea de fișiere/foldere — cu scope + aprobare
+      case 'delete_file':
+        return await deleteFileTool(
+          call.args.path,
+          workspaceRoot,
+          approve,
+          log,
+          userText
+        );
+
+      case 'delete_directory':
+        return await deleteDirectoryTool(
+          call.args.path,
+          call.args.recursive === true,
+          workspaceRoot,
+          approve,
+          log,
+          userText
+        );
 
       case 'project_info':
         return await projectInfoTool(workspaceRoot);
@@ -2189,6 +2276,157 @@ async function editFile(
     Buffer.from(updated, 'utf8')
   );
   return { ok: true, result: 'Edited ' + rel };
+}
+
+/* =========================================================================
+ * v2.5.42 (bug #98) — ȘTERGEREA ca unealtă de primă clasă
+ * În testul din 13:29:07 AI-ul a cerut `delete_file` de două ori (unealtă
+ * inexistentă ⇒ „Unknown tool"), apoi a trecut pe `run_command` cu `rm` —
+ * funcțional, dar ineficient și fără gardurile de scope/trust ale scrierilor.
+ * Aici adăugăm delete_file (un fișier) și delete_directory (un folder, opțional
+ * recursiv), cu aceleași reguli ca write_file: Workspace Trust, scope-ul
+ * task-ului (bug #68) și aprobare manuală când auto-approve nu acoperă.
+ * ========================================================================= */
+
+/**
+ * v2.5.42 (bug #98): ștergerea e distructivă, deci NU se face în afara
+ * scope-ului task-ului. Scope nedeterminat (prompt fără nicio cale) ⇒ `null`:
+ * nu blocăm aici, aprobarea utilizatorului rămâne gardul (fail-closed, ca la
+ * scrieri).
+ */
+function deleteScopeRefusal(rel: string, userText?: string): string | null {
+  const scope = detectTaskScope(String(userText ?? ''));
+  if (!scope || isPathInScope(rel, scope)) return null;
+  return (
+    'Refusing to delete "' + rel + '": it is outside the task scope (' +
+    scopeLabel(scope) +
+    '). Delete only inside the task scope, or ask the user.'
+  );
+}
+
+async function deleteFileTool(
+  rel: string,
+  root: string,
+  approve: ApprovalFn,
+  log: (msg: string) => void,
+  userText?: string
+): Promise<ToolResult> {
+  const refusal = deleteScopeRefusal(rel, userText);
+  if (refusal) return { ok: false, error: refusal };
+
+  let abs: string;
+  try {
+    abs = safePath(rel, root);
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? String(e) };
+  }
+
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(abs);
+  } catch {
+    return { ok: false, error: 'delete_file: "' + rel + '" does not exist.' };
+  }
+  if (stat.isDirectory()) {
+    return {
+      ok: false,
+      error: 'delete_file: "' + rel + '" is a directory — use delete_directory.'
+    };
+  }
+  if (!(await approve('delete_file', rel, '🗑️ Delete file: ' + rel))) {
+    return { ok: false, error: 'User rejected' };
+  }
+  try {
+    fs.unlinkSync(abs); // cross-platform
+  } catch (e: any) {
+    return { ok: false, error: 'delete_file failed: ' + (e?.message ?? String(e)) };
+  }
+  log('[tool] delete_file ' + rel);
+  return { ok: true, result: 'Deleted file ' + rel };
+}
+
+async function deleteDirectoryTool(
+  rel: string,
+  recursive: boolean,
+  root: string,
+  approve: ApprovalFn,
+  log: (msg: string) => void,
+  userText?: string
+): Promise<ToolResult> {
+  const refusal = deleteScopeRefusal(rel, userText);
+  if (refusal) return { ok: false, error: refusal };
+
+  let abs: string;
+  try {
+    abs = safePath(rel, root);
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? String(e) };
+  }
+  if (abs === path.resolve(root)) {
+    return {
+      ok: false,
+      error: 'delete_directory: refusing to delete the workspace root.'
+    };
+  }
+
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(abs);
+  } catch {
+    return {
+      ok: false,
+      error: 'delete_directory: "' + rel + '" does not exist.'
+    };
+  }
+  if (!stat.isDirectory()) {
+    return {
+      ok: false,
+      error: 'delete_directory: "' + rel + '" is a file — use delete_file.'
+    };
+  }
+
+  // ne-recursiv = doar un folder GOL; altfel cerem explicit recursive: true
+  if (!recursive) {
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(abs);
+    } catch (e: any) {
+      return {
+        ok: false,
+        error: 'delete_directory failed: ' + (e?.message ?? String(e))
+      };
+    }
+    if (entries.length) {
+      return {
+        ok: false,
+        error:
+          'delete_directory: "' + rel + '" is not empty — pass recursive: true ' +
+          'to delete it with all its contents.'
+      };
+    }
+  }
+
+  const label =
+    '🗑️ Delete folder' + (recursive ? ' (recursive)' : '') + ': ' + rel;
+  if (!(await approve('delete_directory', rel, label))) {
+    return { ok: false, error: 'User rejected' };
+  }
+  try {
+    // fs.rmSync cu recursive:false refuză orice folder (ERR_FS_EISDIR), deci
+    // folderul gol confirmat mai sus se șterge cu rmdirSync.
+    if (recursive) fs.rmSync(abs, { recursive: true, force: false });
+    else fs.rmdirSync(abs);
+  } catch (e: any) {
+    return {
+      ok: false,
+      error: 'delete_directory failed: ' + (e?.message ?? String(e))
+    };
+  }
+  log('[tool] delete_directory ' + rel + (recursive ? ' (recursive)' : ''));
+  return {
+    ok: true,
+    result: 'Deleted folder ' + rel + (recursive ? ' (recursive)' : '')
+  };
 }
 
 // v2.5.23: un director cu mii de intrări (ex. `out/`, `node_modules/`) nu mai

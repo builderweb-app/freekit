@@ -452,6 +452,15 @@ const MARKER_TOOL_LINE_RE = new RegExp(
 /** Uneltele cu conținut liber care acceptă formatul marker-based. */
 const MARKER_TOOLS = new Set(['write_file', 'edit_file', 'write_files']);
 
+/**
+ * v2.5.42 (bug #98): unelte marker FĂRĂ conținut — doar `PATH` (și, pentru
+ * folder, `RECURSIVE:`). Un model care a învățat `ACTION: write_file` + `PATH:`
+ * scrie firesc și `ACTION: delete_file` + `PATH:`, iar fără suportul de aici
+ * apelul perfect valid ajungea la auto-retry-ul de „malformed" (exact
+ * ineficiența din bug #98).
+ */
+const MARKER_PATH_ONLY_TOOLS = new Set(['delete_file', 'delete_directory']);
+
 /** Separatorul opțional dintre fișiere în formatul lui write_files. */
 const MARKER_FILE_SEPARATOR_RE = /^[ \t]*-{3,}[ \t]*FILE[ \t]*-{3,}[ \t]*$/i;
 
@@ -631,6 +640,28 @@ function parseEditFileMarkers(lines: string[], from: number): ToolCall | null {
   };
 }
 
+/**
+ * v2.5.42 (bug #98): `ACTION: delete_file` / `delete_directory` + `PATH:`
+ * (și `RECURSIVE: true` pentru folder). Căutarea lui PATH se oprește la
+ * următorul marker de unealtă, ca un PATH îndepărtat să nu fie confundat.
+ */
+function parsePathOnlyMarkers(
+  lines: string[],
+  from: number,
+  tool: string
+): ToolCall | null {
+  const path = findMarker(lines, 'PATH', from, MARKER_TOOL_LINE_RE);
+  if (!path) return null;
+  const filePath = path.rest.trim();
+  if (!filePath) return null;
+  if (tool === 'delete_directory') {
+    const rec = findMarker(lines, 'RECURSIVE', path.index + 1, MARKER_TOOL_LINE_RE);
+    const recursive = !!rec && /^(true|yes|1)$/i.test(rec.rest.trim());
+    return { tool, args: { path: filePath, recursive } };
+  }
+  return { tool, args: { path: filePath } };
+}
+
 function parseWriteFilesMarkers(lines: string[], from: number): ToolCall | null {
   const files: Array<{ path: string; content: string }> = [];
   let cursor = from;
@@ -691,6 +722,11 @@ export function parseMarkerToolCall(text: string): ToolCall | null {
     const m = MARKER_TOOL_LINE_RE.exec(lines[i]);
     if (!m) continue;
     const tool = m[1].toLowerCase();
+    // v2.5.42 (bug #98): unelte marker fără conținut (delete_file/delete_directory)
+    if (MARKER_PATH_ONLY_TOOLS.has(tool)) {
+      const call = parsePathOnlyMarkers(lines, i + 1, tool);
+      return call ? withCommandTabsFixed(withResolvedPaths(call)) : null;
+    }
     if (!MARKER_TOOLS.has(tool)) return null;
     if (tool === 'write_file') {
       const call = parseWriteFileMarkers(lines, i + 1);
@@ -706,13 +742,15 @@ export function parseMarkerToolCall(text: string): ToolCall | null {
   return null;
 }
 
-/** true când textul conține un `TOOL:` / `ACTION:` pentru o unealtă cu conținut liber. */
+/** true când textul conține un `TOOL:` / `ACTION:` pentru o unealtă marker. */
 export function looksLikeMarkerToolCallAttempt(text: string): boolean {
   return String(text ?? '')
     .split(/\r?\n/)
     .some((line) => {
       const m = MARKER_TOOL_LINE_RE.exec(line);
-      return !!m && MARKER_TOOLS.has(m[1].toLowerCase());
+      if (!m) return false;
+      const tool = m[1].toLowerCase();
+      return MARKER_TOOLS.has(tool) || MARKER_PATH_ONLY_TOOLS.has(tool);
     });
 }
 

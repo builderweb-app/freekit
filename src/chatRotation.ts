@@ -103,7 +103,13 @@ export function recordReadFiles(
 /** Fișierele atinse de o scriere/ștergere — extrasul lor devine învechit. */
 export function extractTouchedFiles(call: ToolCall): string[] {
   const args: any = call.args ?? {};
-  if (call.tool === 'write_file' || call.tool === 'edit_file') {
+  if (
+    call.tool === 'write_file' ||
+    call.tool === 'edit_file' ||
+    // v2.5.42 (bug #98): și fișierele șterse ies din handoff
+    call.tool === 'delete_file' ||
+    call.tool === 'delete_directory'
+  ) {
     return typeof args.path === 'string' && args.path ? [args.path] : [];
   }
   if (call.tool === 'write_files' && Array.isArray(args.files)) {
@@ -119,7 +125,16 @@ export function invalidateTouchedFiles(
   files: Map<string, string>,
   call: ToolCall
 ): void {
-  for (const p of extractTouchedFiles(call)) files.delete(p);
+  for (const p of extractTouchedFiles(call)) {
+    files.delete(p);
+    // v2.5.42 (bug #98): un folder șters duce cu el tot ce era sub el
+    if (call.tool === 'delete_directory') {
+      const prefix = p.replace(/\\/g, '/').replace(/\/+$/, '') + '/';
+      for (const key of [...files.keys()]) {
+        if (key.replace(/\\/g, '/').startsWith(prefix)) files.delete(key);
+      }
+    }
+  }
 }
 
 /**

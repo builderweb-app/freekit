@@ -221,7 +221,7 @@ END_CONTENT`;
  * MAX_CHARS_TOTAL din src/payload.ts).
  * v2.5.26 (bug #51): același vocabular „action" ca SYSTEM_PROMPT.
  */
-const ROTATION_PROTOCOL_REMINDER = `Action protocol (this chat is new and has no system prompt yet): answer EVERY step with EXACTLY ONE action — a single-line JSON {"action":"NAME","args":{...}} (read_file, read_files, list_files, search_files, search_semantic, run_command, run_npm, git_*, project_info), or the marker format below for write_file / edit_file / write_files. No introductions, no explanations. When the task is fully done, answer with plain text.`;
+const ROTATION_PROTOCOL_REMINDER = `Action protocol (this chat is new and has no system prompt yet): answer EVERY step with EXACTLY ONE action — a single-line JSON {"action":"NAME","args":{...}} (read_file, read_files, list_files, search_files, search_semantic, run_command, run_npm, delete_file, delete_directory, git_*, project_info), or the marker format below for write_file / edit_file / write_files. No introductions, no explanations. When the task is fully done, answer with plain text.`;
 
 // v1.7.1: verbose mode — pașii AI afișați în chat (persistat în globalState)
 const VERBOSE_KEY = 'freekit.verboseMode';

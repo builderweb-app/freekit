@@ -23,6 +23,7 @@ import {
   DetectedProviderError,
   detectProviderError,
   isMemoryFullText,
+  isPlanLimitText,
   ProviderError
 } from '../providerErrors';
 
@@ -453,6 +454,54 @@ const scanProviderErrorText = (): string => {
   return parts.join('\n');
 };
 
+/**
+ * v2.5.43 (bug #100): rulează ÎN PAGINĂ — primul link de upgrade/plans/pricing
+ * (butonul pe care site-ul îl arată când s-a atins limita planului gratuit).
+ * Preferă un element vizibil; altfel primul găsit. Întoarce URL absolut.
+ */
+const scanUpgradeLink = (): string => {
+  const sels = [
+    'a[href*="/upgrade"]',
+    'a[href*="/plans"]',
+    'a[href*="/pricing"]'
+  ];
+  const visible = (el: Element): boolean => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) return false;
+    const s = window.getComputedStyle(el as HTMLElement);
+    return (
+      s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity) > 0.05
+    );
+  };
+  let fallback = '';
+  for (const sel of sels) {
+    let els: Element[] = [];
+    try {
+      els = Array.prototype.slice.call(document.querySelectorAll(sel));
+    } catch {
+      continue;
+    }
+    for (const el of els) {
+      const href = String((el as HTMLAnchorElement).href || '');
+      if (!href) continue;
+      if (visible(el)) return href;
+      if (!fallback) fallback = href;
+    }
+  }
+  return fallback;
+};
+
+/** v2.5.43 (bug #100): citește (best-effort) linkul de upgrade din pagină. */
+async function readUpgradeLink(page: Page): Promise<string | undefined> {
+  try {
+    const href = await page.evaluate<string>(scanUpgradeLink);
+    return href || undefined;
+  } catch (e: any) {
+    log('scanUpgradeLink failed: ' + (e?.message ?? String(e)));
+    return undefined;
+  }
+}
+
 /** Scoate ecoul mesajului trimis din textul paginii (anti false-positive). */
 const stripEcho = (text: string, message: string): string => {
   const m = normalize(message);
@@ -468,7 +517,14 @@ async function detectProviderErrorOnPage(
 ): Promise<ProviderError | null> {
   try {
     const text = await page.evaluate<string>(scanProviderErrorText);
-    const detected = detectProviderError(stripEcho(text, message), providerId);
+    // v2.5.43 (bug #100): butonul de upgrade/plans/pricing din pagină — semn de
+    // plan gratuit / cotă atinsă, și sursa URL-ului real de pe cardul din chat.
+    const upgradeUrl = await readUpgradeLink(page);
+    const detected = detectProviderError(
+      stripEcho(text, message),
+      providerId,
+      upgradeUrl
+    );
     if (!detected) return null;
     if (isEchoOf(detected.message, message)) return null;
     return detected;
@@ -903,6 +959,17 @@ export async function sendAndWait(
       ', beforeCount=' + beforeCount
   );
 
+  // v2.5.43 (bug #100): linkul de upgrade/plans/pricing din pagină, citit o
+  // singură dată per mesaj (memoizat) — întărește detecția „free plan" și dă
+  // URL-ul real pentru cardul din chat.
+  let upgradeLinkCache: string | undefined;
+  const upgradeLink = async (): Promise<string | undefined> => {
+    if (upgradeLinkCache === undefined) {
+      upgradeLinkCache = (await readUpgradeLink(page)) ?? '';
+    }
+    return upgradeLinkCache || undefined;
+  };
+
   // v0.8.0: setările de humanizare (citite o dată per mesaj)
   const human = humanSettings();
 
@@ -1044,7 +1111,11 @@ export async function sendAndWait(
       ) {
         log(label + ': RESCUE generic, ' + rescued.length + ' chars');
         // v2.5.1: și textul de la „rescue” poate fi un mesaj de eroare al site-ului
-        const detected = detectProviderError(rescued, providerId);
+        const detected = detectProviderError(
+          rescued,
+          providerId,
+          await upgradeLink()
+        );
         if (detected?.kind === 'memory_full') {
           await restartInNewChat();
           continue;
@@ -1160,6 +1231,19 @@ export async function sendAndWait(
       continue;
     }
 
+    // v2.5.43 (bug #100): același lucru pentru bannerul de plan/cotă („You've
+    // reached your free plan limit") — oprește imediat, cu card clar în chat.
+    // Bannerul e SCURT, deci cerem și o limită de lungime: un răspuns normal
+    // care doar pomenește „limit reached" nu trebuie confundat cu o eroare.
+    if (isPlanLimitText(currentText) && currentText.length <= 500) {
+      const planErr = detectProviderError(
+        currentText,
+        providerId,
+        await upgradeLink()
+      );
+      if (planErr) throwProviderError(providerId, planErr, page);
+    }
+
     // v2.5.12 FIX (bug #36): „răspuns nou" = a apărut o bulă în plus în DOM
     // (count mai mare) SAU textul diferă de cel de dinainte de trimitere. Cu
     // doar textul ca sentinelă, un răspuns IDENTIC cu precedentul (exact același
@@ -1209,7 +1293,11 @@ export async function sendAndWait(
         );
         // v2.5.1: răspunsul „stabil” poate fi de fapt mesajul de eroare al
         // site-ului (ex: „You are out of free messages until 6:20 PM.”).
-        const detected = detectProviderError(visible, providerId);
+        const detected = detectProviderError(
+          visible,
+          providerId,
+          await upgradeLink()
+        );
         if (detected?.kind === 'memory_full') {
           await restartInNewChat();
           continue;

@@ -13,6 +13,12 @@ export interface ProviderError {
     | 'out_of_messages'
     | 'login_required'
     | 'rate_limit'
+    /**
+     * v2.5.43 (bug #100): limită de PLAN gratuit / cotă („You've reached your
+     * free plan limit", „Quota exceeded", „Try again later") — text ȘI/sau
+     * buton de upgrade/plans/pricing în pagină.
+     */
+    | 'plan_limit'
     | 'captcha'
     | 'model_missing'
     /** v2.5.15 (bug #41): contextul chatului s-a epuizat (ChatGPT „Chat memory full"). */
@@ -120,12 +126,44 @@ export function isMemoryFullText(text: string): boolean {
 }
 
 /**
+ * v2.5.43 (bug #100): fraze care semnalează o limită de plan/cotă. Regex fără
+ * flag-ul `g`, ca `.test()` / `.match()` să nu depindă de `lastIndex`.
+ */
+const PLAN_LIMIT_RE =
+  /free plan|quota exceeded|limit reached|you'?ve reached[^.\n]{0,60}|daily limit|message limit|try again later/i;
+
+/**
+ * v2.5.43 (bug #100): textul care semnalează o limită de plan/cotă (bannere de
+ * tip „You've reached your free plan limit", „Quota exceeded", „Try again
+ * later"). Folosit atât de scanul de pagină, cât și direct pe răspunsul citit.
+ */
+export function isPlanLimitText(text: string): boolean {
+  return PLAN_LIMIT_RE.test(String(text ?? ''));
+}
+
+/**
+ * v2.5.43 (bug #100): URL-ul de upgrade cunoscut pentru provider — folosit doar
+ * când pagina nu expune un link de upgrade/plans/pricing pe care să-l citim
+ * din DOM (acela e mereu preferat, fiind URL-ul real al providerului).
+ */
+export function upgradeUrlFor(providerId: string): string | undefined {
+  if (providerId === 'claude') return 'https://claude.ai/upgrade';
+  if (providerId === 'chatgpt') return 'https://chat.openai.com/upgrade';
+  return undefined;
+}
+
+/**
  * v2.5.1: detectează erorile cunoscute în textul brut (răspuns extras din DOM
  * sau textul paginii). Întoarce `null` dacă nu recunoaște nicio eroare.
+ *
+ * v2.5.43 (bug #100): `upgradeUrl` (opțional) = linkul de upgrade/plans/pricing
+ * găsit în DOM — întărește detecția „free plan" când bannerul e vag și pune
+ * URL-ul real pe cardul din chat.
  */
 export function detectProviderError(
   rawText: string,
-  providerId: string
+  providerId: string,
+  upgradeUrl?: string
 ): ProviderError | null {
   if (!rawText) return null;
 
@@ -159,12 +197,34 @@ export function detectProviderError(
       kind: 'out_of_messages',
       message: outMatch[0].trim(),
       resetTime: outMatch[3]?.trim(),
-      upgradeUrl:
-        providerId === 'claude'
-          ? 'https://claude.ai/upgrade'
-          : providerId === 'chatgpt'
-          ? 'https://chat.openai.com/upgrade'
-          : undefined
+      upgradeUrl: upgradeUrl || upgradeUrlFor(providerId)
+    };
+  }
+
+  // v2.5.43 (bug #100): plan gratuit / cotă epuizată — bannerele de tip
+  // „You've reached your free plan limit", „Quota exceeded", „Try again
+  // later" nu erau recunoscute deloc, deci chatul se trunchia (tool calls
+  // incomplete ⇒ edit_file eșua) iar utilizatorul nu afla care e cauza.
+  const planHit = rawText.match(PLAN_LIMIT_RE);
+  if (planHit) {
+    return {
+      kind: 'plan_limit',
+      message: planHit[0].trim(),
+      upgradeUrl: upgradeUrl || upgradeUrlFor(providerId)
+    };
+  }
+  // Cuvântul „upgrade" singur nu e dovadă — dar împreună cu un link de
+  // upgrade/plans/pricing din DOM și un cuvânt de limită, este.
+  if (
+    upgradeUrl &&
+    /limit|quota|free plan|reached|out of|try again|too many|upgrade (?:your|to|now)/i.test(
+      rawText
+    )
+  ) {
+    return {
+      kind: 'plan_limit',
+      message: 'free plan / quota limit',
+      upgradeUrl
     };
   }
 
@@ -175,7 +235,7 @@ export function detectProviderError(
 
   // Rate limit
   if (/rate limit|too many requests|try again in/i.test(rawText)) {
-    return { kind: 'rate_limit', message: 'Rate limit reached.' };
+    return { kind: 'rate_limit', message: 'Rate limit reached.', upgradeUrl };
   }
 
   // CAPTCHA
@@ -225,6 +285,16 @@ export function providerErrorMessage(
     case 'rate_limit':
       return (
         name + ' is rate-limiting requests right now. Wait a minute, then retry.'
+      );
+    case 'plan_limit':
+      return (
+        name +
+        ' is limiting this account (' +
+        e.message +
+        '). ' +
+        (e.upgradeUrl
+          ? 'Upgrade for more messages: ' + e.upgradeUrl
+          : 'Wait for the limit to reset, or switch to another provider.')
       );
     case 'captcha':
       return (

@@ -1823,19 +1823,48 @@ export async function executeTool(
         // v0.2.1: anti-spam — și editările contează ca scriere
         const limitErr = checkWriteLimit(call.args.path);
         if (limitErr) return { ok: false, error: limitErr };
-        const oldContent = (
-          await tryReadInfo(call.args.path, workspaceRoot)
-        ).content;
-        if (!oldContent.includes(call.args.old_text)) {
+        // v2.5.43 (bug #99): fișier lipsă ≠ „old_text not found" (mesajul vechi
+        // trimitea modelul să caute diferențe într-un fișier inexistent).
+        const oldInfo = await tryReadInfo(call.args.path, workspaceRoot);
+        if (!oldInfo.exists) {
+          logLine('tool', 'edit_file failed: file not found: ' + call.args.path);
           return {
             ok: false,
-            error: 'old_text not found in ' + call.args.path
+            error:
+              'File not found: ' +
+              call.args.path +
+              '. Use read_file to check the path, or write_file to create the file.'
           };
         }
-        const updated = oldContent.replace(
-          call.args.old_text,
-          call.args.new_text
-        );
+        const oldContent = oldInfo.content;
+        // v2.5.43 (bug #99): potrivire exactă, apoi tolerantă (EOL / whitespace
+        // / ghilimele tipografice). Eșecul nu mai e mut: log explicit + o eroare
+        // care arată cea mai apropiată zonă din fișier, ca modelul să se repare.
+        const match = findTolerantMatch(oldContent, call.args.old_text);
+        if (!match) {
+          logEditFailure(call.args.path, call.args.old_text, oldContent);
+          return {
+            ok: false,
+            error: editFailureError(
+              call.args.path,
+              call.args.old_text,
+              oldContent
+            )
+          };
+        }
+        if (match.strategy !== 'exact') {
+          logLine(
+            'tool',
+            'edit_file: tolerant match (' +
+              match.strategy +
+              ') in ' +
+              call.args.path
+          );
+        }
+        const updated =
+          oldContent.slice(0, match.start) +
+          call.args.new_text +
+          oldContent.slice(match.end);
         const diff = makeDiff(call.args.path, oldContent, updated);
         // v0.5.0: preview pentru diff-ul nativ (fișier existent, deci isNew=false)
         const changes: FileChangePreview[] = [
@@ -2255,6 +2284,244 @@ async function writeFileTool(
   return divergent ? { ...res, divergent: true } : res;
 }
 
+/* =========================================================================
+ * v2.5.43 (bug #99) — `edit_file`: potrivire TOLERANTĂ + diagnostic de eșec
+ * În testul Mistral (14:28–14:30) `edit_file` a răspuns `ok=false` de patru ori,
+ * iar în log apărea doar „old_text not found": nu se putea spune dacă textul
+ * trimis de model era trunchiat, scris cu alt whitespace, cu ghilimele
+ * tipografice sau cu alt EOL. Aici aceeași diferență nu mai blochează editarea
+ * (trepte de normalizare), iar când chiar nu se potrivește, logul și eroarea
+ * trimisă modelului spun exact ce s-a căutat și ce e mai aproape în fișier.
+ * ========================================================================= */
+
+/** Treptele de normalizare, aplicate IDENTIC pe conținut și pe `old_text`. */
+interface NormalizeOpts {
+  /** spații/tab-uri consecutive → un singur spațiu */
+  collapse?: boolean;
+  /** ghilimele tipografice → drepte, cratime → „-", spații speciale → „ " */
+  typo?: boolean;
+  /** ignoră spațiile de la capetele liniilor (și liniile goale consecutive) */
+  trimLines?: boolean;
+}
+
+/**
+ * Normalizează `src` (cu EOL unificat la `\n`) păstrând, pentru fiecare
+ * caracter din rezultat, indexul caracterului ORIGINAL — necesar ca potrivirea
+ * făcută pe textul normalizat să poată fi tradusă înapoi în intervalul real
+ * din fișier (altfel am scrie la alt offset decât cel citit).
+ */
+function normalizeWithMap(
+  src: string,
+  opts: NormalizeOpts
+): { text: string; map: number[] } {
+  const out: string[] = [];
+  const map: number[] = [];
+  const push = (ch: string, at: number) => {
+    out.push(ch);
+    map.push(at);
+  };
+  const trans = (ch: string): string => {
+    if (!opts.typo) return ch;
+    switch (ch) {
+      case '\u2018':
+      case '\u2019':
+      case '\u201A':
+      case '\u201B':
+        return "'";
+      case '\u201C':
+      case '\u201D':
+      case '\u201E':
+      case '\u201F':
+        return '"';
+      case '\u2013':
+      case '\u2014':
+      case '\u2212':
+        return '-';
+      case '\u00A0':
+      case '\u2007':
+      case '\u202F':
+        return ' ';
+      default:
+        return ch;
+    }
+  };
+  const isH = (ch: string): boolean =>
+    ch === ' ' ||
+    ch === '\t' ||
+    ch === '\f' ||
+    ch === '\v' ||
+    (!!opts.typo && ch === '\u00A0');
+
+  // împărțim în linii, păstrând offset-ul original al fiecăreia
+  const lines: Array<{ text: string; at: number }> = [];
+  let lineStart = 0;
+  for (let i = 0; i <= src.length; i++) {
+    if (i !== src.length && src[i] !== '\n' && src[i] !== '\r') continue;
+    lines.push({ text: src.slice(lineStart, i), at: lineStart });
+    if (i < src.length && src[i] === '\r' && src[i + 1] === '\n') i++;
+    lineStart = i + 1;
+  }
+
+  let pendingBreak = false;
+  let pendingBreakAt = 0;
+  for (const line of lines) {
+    if (pendingBreak) {
+      // cu `trimLines` liniile goale consecutive se topesc într-una singură:
+      // sărim peste break, dar îl lăsăm „în așteptare" pentru linia următoare.
+      if (!(opts.trimLines && line.text.trim() === '')) {
+        push('\n', pendingBreakAt);
+        pendingBreak = false;
+      }
+    }
+
+    const end = line.at + line.text.length;
+    let from = line.at;
+    let to = end;
+    if (opts.trimLines) {
+      while (from < to && isH(src[from])) from++;
+      while (to > from && isH(src[to - 1])) to--;
+    }
+    let k = from;
+    while (k < to) {
+      if (isH(src[k])) {
+        let j = k;
+        while (j < to && isH(src[j])) j++;
+        if (opts.collapse || opts.trimLines) {
+          push(' ', k);
+        } else {
+          for (let q = k; q < j; q++) push(src[q], q);
+        }
+        k = j;
+        continue;
+      }
+      for (const c of trans(src[k])) push(c, k);
+      k++;
+    }
+
+    if (end < src.length) {
+      pendingBreak = true;
+      pendingBreakAt = end;
+    }
+  }
+  return { text: out.join(''), map };
+}
+
+/** Treptele de potrivire, de la cea mai strictă la cea mai tolerantă. */
+const EDIT_MATCH_LADDER: Array<{ name: string; opts: NormalizeOpts }> = [
+  { name: 'eol', opts: {} },
+  { name: 'whitespace', opts: { collapse: true } },
+  { name: 'typography', opts: { collapse: true, typo: true } },
+  { name: 'line-trim', opts: { collapse: true, typo: true, trimLines: true } }
+];
+
+/** Sfârșitul real al unei potriviri care se termină chiar pe un line break. */
+function matchEndAt(content: string, at: number): number {
+  if (content[at] === '\r' && content[at + 1] === '\n') return at + 2;
+  return at + 1;
+}
+
+/**
+ * Caută `oldText` în `content`: întâi exact (bit-cu-bit), apoi prin treptele de
+ * normalizare. Întoarce intervalul REAL (indexuri în `content`) sau `null`.
+ */
+function findTolerantMatch(
+  content: string,
+  oldText: string
+): { start: number; end: number; strategy: string } | null {
+  const needle = String(oldText ?? '');
+  if (!needle) return null;
+  const exact = content.indexOf(needle);
+  if (exact >= 0) {
+    return { start: exact, end: exact + needle.length, strategy: 'exact' };
+  }
+  for (const step of EDIT_MATCH_LADDER) {
+    const hay = normalizeWithMap(content, step.opts);
+    const pin = normalizeWithMap(needle, step.opts);
+    // un `old_text` doar din spații s-ar potrivi oriunde — nu-l acceptăm
+    if (!pin.text || !pin.text.trim()) continue;
+    const idx = hay.text.indexOf(pin.text);
+    if (idx < 0) continue;
+    return {
+      start: hay.map[idx],
+      end: matchEndAt(content, hay.map[idx + pin.text.length - 1]),
+      strategy: step.name
+    };
+  }
+  return null;
+}
+
+/** Eșantion scurt, cu EOL/whitespace vizibile, pentru linia de log. */
+function sampleForLog(text: string, max = 20): string {
+  return String(text ?? '')
+    .slice(0, max)
+    .replace(/\\/g, '\\\\')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/\t/g, '\\t')
+    .replace(/[\u00A0\u2007\u202F]/g, '\\u00a0');
+}
+
+/**
+ * Cel mai apropiat loc din fișier pentru `old_text`: încearcă fiecare linie
+ * ne-goală a textului căutat ca „ancoră" (cele lungi întâi — mai puține
+ * potriviri întâmplătoare) și se oprește la prima care există în fișier, cu
+ * 3 linii de context. `null` dacă nicio linie nu apare în fișier.
+ */
+function nearestMatchSnippet(content: string, oldText: string): string | null {
+  const lines = content.split(/\r?\n/);
+  const wanted = String(oldText ?? '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .sort((a, b) => b.length - a.length);
+  let hit = -1;
+  for (const anchor of wanted) {
+    const needle = anchor.slice(0, 60);
+    hit = lines.findIndex((l) => l.includes(needle));
+    if (hit < 0) hit = lines.findIndex((l) => l.trim() === anchor);
+    if (hit >= 0) break;
+  }
+  if (hit < 0) return null;
+  const from = Math.max(0, hit - 1);
+  const to = Math.min(lines.length - 1, hit + 1);
+  const body: string[] = [];
+  for (let i = from; i <= to; i++) {
+    body.push(String(i + 1).padStart(4, ' ') + ' | ' + lines[i]);
+  }
+  return 'Nearest match, around line ' + (hit + 1) + ':\n' + body.join('\n');
+}
+
+/** Log explicit la eșec (altfel `ok=false` rămânea fără nicio explicație). */
+function logEditFailure(rel: string, oldText: string, content: string): void {
+  logLine(
+    'tool',
+    'edit_file failed: old_text not found in ' +
+      rel +
+      ' (len=' +
+      String(oldText ?? '').length +
+      ', first20=' +
+      sampleForLog(oldText) +
+      ')'
+  );
+  const near = nearestMatchSnippet(content, oldText);
+  if (near) {
+    logLine('tool', 'edit_file: ' + near.split('\n').join(' ⏎ '));
+  }
+}
+
+/** Eroarea trimisă modelului: motiv + context (3 linii) + hint de retry. */
+function editFailureError(rel: string, oldText: string, content: string): string {
+  const parts = ['old_text not found in ' + rel + '.'];
+  const near = nearestMatchSnippet(content, oldText);
+  if (near) parts.push(near);
+  parts.push(
+    'Hint: read the file again with read_file and copy the OLD_TEXT block exactly ' +
+      'as it is on disk (indentation, trailing spaces, line endings and quotes ' +
+      'must match), then retry edit_file.'
+  );
+  return parts.join('\n\n');
+}
+
 async function editFile(
   rel: string,
   oldText: string,
@@ -2266,16 +2533,26 @@ async function editFile(
     await vscode.workspace.fs.readFile(vscode.Uri.file(abs))
   ).toString('utf8');
 
-  if (!content.includes(oldText)) {
+  const match = findTolerantMatch(content, oldText);
+  if (!match) {
     return { ok: false, error: 'old_text not found in ' + rel };
   }
 
-  const updated = content.replace(oldText, newText);
+  const updated =
+    content.slice(0, match.start) + newText + content.slice(match.end);
   await vscode.workspace.fs.writeFile(
     vscode.Uri.file(abs),
     Buffer.from(updated, 'utf8')
   );
-  return { ok: true, result: 'Edited ' + rel };
+  return {
+    ok: true,
+    result:
+      'Edited ' +
+      rel +
+      (match.strategy === 'exact'
+        ? ''
+        : ' (tolerant match: ' + match.strategy + ')')
+  };
 }
 
 /* =========================================================================

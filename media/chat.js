@@ -567,6 +567,9 @@ function addProviderErrorCard(msg) {
   // v2.5.31 (bug #73): providerul local a căzut la mijlocul task-ului
   // („fetch failed") → card cu „Restart Ollama".
   const isDown = msg.kind === 'provider_down';
+  // v2.5.43 (bug #100): limită de plan gratuit / cotă (Mistral free) → același
+  // card, dar cu titlu explicit (linkul de upgrade vine din msg.upgradeUrl).
+  const isPlanLimit = msg.kind === 'plan_limit';
   const modelId = typeof msg.model === 'string' ? msg.model : '';
   const available = Array.isArray(msg.availableModels) ? msg.availableModels : [];
   const providerName = PROVIDER_NAMES[msg.providerId] || msg.providerId || 'Provider';
@@ -576,7 +579,9 @@ function addProviderErrorCard(msg) {
     ? '⚠️ Ollama — model not installed'
     : isDown
       ? '⚠️ ' + providerName + ' stopped responding'
-      : '⚠️ ' + providerName + ' unavailable';
+      : isPlanLimit
+        ? '⚠️ ' + providerName + ' — free plan / limit reached'
+        : '⚠️ ' + providerName + ' unavailable';
 
   const text = document.createElement('div');
   text.className = 'pe-msg';

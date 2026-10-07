@@ -22,7 +22,8 @@ export interface ModelOption {
   /** Afișat utilizatorului (ex: 'GPT-4o'). */
   label: string;
   description?: string;
-  badge?: 'fast' | 'smart' | 'reasoning';
+  /** v2.5.51: 'vision' = model multimodal (primește imagini). */
+  badge?: 'fast' | 'smart' | 'reasoning' | 'vision';
 }
 
 /** Model din catalog + textele după care îl recunoaștem în dropdown-ul site-ului. */
@@ -77,6 +78,9 @@ const MODELS: Record<string, ModelSpec[]> = {
   ],
   qwen: [
     { id: 'qwen3-max', label: 'Qwen3-Max', badge: 'smart', match: ['qwen3-max', 'qwen3 max', 'max'] },
+    // v2.5.51 (FIX 4): cel mai bun model pentru compare_visual — visual coding,
+    // spatial understanding, multi-image, OCR (inclusiv română).
+    { id: 'qwen3-vl', label: 'Qwen3-VL', badge: 'vision', match: ['qwen3-vl', 'qwen3 vl', 'qwen3-vl-235b', 'vl-235b'] },
     { id: 'qwen3-coder', label: 'Qwen3 Coder', badge: 'fast', match: ['qwen3-coder', 'qwen3 coder', 'coder'] },
     { id: 'qwen-turbo', label: 'Qwen Turbo', badge: 'fast', match: ['turbo'] }
   ]

@@ -113,6 +113,10 @@ export function recordReadFiles(
 /** Fișierele atinse de o scriere/ștergere — extrasul lor devine învechit. */
 export function extractTouchedFiles(call: ToolCall): string[] {
   const args: any = call.args ?? {};
+  // v2.5.50 FIX 3: copy_file scrie la destinație (`to`), nu la `args.path`
+  if (call.tool === 'copy_file') {
+    return typeof args.to === 'string' && args.to ? [args.to] : [];
+  }
   if (
     call.tool === 'write_file' ||
     call.tool === 'edit_file' ||
@@ -128,6 +132,16 @@ export function extractTouchedFiles(call: ToolCall): string[] {
       .filter((p: string) => !!p);
   }
   return [];
+}
+
+/**
+ * v2.5.50: fișierele CREATE/MODIFICATE de o unealtă de scriere (fără ștergeri).
+ * Handoff-ul le enumeră explicit, ca modelul din chatul nou (sau de pe alt
+ * provider) să știe ce s-a produs deja și să nu rescrie fișierele de la zero.
+ */
+export function extractWrittenFiles(call: ToolCall): string[] {
+  if (call.tool === 'delete_file' || call.tool === 'delete_directory') return [];
+  return extractTouchedFiles(call);
 }
 
 /** Scoate din handoff fișierele modificate (conținutul citit e depășit). */

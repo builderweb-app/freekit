@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.5.49",
+  "version": "2.5.54",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -266,7 +266,22 @@
         "freekit.autoVerify": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "After every file write (`write_file` / `edit_file` / `write_files`), automatically verifies the project (`astro check`, `tsc --noEmit` or the detected build/typecheck/lint script). On failure, the full error is sent to the AI for auto-repair (max **3 attempts**); if the repair fails, the changes are rolled back automatically (**rollback** to the last verified-good state)."
+          "markdownDescription": "After every file write (`write_file` / `edit_file` / `write_files`), automatically verifies the project (`astro check`, `tsc --noEmit` or the detected build/typecheck/lint script). On failure the error is **parsed and traced to its root cause** (`[diagnose] parsed: …` / `[diagnose] root cause: …`) and only a compact diagnostic is sent to the AI, together with the exact fix; the AI must answer with **one `edit_file`** (band-aid fixes — `?.` on `.map()`, `|| []`, `if (!x) return` — are rejected and re-prompted). Max **3 repair cycles**; if it still fails, the changes are rolled back automatically (**rollback** to the last verified-good state) and, when there is no verified-good state, you are told honestly that the error is still present."
+        },
+        "freekit.screenshotOpenMode": {
+          "type": "string",
+          "enum": [
+            "preview",
+            "beside",
+            "none"
+          ],
+          "default": "preview",
+          "enumDescriptions": [
+            "Open the capture as a preview tab in the active editor group.",
+            "Open the capture in a new editor column, beside the current one (compare_visual always opens the two images side by side).",
+            "Do not open anything; the file is only saved in docs/screenshots/."
+          ],
+          "markdownDescription": "How the `screenshot` / `compare_visual` capture is opened after it is written. **preview** = preview tab, **beside** = new editor column, **none** = only saved. After the capture Chrome is always returned to the background."
         },
         "freekit.promptCheckpoints": {
           "type": "boolean",

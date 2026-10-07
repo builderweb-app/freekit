@@ -36,6 +36,12 @@ import { applyModel, browserModelKey, listModels, modelLabel } from './modelSele
 import { configInfo, selectors } from './selectors';
 import { BrowserManager } from './browser';
 import {
+  VisualThumbnail,
+  VisualToolContext,
+  pickVisionProvider,
+  supportsVision
+} from './visual';
+import {
   executeTool,
   isToolTrustRequired,
   ApprovalFn,
@@ -89,13 +95,15 @@ import {
   TsconfigRewriteTracker
 } from './circuitBreaker';
 import {
+  extractTouchedFiles,
+  extractWrittenFiles,
   formatReadFilesExcerpts,
   formatReadFilesList,
   invalidateTouchedFiles,
   isReadEverythingTask,
   recordReadFiles
 } from './chatRotation';
-import { drainAliasLogs, stripTsAliasesInText } from './tsAlias';
+import { drainAliasLogs, stripTsAliasesInText, toAiPath } from './tsAlias';
 import { mcp } from './mcp/manager';
 import { Attachment, describePath, prepareAttachments } from './attachments';
 import { detectProject, formatProjectInfo } from './project';
@@ -121,6 +129,15 @@ import {
   restoreToCheckpoint,
   Checkpoint
 } from './verifier';
+import {
+  buildDiagnosisContext,
+  diagnose,
+  Diagnosis,
+  isBandAidFix,
+  logDiagnosis,
+  parsedSignature,
+  writeDiagnosisReport
+} from './diagnose';
 import { ConversationStore, ConversationMessage } from './conversations';
 import { detectDirectWrite } from './directWrite';
 import { EditRollback } from './rollback';
@@ -160,6 +177,11 @@ const DEFAULT_HANDOFF_THRESHOLD = 20;
  */
 const MAX_TRACKED_TOOL_CALLS = 120;
 
+/**
+ * v2.5.50: câte fișiere scrise/editate enumerăm în handoff (plafon de siguranță).
+ */
+const MAX_LISTED_WRITTEN = 60;
+
 // FAZA II (A): limita de atașamente simultane
 const MAX_ATTACHMENTS = 20;
 
@@ -190,6 +212,11 @@ function fileTargetsOf(call: ToolCall): string[] {
     return files
       .map((f: any) => (f && typeof f.path === 'string' ? f.path : ''))
       .filter((p: string) => !!p);
+  }
+  // v2.5.50 FIX 3: copy_file scrie la destinație (`to`)
+  if (call.tool === 'copy_file') {
+    const to = call.args?.to;
+    return typeof to === 'string' && to ? [to] : [];
   }
   const rel = call.args?.path;
   return typeof rel === 'string' && rel ? [rel] : [];
@@ -253,7 +280,7 @@ END_CONTENT`;
  * MAX_CHARS_TOTAL din src/payload.ts).
  * v2.5.26 (bug #51): același vocabular „action" ca SYSTEM_PROMPT.
  */
-const ROTATION_PROTOCOL_REMINDER = `Action protocol (this chat is new and has no system prompt yet): answer EVERY step with EXACTLY ONE action — a single-line JSON {"action":"NAME","args":{...}} (read_file, read_files, list_files, search_files, search_semantic, run_command, run_npm, delete_file, delete_directory, git_*, project_info), or the marker format below for write_file / edit_file / write_files. No introductions, no explanations. When the task is fully done, answer with plain text.`;
+const ROTATION_PROTOCOL_REMINDER = `Action protocol (this chat is new and has no system prompt yet): answer EVERY step with EXACTLY ONE action — a single-line JSON {"action":"NAME","args":{...}} (read_file, read_files, list_files, search_files, search_semantic, run_command, run_npm, copy_file, delete_file, delete_directory, git_*, project_info, screenshot, compare_visual), or the marker format below for write_file / edit_file / write_files. No introductions, no explanations. When the task is fully done, answer with plain text. In a repair cycle (after "VERIFICATION FAILED"/a DIAGNOSTIC) answer with ONE edit_file applying the required fix at the source — no optional chaining "?.", no "|| []", no guards that hide the error, no screenshots.`;
 
 /* =========================================================================
  * v2.5.49 (FIX 2) — SCRIERE ÎN BUCĂȚI (compatibilitate cu web chat)
@@ -332,6 +359,34 @@ const AUTO_VERIFY_TOOLS = new Set(['edit_file', 'write_file', 'write_files']);
 
 // v1.3.0: câte auto-repair-uri încercăm înainte de rollback-ul automat
 const MAX_VERIFY_REPAIRS = 3;
+
+/* -------------------------------------------------------------------------
+ * v2.5.53 (FIX 4/8) — ciclurile de reparație după un diagnostic
+ * Modelul trebuie să răspundă cu EXACT un `edit_file`; orice altceva (text,
+ * screenshot, write_file) primește re-prompt. După MAX_REPAIR_CYCLES răspunsuri
+ * neconforme ne oprim și spunem adevărul utilizatorului — niciodată „gata,
+ * funcționează" cât timp verificarea e pe roșu.
+ * ------------------------------------------------------------------------- */
+const MAX_REPAIR_CYCLES = 3;
+
+/** Re-prompt-uri pentru ciclul de reparație (FIX 4). */
+const REPAIR_PROMPTS = {
+  text:
+    'Respond with ONE edit_file, nothing else. Apply the REQUIRED FIX from the ' +
+    'diagnostic above to the SOURCE file. No explanation, no final answer.',
+  screenshot:
+    'Screenshot does not help. The file was already read — the diagnostic above ' +
+    'contains the exact location and the source state. Respond with ONE edit_file.',
+  writeFile:
+    'Use edit_file. Do not rewrite the whole file — change only the missing part ' +
+    'described in the diagnostic.',
+  read:
+    'The file was already read — the diagnostic above already contains the relevant ' +
+    'state. Respond with ONE edit_file applying the required fix.',
+  other:
+    'Only edit_file is allowed right now. Apply the REQUIRED FIX from the diagnostic ' +
+    'above with ONE edit_file; nothing else.'
+} as const;
 
 // v1.4.0: checkpoint-uri git per prompt (persistate în globalState)
 const CHECKPOINTS_KEY = 'freekit.checkpoints';
@@ -527,6 +582,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * browser, ca `chatToolSteps` (vezi resetBrowserChatState).
    */
   private chatReadFiles = new Map<string, string>();
+  /**
+   * v2.5.50: fișierele create/modificate în chatul web CURENT. Handoff-ul le
+   * enumeră explicit, ca modelul din chatul nou (sau de pe alt provider) să
+   * știe ce s-a produs deja și să continue de la conținutul actual.
+   * Viață: per chat de browser (vezi resetBrowserChatState).
+   */
+  private chatWrittenFiles = new Set<string>();
   /** v0.2.1: aprobă automat toate operațiile care necesită confirmare. */
   private autoApprove = false;
   /** v0.4.0: guard anti-suprapunere pentru verificarea de status. */
@@ -587,6 +649,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * „TS6059") în task-ul curent — la 5, bucla e oprită.
    */
   private sameErrors = new SameErrorTracker();
+  /**
+   * v2.5.53 (FIX 1-6): diagnosticul activ. Cât timp e setat, verificarea e pe
+   * roșu și suntem în modul de reparație: modelul are voie DOAR cu un
+   * `edit_file` care nu e band-aid (vezi `repairReplyVerdict`).
+   */
+  private activeDiagnosis?: Diagnosis;
+  /** v2.5.53 (FIX 4): răspunsuri neconforme consumate în ciclul curent. */
+  private repairCycles = 0;
+  /** v2.5.53 (FIX 5): semnătura ultimei erori — „aceeași eroare?" între cicluri. */
+  private lastErrorSignature = '';
+  /** v2.5.53 (FIX 14): fix-urile încercate pentru diagnosticul activ. */
+  private diagnosisAttempts: string[] = [];
+  /** v2.5.53 (FIX 14): raportul diagnosticului a fost deja scris pe disc. */
+  private diagnosisPersisted = false;
   /**
    * v2.5.34 (bug #85): rescrierile de tsconfig.json se numără PESTE chat-uri —
    * fix-ul #82 numără doar în chatul curent, iar rotirea (la 4 rezultate de
@@ -829,9 +905,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (typeof a.command === 'string' && a.command) bits.push('$ ' + a.command);
       if (typeof a.script === 'string' && a.script) bits.push('script: ' + a.script);
       if (typeof a.path === 'string' && a.path) bits.push(a.path);
+      // v2.5.50 FIX 3: copy_file — sursa și destinația, nu JSON-ul întreg
+      if (typeof a.from === 'string' && a.from && typeof a.to === 'string' && a.to) {
+        bits.push(a.from + ' → ' + a.to);
+      }
       if (Array.isArray(a.files)) bits.push(a.files.length + ' files');
       if (typeof a.query === 'string' && a.query) bits.push('"' + a.query + '"');
-      if (typeof a.url === 'string' && a.url) bits.push(a.url);
+      // v2.5.51: compare_visual are DOUĂ URL-uri — ambele intră în rezumat
+      if (typeof a.url1 === 'string' && a.url1 && typeof a.url2 === 'string' && a.url2) {
+        bits.push(a.url1 + ' vs ' + a.url2);
+      } else if (typeof a.url === 'string' && a.url) {
+        bits.push(a.url);
+      }
       if (!bits.length) {
         const json = JSON.stringify(a);
         bits.push(json.length > 300 ? json.slice(0, 300) + '…' : json);
@@ -1268,6 +1353,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // Linkurile din răspunsuri se deschid în browserul extern
     if (msg.type === 'open_link') {
       vscode.env.openExternal(vscode.Uri.parse(msg.url));
+      return;
+    }
+
+    // v2.5.54 (FIX 13): click pe un thumbnail din chat → deschide PNG-ul mare
+    if (msg.type === 'open_visual_file') {
+      const rel = String(msg.path ?? '').trim();
+      if (!rel) return;
+      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+      const abs = path.isAbsolute(rel) ? rel : path.join(root, rel);
+      if (!fs.existsSync(abs)) {
+        this.post('notice', '⚠️ File not found: ' + rel);
+        return;
+      }
+      try {
+        await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(abs), {
+          preview: true,
+          viewColumn: vscode.ViewColumn.Beside
+        });
+        logLine('screenshot', 'opened thumbnail ' + rel + ' in a side editor');
+      } catch (e: any) {
+        logLine('screenshot', 'could not open ' + rel + ': ' + (e?.message ?? String(e)));
+      }
       return;
     }
 
@@ -1769,8 +1876,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const projectBlock =
         (projInfo ? '\n\n---\nPROJECT INFO:\n' + projInfo : '') +
         (structure ? '\n\n---\nPROJECT STRUCTURE:\n' + structure : '');
-      const contextBlock =
+      /**
+       * v2.5.50: handoff-ul COMPLET injectat în primul mesaj după o schimbare
+       * de provider. Chatul nou de pe providerul nou pornește gol, deci fără
+       * el modelul nu ar ști ce task era în lucru. Se umple de
+       * `openOrResumeChat` când chatul salvat era al ALTUI provider.
+       */
+      let crossProviderHandoff = '';
+      const contextBlock = () =>
         (attachBlock ? '\n\n---\nATTACHMENTS:\n' + attachBlock : '') +
+        (crossProviderHandoff
+          ? '\n\n---\nTASK HANDOFF (provider switch):\n' + crossProviderHandoff
+          : '') +
         '\n\n---\nUSER MESSAGE:\n' + userText;
       // v1.1.0: uneltele MCP disponibile se adaugă la prompt (listă dinamică,
       // mai scurtă pentru modelele locale)
@@ -1795,7 +1912,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           (p.local ? '' : this.chunkedWritePromptSection()) +
           (mcpSection ? '\n\n---\n' + mcpSection : '') +
           planSection +
-          contextBlock
+          contextBlock()
         );
       };
 
@@ -1860,7 +1977,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             const prov = prep.provider;
             // v0.9.1 + v2.5.10 (bug #20): login assist peste „deschide chatul
             // conversației active" — chat nou doar la primul mesaj al acesteia.
-            await this.openOrResumeChat(prov, prep.page, label, signal);
+            // v2.5.50: dacă chatul salvat era al altui provider, primim un
+            // handoff complet și îl lipim în primul mesaj al noului provider.
+            const cpHandoff = await this.openOrResumeChat(
+              prov,
+              prep.page,
+              label,
+              signal
+            );
+            if (cpHandoff) crossProviderHandoff = cpHandoff;
             // v1.8.0: dacă pagina cere CAPTCHA, Chrome e adus în față până e rezolvat
             await this.runWithCaptchaAssist(label, prep.page, signal);
             // v2.2.0: aplică modelul web ales în chip (best-effort)
@@ -1903,7 +2028,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const label = PROVIDER_LABELS[selectedId] ?? selectedId;
         // v0.9.1 + v2.5.10 (bug #20): login assist peste „deschide chatul
         // conversației active" (chat nou doar la primul mesaj al acesteia).
-        await this.openOrResumeChat(prov, prep.page, label, signal);
+        // v2.5.50: handoff complet la schimbarea de provider (vezi mai sus).
+        const cpHandoff = await this.openOrResumeChat(prov, prep.page, label, signal);
+        if (cpHandoff) crossProviderHandoff = cpHandoff;
         // v1.8.0: CAPTCHA assist (reCAPTCHA / hCaptcha / Cloudflare „Just a moment”)
         await this.runWithCaptchaAssist(label, prep.page, signal);
         // v2.2.0: aplică modelul web ales în chip (best-effort)
@@ -2009,6 +2136,47 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         iterations++;
         const toolCall = this.parseToolCall(aiReply);
+
+        // v2.5.53 (FIX 4/6/8) — GATE de reparație: cât timp diagnosticul e activ
+        // (verificarea pe roșu), modelul are voie DOAR cu UN `edit_file` care nu
+        // e band-aid. Text / screenshot / write_file / re-citire → re-prompt
+        // (max MAX_REPAIR_CYCLES), apoi escaladare ONESTĂ către utilizator.
+        if (this.activeDiagnosis && !this.abortRequested) {
+          const verdict = this.repairReplyVerdict(toolCall);
+          if (verdict.reprompt) {
+            this.repairCycles++;
+            if (verdict.reason === 'rejected band-aid fix') {
+              logLine('diagnose', 'rejected band-aid fix');
+            }
+            if (verdict.notice) this.post('heal', verdict.notice);
+            if (this.repairCycles > MAX_REPAIR_CYCLES) {
+              log(
+                'repair: ' + this.repairCycles + ' non-conforming replies — giving up honestly'
+              );
+              this.persistDiagnosis(
+                root,
+                'NOT fixed after ' + MAX_REPAIR_CYCLES +
+                  ' repair cycles — the model did not produce a valid fix (manual fix needed)'
+              );
+              const text = this.repairFailText();
+              await this.appendHistory('assistant', text);
+              this.post('reply', text);
+              this.activeDiagnosis = undefined;
+              break;
+            }
+            log(
+              'repair cycle ' + this.repairCycles + '/' + MAX_REPAIR_CYCLES +
+                ' — ' + verdict.reason + ' — re-prompting'
+            );
+            this.post(
+              'heal',
+              '🔧 Repair ' + this.repairCycles + '/' + MAX_REPAIR_CYCLES +
+                ': ' + verdict.reason + ' — asking for ONE edit_file.'
+            );
+            aiReply = await provider.send(page, verdict.reprompt, signal, followUpOpts);
+            continue;
+          }
+        }
 
         if (!toolCall) {
           // v2.5.49 (FIX 3): plan înainte de execuție. Modelul a răspuns cu un
@@ -2331,7 +2499,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.post('notice', '🔒 ' + RESTRICTED_BLOCKED_NOTICE);
         } else {
           const mcpResult = await mcp.executeToolCall(toolCall, approve, log);
-          result = mcpResult ?? (await executeTool(toolCall, root, log, approve, this.lastUserText));
+          result =
+            mcpResult ??
+            (await executeTool(
+              toolCall,
+              root,
+              log,
+              approve,
+              this.lastUserText,
+              this.visualContext()
+            ));
         }
         log('tool result ok=' + result.ok);
         // v2.5.31 (bug #74): ultima eroare, pentru mesajul de buclă
@@ -2342,6 +2519,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // fișierele scrise/editate ies din handoff (extrasul devine învechit).
         recordReadFiles(this.chatReadFiles, toolCall, result);
         invalidateTouchedFiles(this.chatReadFiles, toolCall);
+        // v2.5.50: fișierele scrise/editate cu succes intră în handoff (cele
+        // șterse ies), ca modelul nou să știe ce s-a produs deja.
+        if (result.ok) {
+          if (
+            toolCall.tool === 'delete_file' ||
+            toolCall.tool === 'delete_directory'
+          ) {
+            for (const p of extractTouchedFiles(toolCall)) {
+              this.chatWrittenFiles.delete(p);
+            }
+          } else {
+            for (const p of extractWrittenFiles(toolCall)) {
+              this.chatWrittenFiles.add(p);
+            }
+          }
+        }
 
         // v2.5.6: unealta cere atenția utilizatorului (ex: fișier trunchiat după
         // ce retry-urile s-au epuizat) — mesaj clar în chat
@@ -2536,7 +2729,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (toolCall.tool === 'run_command' && !result.ok) {
           const scope = this.taskScope();
           const errOut = result.error ?? '';
+          // v2.5.53 (FIX 1/2/3): pentru comenzile de verificare rulate de model
+          // (npm run build / astro check / tsc) diagnosticul compact înlocuiește
+          // textul brut — aceeași cauză reală și același fix exact ca la auto-verify.
+          const isVerifyCmd =
+            /(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:build|check|typecheck|lint|test|tsc)\b|\bastro\s+check\b|\b(?:vue-)?tsc\b|\bsvelte-check\b/.test(
+              String(toolCall.args?.command ?? '')
+            );
+          const diagnosisHint = isVerifyCmd
+            ? '\n\n' +
+              buildDiagnosisContext(
+                (() => {
+                  const d = diagnose(errOut, root, lastEditedFile || undefined);
+                  logDiagnosis(d);
+                  return d;
+                })(),
+                1,
+                1,
+                'Fix the ROOT CAUSE with ONE edit_file, then re-run the SAME command.'
+              )
+            : '';
           commandHints =
+            diagnosisHint +
             buildCommandErrorHints(
               toolCall.args.command,
               errOut,
@@ -2584,6 +2798,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           (result.ok || (result.error ?? '').startsWith('Written '))
         ) {
           filesWereModifiedThisTurn = true;
+        }
+
+        // v2.5.53 (FIX 5) — în modul de reparație verificăm DUPĂ FIECARE editare
+        // (nu la finalul răspunsului modelului): rezultatul real pleacă imediat
+        // înapoi, deci „am reparat" nu poate rămâne nedemonstrat.
+        let repairSuffix = '';
+        if (
+          this.activeDiagnosis &&
+          AUTO_VERIFY_TOOLS.has(toolCall.tool) &&
+          (result.ok || (result.error ?? '').startsWith('Written '))
+        ) {
+          // v2.5.53 (FIX 14): jurnalul fix-urilor încercate
+          this.diagnosisAttempts.push(
+            'cycle ' + (this.repairCycles + 1) + ': edit_file ' + this.summarizeToolCall(toolCall)
+          );
+          const vr = await this.autoVerify(root);
+          if (vr.blocked) {
+            taskBlockedText = vr.blocked;
+            break;
+          }
+          if (vr.rollbackText) {
+            verifyRollbackText = vr.rollbackText;
+            break;
+          }
+          repairSuffix = vr.suffix;
         }
         if (this.abortRequested) break;
 
@@ -2676,6 +2915,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             (splitHint ? '\n\n' + splitHint : '') +
             // v2.5.49 (FIX 2): continuarea scrierii în bucăți
             (chunkHint ? '\n\n' + chunkHint : '') +
+            // v2.5.53 (FIX 5): rezultatul verificării imediate (mod reparație)
+            (repairSuffix ? '\n\n' + repairSuffix : '') +
             commandHints,
           signal,
           followUpOpts
@@ -2747,22 +2988,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.appendHistory('assistant', text);
           this.post('reply', text);
         } else {
-          if (this.autoVerifyEnabled(root) && this.verifyRepairs > 0 && lvf) {
+          // v2.5.53 (FIX 8): dacă verificarea e încă pe roșu, NU prezentăm
+          // „gata, funcționează" al modelului ca adevăr — spunem exact ce e.
+          const stillRed = this.autoVerifyEnabled(root) && this.verifyRepairs > 0 && !!lvf;
+          if (stillRed && lvf) {
             log(
               'auto-verify: verification is still red (' + lvf.command +
-                '), but nothing was written in the last step — no rollback'
+                ') at the final answer — telling the truth instead of the model claim'
             );
             this.post(
               'heal',
               '⚠️ Verification is still failing ("' + lvf.command +
-                '"). The AI stopped without writing a fix in its last step, so ' +
-                'nothing was rolled back — fix the error above or write "continue".'
+                '"). The model did not fix it — its "it works" claim is NOT confirmed.'
             );
           }
-          log('posting final reply, length=' + aiReply.length);
-          await this.appendHistory('assistant', aiReply);
+          const shown = stripTsAliasesInText(aiReply);
+          const finalText = stillRed
+            ? this.repairFailText() +
+              '\n\n— The model answered (UNVERIFIED — not confirmed by the build):\n' +
+              shown.trim()
+            : shown;
+          log('posting final reply, length=' + finalText.length);
+          await this.appendHistory('assistant', finalText);
           // v2.5.27 (bug #63): în chat calea rămâne cea originală (`.ts`)
-          this.post('reply', stripTsAliasesInText(aiReply));
+          this.post('reply', finalText);
           // v2.5.39 (bug #91): AI-ul a declarat task-ul terminat — verificăm
           // dacă un cleanup cerut de utilizator chiar s-a făcut (doar avertizare)
           this.postTaskTruthCheck(root, aiReply);
@@ -3129,13 +3378,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * Deschide providerul și continuă conversația din browser a conversației
    * active (dacă există una salvată pentru providerul curent). Dacă URL-ul
    * salvat nu mai poate fi folosit, se pornește un chat nou.
+   *
+   * v2.5.50: întoarce un handoff COMPLET când chatul conversației aparținea
+   * ALTUI provider (utilizatorul a schimbat providerul la mijlocul task-ului).
+   * Chatul nou de pe providerul nou pornește gol, deci fără handoff modelul nu
+   * ar ști ce task era în lucru (bug: primea doar „continuă de unde ai rămas").
    */
   private async openOrResumeChat(
     provider: AIProvider,
     page: Page | undefined,
     label: string,
     signal: AbortSignal
-  ): Promise<void> {
+  ): Promise<string> {
     const saved = this.conversations.getBrowserChat();
     if (page && saved && saved.providerId === provider.name) {
       try {
@@ -3143,7 +3397,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           resumeConversation(page, provider.name, saved.url, label)
         );
         log(label + ': continuing the browser conversation (' + saved.url + ')');
-        return;
+        return '';
       } catch (e: any) {
         if (isLoginRequiredError(e) || this.abortRequested) throw e;
         log(
@@ -3153,12 +3407,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.conversations.clearBrowserChat();
       }
     }
+    // v2.5.50: chatul salvat era al ALTUI provider → task-ul continua acolo;
+    // chatul nou de aici pornește gol, deci ducem contextul mai departe.
+    const switchedProvider = !!(saved && saved.providerId !== provider.name);
     // v0.9.1: dacă providerul cere login, Chrome e adus în față automat,
     // așteptăm autentificarea, apoi reluăm de la sine.
     await this.runWithLoginAssist(label, page, signal, () => provider.open(page));
     await this.runWithLoginAssist(label, page, signal, () => provider.newChat(page));
+    if (switchedProvider) {
+      // v2.5.50: chat nou, dar NU resetăm memoria task-ului (fișiere citite /
+      // apeluri / fișiere scrise) — handoff-ul are nevoie de ea, iar rotirile
+      // ulterioare de pe noul provider o duc mai departe (ca la rotire).
+      this.chatToolSteps = 0;
+      logLine(
+        'handoff',
+        'cross-provider — sending full context to ' + provider.name
+      );
+      this.post(
+        'notice',
+        '🔀 Continuing on ' +
+          label +
+          ' — sending the full task context (handoff) so nothing is lost.'
+      );
+      return this.buildChatHandoff(label, 'cross-provider');
+    }
     // v2.5.23/v2.5.25: chat nou → numărătoarea de pași + fișierele citite, de la 0
     this.resetBrowserChatState();
+    return '';
   }
 
   /**
@@ -3206,6 +3481,105 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       page = await this.browser.ensureOpen(host);
     }
     return { provider, page };
+  }
+
+  /* ======================================================================
+   * v2.5.51 — VISION (screenshot / compare_visual)
+   * Captura (CDP) și raportul stau în `src/visual.ts`; aici stă doar partea
+   * care are nevoie de provideri, pentru că doar chatView poate deschide un
+   * chat web.
+   * ==================================================================== */
+
+  /** Contextul primit de `executeTool` pentru uneltele vizuale. */
+  private visualContext(): VisualToolContext {
+    return {
+      browser: this.browser,
+      analyze: (prompt: string, images: string[], providerId?: string) =>
+        this.visualAnalyze(prompt, images, providerId),
+      notice: (text: string) => this.post('notice', text),
+      thumbnails: (items) => this.postVisualThumbnails(items)
+    };
+  }
+
+  /**
+   * v2.5.54 (FIX 13) — thumbnail-urile capturilor, afișate în chat. Webview-ul
+   * primește doar base64 + calea relativă; click pe thumbnail trimite
+   * `open_visual_file` înapoi, iar host-ul deschide PNG-ul mare.
+   */
+  private postVisualThumbnails(items: VisualThumbnail[]): void {
+    if (!items.length) return;
+    this.post('visual_thumbnails', {
+      items: items.map((i) => ({
+        label: i.label,
+        relPath: i.relPath,
+        dataUri: i.dataUri
+      }))
+    });
+  }
+
+  /**
+   * FIX 3: doar providerii cu vision pot primi screenshot-uri. Dacă cel curent
+   * nu poate (Ollama / Auto), comutăm automat pe ultimul provider web folosit
+   * sau pe Qwen3-VL (FIX 4 — cel mai bun la comparații vizuale).
+   *
+   * Analiza se face într-un TAB SEPARAT, cu chat nou: chatul task-ului nu e
+   * poluat cu imagini, iar conversația din lucru rămâne intactă.
+   */
+  private async visualAnalyze(
+    prompt: string,
+    images: string[],
+    requested?: string
+  ): Promise<{ provider: string; reply: string }> {
+    const current = this.currentProviderId();
+    const wanted = supportsVision(requested)
+      ? String(requested).toLowerCase()
+      : '';
+    const target =
+      wanted ||
+      pickVisionProvider(
+        current,
+        this.state.get<string>(LAST_BROWSER_KEY, '')
+      );
+    logLine('vision', 'using ' + target + ' for image analysis');
+    if (target !== current) {
+      logLine(
+        'vision',
+        current + ' cannot receive images — switched to ' + target
+      );
+      this.post(
+        'notice',
+        '👁 ' +
+          (PROVIDER_LABELS[current] ?? current) +
+          ' cannot receive images — ' +
+          (PROVIDER_LABELS[target] ?? target) +
+          ' is used for the visual analysis (Qwen3-VL is the most accurate for it).'
+      );
+    }
+
+    const provider = createProvider(target);
+    const label = PROVIDER_LABELS[provider.name] ?? provider.name;
+    const signal =
+      this.abortController?.signal ?? new AbortController().signal;
+    let page: Page | undefined;
+    if (!provider.local) {
+      page = await this.browser.newPage();
+      await this.runWithLoginAssist(label, page, signal, () =>
+        provider.open(page)
+      );
+      await this.runWithLoginAssist(label, page, signal, () =>
+        provider.newChat(page)
+      );
+      await this.applySelectedModel(provider.name, page, label);
+    }
+    try {
+      const reply = await provider.send(page, prompt, signal, {
+        files: images,
+        onNotice: (text: string) => this.post('notice', text)
+      });
+      return { provider: target, reply };
+    } finally {
+      if (page) await page.close().catch(() => undefined);
+    }
   }
 
   /* ======================================================================
@@ -3426,7 +3800,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    */
   private buildChatHandoff(
     label: string,
-    reason: 'memory-full' | 'rotation',
+    reason: 'memory-full' | 'rotation' | 'cross-provider',
     recentSteps: string[] = []
   ): string {
     try {
@@ -3435,7 +3809,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         !msgs.length &&
         !recentSteps.length &&
         !this.chatReadFiles.size &&
-        !this.chatToolCalls.length
+        !this.chatToolCalls.length &&
+        !this.chatWrittenFiles.size
       )
         return '';
       const clip = (s: string, max: number): string => {
@@ -3456,6 +3831,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         lines.push(
           readList +
             (excerpts ? ' Their content is included below as excerpts.' : '')
+        );
+      }
+      // v2.5.50: fișierele deja scrise/editate — listate explicit, ca modelul
+      // nou să continue de la ele în loc să le recreeze de la zero.
+      if (this.chatWrittenFiles.size) {
+        const written = [...this.chatWrittenFiles].slice(0, MAX_LISTED_WRITTEN);
+        const rest = this.chatWrittenFiles.size - written.length;
+        lines.push(
+          'Files already written/edited in the previous chat (' +
+            this.chatWrittenFiles.size +
+            ' — do NOT rewrite them from scratch, continue from their current content):\n' +
+            written.map((p) => '- ' + toAiPath(p)).join('\n') +
+            (rest > 0 ? '\n- … (+' + rest + ' more)' : '')
         );
       }
       // v2.5.48: TOATE acțiunile executate în chatul vechi (path + ok/fail),
@@ -3502,14 +3890,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           'Next step: ' +
           (reason === 'rotation'
             ? 'send the pending tool call for the step described in the message below, then keep going with the original task.'
-            : 'continue the original task from where it stopped.')
+            : reason === 'cross-provider'
+              ? 'continue the original task from where it stopped; the new user message below says what to do next.'
+              : 'continue the original task from where it stopped.')
       );
       const header =
         reason === 'memory-full'
           ? '[Freekit handoff — the previous ' + label + ' chat ran out of context, ' +
             'so the task continues in this new chat.]'
-          : '[Freekit handoff — the previous ' + label + ' chat was getting long, ' +
-            'so the task continues in this new chat to keep it fast.]';
+          : reason === 'cross-provider'
+            ? '[Freekit handoff — the provider was switched to ' + label +
+              ', so the task continues in a brand-new chat there. This model has ' +
+              'no memory of the previous chat.]'
+            : '[Freekit handoff — the previous ' + label + ' chat was getting long, ' +
+              'so the task continues in this new chat to keep it fast.]';
       return (
         header +
         '\n\n' +
@@ -3517,7 +3911,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // v2.5.25 (bug #62): conținutul fișierelor deja citite, ca chatul nou
         // să nu ceară re-citirea lor (buget propriu, în src/chatRotation.ts)
         (excerpts ? '\n\n' + excerpts : '') +
-        (reason === 'rotation'
+        (reason === 'rotation' || reason === 'cross-provider'
           ? '\n\n' + ROTATION_PROTOCOL_REMINDER + '\n\n' + MARKER_FORMAT_EXAMPLE
           : '') +
         '\n\n[End of handoff — continue the task from where it left off; ' +
@@ -3621,6 +4015,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.chatToolSteps = 0;
     this.chatReadFiles.clear();
     this.chatToolCalls.length = 0;
+    this.chatWrittenFiles.clear();
   }
 
   /** Setarea `freekit.handoffThreshold` (0 = rotirea e dezactivată). */
@@ -3816,6 +4211,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.verifyRepairs = 0;
     this.lastVerifyFailure = undefined;
     this.lastEditTargets = [];
+    // v2.5.53: fără diagnostic activ la începutul unui mesaj nou
+    this.activeDiagnosis = undefined;
+    this.repairCycles = 0;
+    this.lastErrorSignature = '';
+    this.diagnosisAttempts = [];
+    this.diagnosisPersisted = false;
     // v2.5.49 (FIX 2): numărătoarea bucăților e per mesaj
     this.writeParts.clear();
     // v2.5.33 (bug #84): seria de erori identice e per task (mesaj)
@@ -4001,6 +4402,94 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.lastEditTargets = rels;
   }
 
+  /**
+   * v2.5.53 (FIX 4/6) — ce are voie modelul cât timp verificarea e pe roșu.
+   * Singurul răspuns acceptat e UN `edit_file` care nu e band-aid; orice altceva
+   * primește `reprompt` (vezi și `isBandAidFix`).
+   */
+  private repairReplyVerdict(
+    toolCall: ToolCall | null
+  ): { reprompt?: string; reason: string; notice?: string } {
+    if (!toolCall) {
+      return { reprompt: REPAIR_PROMPTS.text, reason: 'text instead of edit_file' };
+    }
+    const tool = toolCall.tool;
+    if (tool === 'edit_file') {
+      const bandAid = isBandAidFix(
+        String(toolCall.args?.new_text ?? ''),
+        String(toolCall.args?.old_text ?? '')
+      );
+      if (bandAid) {
+        return {
+          reprompt:
+            'REJECTED band-aid fix (' + bandAid + '): it hides the symptom and leaves the ' +
+            'root cause in place. ' + REPAIR_PROMPTS.other,
+          reason: 'rejected band-aid fix',
+          notice:
+            '🚫 Rejected a band-aid fix (' + bandAid +
+            '). Asking for the real fix at the source.'
+        };
+      }
+      return { reason: 'edit_file' };
+    }
+    if (tool === 'write_file' || tool === 'write_files') {
+      return {
+        reprompt: REPAIR_PROMPTS.writeFile,
+        reason: 'write_file instead of edit_file'
+      };
+    }
+    if (tool === 'screenshot' || tool === 'compare_visual') {
+      return { reprompt: REPAIR_PROMPTS.screenshot, reason: 'screenshot does not help' };
+    }
+    if (/^(?:read_|list_|search_|project_info|git_)/.test(tool)) {
+      return { reprompt: REPAIR_PROMPTS.read, reason: tool + ' does not fix the error' };
+    }
+    return { reprompt: REPAIR_PROMPTS.other, reason: tool + ' is not allowed during repair' };
+  }
+
+  /**
+   * v2.5.53 (FIX 14) — scrie raportul diagnosticului pe disc o singură dată
+   * (`docs/diagnostics/<timestamp>.md`): eroare, cauză, fix-uri încercate, rezultat.
+   */
+  private persistDiagnosis(root: string, outcome: string): void {
+    const d = this.activeDiagnosis;
+    if (!d || this.diagnosisPersisted) return;
+    this.diagnosisPersisted = true;
+    const rel = writeDiagnosisReport(root, d, {
+      attempts: this.diagnosisAttempts,
+      outcome
+    });
+    if (rel) this.post('notice', '🗒 Diagnostic report: ' + rel);
+  }
+
+  /**
+   * v2.5.53 (FIX 8) — escaladare onestă: spune ADEVĂRUL (eroarea există în
+   * continuare), fără să preia „gata, funcționează" de la model.
+   */
+  private repairFailText(): string {
+    const d = this.activeDiagnosis;
+    const e = d?.error;
+    const lines = [
+      '⛔ I could not fix this error automatically after ' + MAX_REPAIR_CYCLES +
+        ' cycles. The error is REAL and still present — I am NOT claiming it is fixed.'
+    ];
+    if (e) {
+      lines.push('');
+      lines.push('Error: ' + e.message);
+      if (e.file) lines.push('Location: ' + e.file + (e.line ? ':' + e.line : ''));
+    }
+    if (d?.rootCause) {
+      lines.push('Root cause: ' + d.rootCause.description);
+      if (d.rootCause.sourceFile) lines.push('Source file: ' + d.rootCause.sourceFile);
+    }
+    lines.push('');
+    lines.push('Options:');
+    lines.push('- Fix it manually (the location and the cause are above)');
+    lines.push('- Switch to another model (the model chip in the chat)');
+    lines.push('- Write "continue" to let me try again');
+    return lines.join('\n');
+  }
+
   /** Rulează verificarea după un edit → textul pentru AI + (eventual) rollback. */
   private async autoVerify(
     root: string
@@ -4026,7 +4515,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.hasEverVerifiedGreen = true;
       // v2.5.33 (bug #84): verificarea a trecut → seria de erori identice se rupe
       this.sameErrors.reset();
+      // v2.5.53 (FIX 14): raportul diagnosticului, cu rezultatul final
       if (this.verifyRepairs > 0) {
+        this.persistDiagnosis(
+          root,
+          'FIXED in ' + this.verifyRepairs + ' cycle' + (this.verifyRepairs === 1 ? '' : 's')
+        );
+      }
+      // v2.5.53 (FIX 4): verificarea e verde → iese din modul de reparație
+      this.activeDiagnosis = undefined;
+      this.repairCycles = 0;
+      if (this.verifyRepairs > 0) {
+        // v2.5.53 (FIX 5): log explicit „FIXED in N cycles"
+        logLine(
+          'diagnose',
+          'FIXED in ' + this.verifyRepairs + ' cycle' + (this.verifyRepairs === 1 ? '' : 's')
+        );
         this.post(
           'heal',
           '✅ Auto-verify: "' + vres.command + '" passes again (after ' +
@@ -4063,8 +4567,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       output: vres.output,
       seconds
     };
+    // v2.5.53 (FIX 1/2/3): în loc de output-ul brut, parsăm eroarea și urmărim
+    // cauza reală; modelul primește un context COMPACT, cu fix-ul exact cerut.
+    const diagnosis = diagnose(
+      vres.output,
+      root,
+      this.lastEditTargets[this.lastEditTargets.length - 1]
+    );
+    logDiagnosis(diagnosis);
+    this.activeDiagnosis = diagnosis;
+    this.repairCycles = 0;
+    // v2.5.53 (FIX 14): diagnostic nou → jurnal nou de încercări
+    this.diagnosisAttempts = [];
+    this.diagnosisPersisted = false;
+    // v2.5.53 (FIX 5): aceeași eroare după un fix ⇒ „fix-ul tău NU a funcționat";
+    // o eroare DIFERITĂ ⇒ progres, continuăm.
+    const signature = parsedSignature(diagnosis.error);
+    const sameError = !!signature && signature === this.lastErrorSignature;
+    this.lastErrorSignature = signature;
     log(
-      'auto-verify FAILED (' + attempt + '/' + MAX_VERIFY_REPAIRS + '): ' + vres.command
+      'auto-verify FAILED (' + attempt + '/' + MAX_VERIFY_REPAIRS + '): ' + vres.command +
+        (attempt > 1 ? (sameError ? ' — SAME error again' : ' — different error (progress)') : '')
     );
 
     // v2.5.33 FIX (bug #84): prea multe eșecuri consecutive pe ACELAȘI tip de
@@ -4135,11 +4658,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       return {
         suffix:
-          '\n\n❌ VERIFICATION FAILED (auto-repair attempt ' + attempt + '/' +
-          MAX_VERIFY_REPAIRS + ') — command: ' + vres.command + ' (' + seconds + 's)\n' +
-          '--- OUTPUT ---\n' + vres.output.trim() + '\n--- END OUTPUT ---\n' +
-          '⟳ AUTO-REPAIR (' + attempt + '/' + MAX_VERIFY_REPAIRS +
-          '): your last edit broke the project. Read the error output above, find the ROOT CAUSE and fix it with edit_file / write_file. Do NOT run the verification command yourself and do NOT reply with a final answer yet — after your fix the system re-runs verification automatically.' +
+          '\n\n❌ VERIFICATION FAILED (' + vres.command + ', attempt ' + attempt + '/' +
+          MAX_VERIFY_REPAIRS + ', ' + seconds + 's)\n\n' +
+          (sameError
+            ? '⚠️ Your previous fix did NOT work — the SAME error is back. Analyze why and ' +
+              'propose a DIFFERENT fix (do not repeat the previous edit).\n\n'
+            : '') +
+          buildDiagnosisContext(diagnosis, attempt, MAX_VERIFY_REPAIRS) +
+          (diagnosis.rootCause
+            ? ''
+            : '\n\n--- OUTPUT (excerpt) ---\n' +
+              diagnosis.raw +
+              '\n--- END OUTPUT ---') +
           verifyHints,
         rollbackText: ''
       };
@@ -4182,6 +4712,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   ): string {
     // NU face rollback fără un verified-good state real (altfel șterge tot)
     if (!this.hasEverVerifiedGreen) {
+      // v2.5.53 (FIX 14): rezultatul final, onest, în raport
+      this.persistDiagnosis(
+        root,
+        'NOT fixed after ' + MAX_VERIFY_REPAIRS +
+          ' attempts — no verified-good state, so the changes were KEPT (rollback skipped)'
+      );
       log('automatic rollback SKIPPED — no verified-good state yet');
       this.edits.reset();
       this.verifyRepairs = 0;
@@ -4211,6 +4747,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     const rb = this.edits.rollback();
+    // v2.5.53 (FIX 14): rezultatul final în raportul de diagnostic
+    this.persistDiagnosis(
+      root,
+      'ROLLED BACK to the last verified-good state after ' + MAX_VERIFY_REPAIRS +
+        ' failed repair attempts'
+    );
     // v2.5.0 — FIX 4: golim containerele verbose rămase după rollback
     this.post('clear_verbose_steps', '');
     const changed = rb.restored.length + rb.deleted.length;
@@ -5665,6 +6207,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const codiconUri = toUri('codicon.css');
     const markedUri = toUri('marked.min.js');
     const purifyUri = toUri('purify.min.js');
+    // v2.5.50: fontul de iconițe monochrome (@vscode/codicons) e încărcat în
+    // webview prin <link> mai jos — log explicit pentru diagnostic
+    logLine('ui', 'codicon font loaded');
 
     return `<!DOCTYPE html>
 <html><head>

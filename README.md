@@ -2,7 +2,7 @@
 
 > **Free AI coding agent for VS Code.** Use your existing web AI accounts (DeepSeek, ChatGPT, Claude, Gemini, Mistral, Qwen) or a local Ollama model. No API keys, no subscriptions, no costs.
 
-[![Version](https://img.shields.io/badge/version-2.5.48-blue)](https://marketplace.visualstudio.com/items?itemName=builderweb.freekit)
+[![Version](https://img.shields.io/badge/version-2.5.54-blue)](https://marketplace.visualstudio.com/items?itemName=builderweb.freekit)
 [![VS Code](https://img.shields.io/badge/VS%20Code-%3E%3D1.90-blue)](https://code.visualstudio.com)
 
 ## Screenshots
@@ -46,9 +46,11 @@ Unlike other AI coding agents, Freekit works with your existing web AI accounts:
 - 📚 **Semantic code search** — find code by meaning, not just text
 - 🔌 **MCP servers** — Model Context Protocol support
 - 🛡️ **Hardware-aware Ollama** — 51-model catalog, tiers T0-T6, auto-recommendation
-- 🧪 **Auto-verify & auto-repair** — every file write is checked (`tsc --noEmit` / `astro check` / `build`); failures go back to the AI (up to 3 attempts) and are rolled back if they can't be fixed
+- 🧪 **Auto-verify, root-cause diagnosis & auto-repair** — every file write is checked (`tsc --noEmit` / `astro check` / `build`); failures are **parsed and traced to their root cause** (`[diagnose] parsed: …` / `[diagnose] root cause: …`), the AI gets only a compact diagnostic plus the exact fix and must answer with **one `edit_file`** — band-aid patches (`?.` on `.map()`, `|| []`, `if (!x) return`) are **rejected**. Up to 3 repair cycles, then an automatic rollback; if the model cannot fix it, you are told honestly that the error is still there (never a false “it works”). Every repair session is saved to `docs/diagnostics/<timestamp>.md`
 - 🖥️ **Dev servers in a visible terminal** — `npm run dev`, `vite`, `nodemon`, … start in a dedicated VS Code terminal, and the AI gets the live URL immediately
+- 👁️ **Visual verification** — `screenshot` captures any page (**full page by default**, so errors below the fold are included) or ONE element — by exact CSS `selector` or by a plain-language `description` (“the CTA button”) with 10px padding — to `docs/screenshots/`; the PNG opens in VS Code (`freekit.screenshotOpenMode`), the browser returns to the background and a **thumbnail appears in the chat** (click → full size). `compare_visual` screenshots the original and the replica, opens them **side by side**, sends both images to a provider with vision (Qwen3-VL is the most accurate) and writes the differences to `docs/screenshots/compare-<timestamp>.md`
 - 🔍 **Verbose mode** — collapsible Thinking / Executing / Result / Decision cards for full transparency
+- 🎛️ **VS Code-native chat UI** — every status, button and step uses monochrome @vscode/codicons (no colorful emoji)
 - 📎 **Attachments & auto-context** — files, folders, images and binaries, plus project structure sent with every message
 
 ## Quick start
@@ -70,7 +72,7 @@ Unlike other AI coding agents, Freekit works with your existing web AI accounts:
 - **Claude** (Sonnet / Opus / Haiku)
 - **Gemini** (2.5 Pro / 2.5 Flash)
 - **Mistral** (Vibe)
-- **Qwen**
+- **Qwen** (Qwen3-Max / Qwen3-VL — the best for `compare_visual`)
 
 ### Local
 
@@ -93,7 +95,10 @@ long, multi-step tasks (reading many files, multi-file edits). In practice:
 
 For complex tasks, prefer Gemini, DeepSeek, or Ollama. If a provider refuses
 mid-task, switch the **model chip** in the composer to another provider and
-press Retry.
+press Retry — Freekit hands the new provider the **full task context** (original
+task, every tool call already made, the files already read with their content,
+the files already written, current state and next step), so the task continues
+seamlessly instead of restarting from „continue from where you left off".
 
 ## How it works
 
@@ -169,12 +174,13 @@ Additional safeguards:
 | `freekit.cdpPort` | `9222` | CDP port used to launch / connect Chrome |
 | `freekit.chromePath` | *(empty)* | Manual Chrome/Edge path (empty = auto-detect) |
 | `freekit.messageTimeoutMinutes` | `20` | Total time budget for one agentic message |
-| `freekit.autoVerify` | `true` | Check the project after every file write (`astro check` / `tsc --noEmit` / `build`); failures trigger up to 3 AI repair attempts, then an automatic rollback to the last verified state |
+| `freekit.autoVerify` | `true` | Check the project after every file write (`astro check` / `tsc --noEmit` / `build`); failures are parsed and root-caused, the AI gets a compact diagnostic + the exact fix and must answer with one `edit_file` (band-aids like `?.` on `.map()`, `|| []`, `if (!x) return` are rejected). Up to 3 repair cycles, then an automatic rollback to the last verified state. Every session is reported to `docs/diagnostics/<timestamp>.md` |
+| `freekit.screenshotOpenMode` | `preview` | How a `screenshot` / `compare_visual` capture is opened (`preview` = preview tab, `beside` = new editor column, `none` = only saved). `compare_visual` always opens the two PNGs side by side. Chrome is always returned to the background after a capture |
 | `freekit.promptCheckpoints` | `true` | Create a git checkpoint before every prompt and show the ⟲ restore button on each user message |
 | `freekit.autoInitGit` | `true` | Run `git init` (plus a minimal `.gitignore`, if missing) when the project folder isn't a git repo yet, so checkpoints / ⟲ restore work out of the box |
 | `freekit.selectorsUrl` | *(empty)* | Raw URL of a public Gist with `selectors.json` (`version` + `providers`); empty = remote selectors disabled |
 | `freekit.checkSelectorsOnStartup` | `true` | Look for a newer selector config at startup — at most once every 24 h (only when `freekit.selectorsUrl` is set) |
-| `freekit.handoffThreshold` | `20` | Tool results pasted in the **same** browser chat before Freekit opens a **new chat** with a full handoff (original task, every action already executed, the files already read with their content). `0` disables the handoff; raise it for long tasks |
+| `freekit.handoffThreshold` | `20` | Tool results pasted in the **same** browser chat before Freekit opens a **new chat** with a full handoff (original task, every action already executed, the files already read with their content, and the files already written/edited). `0` disables the handoff; raise it for long tasks. Switching the **provider** mid-task always sends the same full handoff to the new provider (log: `[handoff] cross-provider — sending full context to <provider>`) |
 | `freekit.humanTyping` | `true` | Type messages with human timing (random delays, punctuation pauses, bursts); off = instant insertion. DeepSeek, Gemini and Ollama always use instant paste (human typing is kept only for ChatGPT and Claude) |
 | `freekit.humanBehavior` | `true` | Small mouse moves before clicks + occasional gentle scroll (anti-detect) |
 | `freekit.mutationObserver` | `false` | Experimental: end-of-generation detection via MutationObserver (fast, low CPU). Can be flaky when Chrome runs offscreen — JS is suspended in invisible windows; default off = reliable 500 ms polling |

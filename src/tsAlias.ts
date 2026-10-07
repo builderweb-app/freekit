@@ -6,8 +6,9 @@
  * fișier TypeScript către AI, îl etichetăm cu un alias `.txt`
  * (`src/foo.ts` → `src/foo.ts.txt`) plus o notă în antet; calea originală
  * rămâne în registrul de mai jos, iar aliasul primit înapoi de la AI
- * (read_file / write_file / edit_file / read_files / write_files) e tradus
- * în calea reală din workspace, ca fișierul de pe disc să rămână `src/foo.ts`.
+ * (read_file / write_file / edit_file / read_files / write_files / copy_file)
+ * e tradus în calea reală din workspace, ca fișierul de pe disc să rămână
+ * `src/foo.ts`.
  *
  * Modul pur (fără `vscode`), ca logica să fie ușor de verificat.
  * ========================================================================= */
@@ -129,6 +130,22 @@ export function mapToolCallAliases(
   if (PATH_TOOLS.has(tool) && typeof a.path === 'string' && a.path) {
     const path = fix(a.path);
     return { args: path === a.path ? a : { ...a, path }, mappings };
+  }
+
+  // v2.5.50 FIX 3: copy_file are DOUĂ căi — sursa și destinația
+  if (tool === 'copy_file') {
+    const next: Record<string, any> = { ...a };
+    let changed = false;
+    for (const key of ['from', 'to']) {
+      const p = a[key];
+      if (typeof p !== 'string' || !p) continue;
+      const original = fix(p);
+      if (original !== p) {
+        changed = true;
+        next[key] = original;
+      }
+    }
+    return changed ? { args: next, mappings } : { args: a, mappings };
   }
 
   if (tool === 'read_files' && Array.isArray(a.paths)) {

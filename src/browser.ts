@@ -467,6 +467,36 @@ export class BrowserManager {
   }
 
   /**
+   * v2.5.51: tab NOU, separat de chatul activ.
+   *
+   * `screenshot` / `compare_visual` navighează pe un URL arbitrar; dacă am
+   * folosi pagina chatului, conversația aflată în lucru ar fi distrusă. Tab-ul
+   * întors aici nu e reținut în `this.page`, deci `ensureOpen` continuă să
+   * servească pagina chatului. Pornește Chrome dacă nu rulează (ca ensureOpen).
+   */
+  async newPage(): Promise<Page> {
+    let launched = false;
+    if (!(await this.isRunning())) {
+      vscode.window.showInformationMessage(
+        'Starting Chrome with the Freekit profile (running in the background)...'
+      );
+      await this.launchChrome();
+      launched = true;
+    }
+    const browser = await chromium.connectOverCDP(this.cdpUrl());
+    const ctx = browser.contexts()[0];
+    if (!ctx) throw new Error('No browser context');
+    const page = await ctx.newPage();
+    if (launched) {
+      await this.applyHiddenState(page).catch((e) =>
+        log('applyHiddenState a eșuat: ' + (e?.message ?? String(e)))
+      );
+    }
+    await preparePage(page);
+    return page;
+  }
+
+  /**
    * v0.3.0 (P0.3): închide REAL browserul.
    * browser.close() pe connectOverCDP doar deconectează — așa că:
    *   1) încercăm CDP `Browser.close` (închidere grațioasă);

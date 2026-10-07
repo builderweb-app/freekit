@@ -26,6 +26,13 @@ import {
   truncateContent
 } from './payload';
 import { RESTRICTED_TOOL_ERROR } from './trust';
+import {
+  ScreenshotOptions,
+  VisualToolContext,
+  captureScreenshot,
+  compareVisual,
+  toTargetUrl
+} from './visual';
 import { translateUnixCommandToWindows } from './unixTranslate';
 import { commandErrorFiles } from './verifier';
 import { logLine } from './log';
@@ -320,6 +327,9 @@ export const FILE_WRITE_TOOLS: ReadonlySet<string> = new Set([
   'write_file',
   'write_files',
   'edit_file',
+  // v2.5.50 FIX 3: copy_file scrie în destinație — trece prin aceleași
+  // garduri de scope (ținta de aprobare = `to`, vezi FileChangePreview)
+  'copy_file',
   'delete_file',
   'delete_directory'
 ]);
@@ -1364,8 +1374,9 @@ escaped, never truncated, never JSON-quoted. The fences themselves are NOT
 part of the file — the chat UI hides them when rendering.
 
 For ALL OTHER actions (read_file, read_files, list_files, search_files,
-search_semantic, run_command, run_npm, delete_file, delete_directory, git_*,
-project_info, open_workspace), use the JSON format:
+search_semantic, run_command, run_npm, copy_file, delete_file,
+delete_directory, git_*, project_info, open_workspace, screenshot,
+compare_visual), use the JSON format:
 {"action":"NAME","args":{...}}
 
 ## Available actions:
@@ -1391,6 +1402,58 @@ project_info, open_workspace), use the JSON format:
     recursive:true deletes the folder WITH all its contents (only when the
     task asks for it)
     {"action":"delete_directory","args":{"path":"bootcamp-test2","recursive":true}}
+16. copy_file(from, to, replace?) - copy ONE file 1:1 (needs approval);
+    "replace" is an optional list of {old, new} simple replacements applied
+    to the copied content before writing
+    {"action":"copy_file","args":{"from":"src/pages/a.astro","to":"src/pages/b.astro","replace":[{"old":"old text","new":"new text"}]}}
+17. screenshot(url, full_page?, viewport?, selector?, description?) - capture a page
+    (or ONE element) to docs/screenshots/<timestamp>.png; \`url\` also accepts a
+    local path and an address without a scheme ("localhost:4321/"). \`full_page\`
+    defaults to TRUE (the WHOLE page — errors below the fold are included); pass
+    \`"full_page": false\` for the viewport only. \`description\` captures ONE element
+    described in words (e.g. "the CTA button", "the price cards") — it is matched
+    by element type, visible text, id/class, label, alt, title or aria-label; use
+    \`selector\` when you know the exact CSS selector.
+    {"action":"screenshot","args":{"url":"http://localhost:4321/affordable-websites/"}}
+    {"action":"screenshot","args":{"url":"http://localhost:4321/","description":"the CTA button"}}
+18. compare_visual(url1, url2, provider?) - screenshot both pages and ask a
+    provider WITH VISION to list ALL the differences; writes the report to
+    docs/screenshots/compare-<timestamp>.md
+    {"action":"compare_visual","args":{"url1":"https://identitatebrand.ro/creare-site/","url2":"http://localhost:4321/affordable-websites/"}}
+
+## COPYING A FILE (copy_file)
+- When the user asks "make page X exactly like page Y" (or "copy this file
+  and change ..."), use copy_file instead of write_file. copy_file takes the
+  source, the destination and optional simple replacements — you do NOT have
+  to write out the whole content.
+- "from" and "to" are relative paths; "to" is overwritten if it exists.
+- "replace" is OPTIONAL: omit it for an exact copy. Each "old" must appear
+  exactly ONCE in the copied file; if it is missing or ambiguous you get a
+  warning and the remaining replacements are still applied (the file is
+  still written).
+- Do NOT use copy_file for generated content — for new content the model
+  writes, use write_file.
+
+## VISUAL VERIFICATION (screenshot / compare_visual)
+- When the user asks you to visually replicate a page, or when you finish
+  building a page, use compare_visual to check the result against the
+  original. Do NOT assume it is correct — verify.
+- For compare_visual and complex visual analysis, Qwen3-VL
+  (qwen3-vl-235b-a22b) is the best. Recommend it when the user asks for
+  precise visual replication.
+- compare_visual screenshots url1 (the ORIGINAL) and url2 (the REPLICA), sends
+  both images to a provider with vision and writes the differences to
+  docs/screenshots/compare-<timestamp>.md. Only providers with vision can
+  receive the screenshots — if the current one cannot, Freekit switches
+  automatically to one that can (the log says which).
+- Both tools save the PNGs in docs/screenshots/ and open them in the editor
+  (screenshot: \`freekit.screenshotOpenMode\`; compare_visual: side by side).
+  \`full_page\` defaults to TRUE (the WHOLE page — not just the viewport); pass
+  \`"full_page": false\` for the viewport only. Use \`selector\` (exact CSS) or
+  \`description\` (a short description like "the CTA button") to capture ONE
+  element (with 10px padding around it).
+- The dev server must already be running before you screenshot a localhost URL
+  (start it with run_npm / run_command and use the URL you were given).
 
 ## DELETING FILES AND FOLDERS
 - Use delete_file / delete_directory — NEVER run_command with "rm", "del",
@@ -1466,7 +1529,7 @@ YOU: {"action":"run_npm","args":{"action":"script","script":"test"}}
 - Args ALWAYS an object (use {} if empty).
 - Paths relative to workspace root.
 - When the task is complete, respond with PLAIN TEXT (not JSON).
-- After every edit_file / write_file / write_files the system AUTO-VERIFIES the project (astro check / tsc / build). If you receive "VERIFICATION FAILED", fix the ROOT CAUSE — you get max 3 auto-repair attempts; if it still fails, your changes are ROLLED BACK automatically. Never claim success while a verification is failing.
+- After every edit_file / write_file / write_files the system AUTO-VERIFIES the project (astro check / tsc / build). If you receive "VERIFICATION FAILED", you get a DIAGNOSTIC with the parsed error, the exact location, the ROOT CAUSE traced to the data source and the EXACT required fix — apply it with ONE edit_file. Never claim success while a verification is failing, and never hide the symptom with "?.", "|| []" or "if (!x) return": a band-aid fix is REJECTED and you will be asked again. You get max 3 repair cycles; after that the changes are ROLLED BACK automatically (and if there is no verified-good state, you are told honestly that the error is still there).
 - Long-running commands (dev / start / serve / watch / preview — e.g. "npm run dev", "vite", "nodemon") start the server in a VISIBLE VS Code terminal automatically (the user watches the live output there): you receive "✅ Server started in the VS Code TERMINAL …" + the live URL + the first seconds of output IMMEDIATELY. NEVER wait for such a command and NEVER re-run it; the server keeps running until stopped (Ctrl+C in its terminal or the command "Freekit: Stop Dev Servers"). If the early output shows a startup error (port in use, syntax error) — or you are told the process exited — fix the root cause and re-run the command once.
 
 ## WHEN TO USE PLAIN TEXT (no action)
@@ -1505,6 +1568,9 @@ Tools:
 10. write_files(files) — ONE call for ALL files: {"tool": "write_files", "args": {"files": [{"path": "a.ts", "content": "..."}, {"path": "b.ts", "content": "..."}]}} — args.files is MANDATORY (the array goes INSIDE args.files, never as args directly)
 11. project_info()
 12. search_semantic(query) — find code by MEANING (e.g. "where do we validate login"); works only if the workspace was indexed (command "Freekit: Index Workspace")
+13. copy_file(from, to, replace?) — copy ONE file 1:1 ("make page X exactly like page Y"); replace is an optional list of {old, new} applied to the copy — use it instead of write_file when you would otherwise repeat a whole existing file
+14. screenshot(url, full_page?, selector?, description?) — capture a page (or ONE described element, with 10px padding) to docs/screenshots/<timestamp>.png. full_page is TRUE by default.
+15. compare_visual(url1, url2, provider?) — screenshot the original and the replica, ask a provider WITH VISION to list ALL the differences, and write the report to docs/screenshots/compare-<timestamp>.md. Use it when you replicate a page visually or when you finish building a page — do NOT assume it is correct, verify. For visual work Qwen3-VL (qwen3-vl-235b-a22b) is the best.
 
 For git you may also use the short names "git_status", "git_diff", "git_log", "git_commit", "git_branch", "git_revert".
 
@@ -1521,7 +1587,7 @@ CRITICAL WRITE RULES (the system REJECTS violations with an error):
 - Hard limits: max 3 writes per file, max 15 write operations per message. If you get an ANTI-SPAM error, do NOT retry — reply with plain text instead.
 - Dev/start/serve/watch commands (npm run dev, npm start, vite, nodemon, ...) run in a VISIBLE VS Code terminal: you get "✅ Server started in the VS Code TERMINAL …" + the first seconds of output immediately. Do NOT wait for them, do NOT re-run them; if the first seconds show an error — or the process exited — fix it and re-run once.
 - If run_command / run_npm fails: read the FULL error, fix the code, re-run the SAME command (max 5 tries; after that it is blocked and you must reply with text).
-- After every write the system RE-CHECKS the project: if you receive "VERIFICATION FAILED", fix the reported error (max 3 repair attempts — then ALL changes are rolled back automatically). Never claim success while a verification is failing.
+- After every write the system RE-CHECKS the project: if you receive "VERIFICATION FAILED" you also get a DIAGNOSTIC (parsed error + ROOT CAUSE + the exact fix). Apply it with ONE edit_file. Never hide the error with "?.", "|| []" or "if (!x) return" — band-aids are rejected. Max 3 repair cycles, then ALL changes are rolled back automatically. Never claim success while a verification is failing.
 - After the task is done, reply with plain text (short summary). No JSON.
 
 Args must ALWAYS be an object (empty {} if no args).
@@ -1737,6 +1803,8 @@ const TRUST_REQUIRED_TOOLS = new Set([
   'write_file',
   'edit_file',
   'write_files',
+  // v2.5.50 FIX 3: copy_file scrie un fișier nou
+  'copy_file',
   'delete_file',
   'delete_directory',
   'run_command',
@@ -1764,7 +1832,10 @@ export async function executeTool(
   approve: ApprovalFn,
   /** v2.5.6 (bug #10): ultimul mesaj al utilizatorului — referința față de care
    *  detectăm conținutul scris „din imaginație" (opțional). */
-  userText?: string
+  userText?: string,
+  /** v2.5.51: browser + puntea de trimitere către un provider cu vision —
+   *  necesare doar pentru `screenshot` / `compare_visual`. */
+  visual?: VisualToolContext
 ): Promise<ToolResult> {
   log('executing tool: ' + call.tool);
   // v2.5.27 (bug #63): dacă AI-ul trimite calea-alias `.ts.txt` (cea pe care a
@@ -1947,6 +2018,10 @@ export async function executeTool(
       case 'write_files':
         return await writeFilesBatch(call.args, workspaceRoot, approve, userText);
 
+      // v2.5.50 FIX 3: copiere 1:1 a unui fișier (opțional cu înlocuiri simple)
+      case 'copy_file':
+        return await copyFileTool(call.args, workspaceRoot, approve, log);
+
       // v2.5.42 (bug #98): ștergerea de fișiere/foldere — cu scope + aprobare
       case 'delete_file':
         return await deleteFileTool(
@@ -1972,6 +2047,13 @@ export async function executeTool(
 
       case 'search_semantic':
         return await searchSemanticTool(call.args?.query, workspaceRoot);
+
+      // v2.5.51 FIX 1/2: capturi de ecran + comparație vizuală (vision)
+      case 'screenshot':
+        return await screenshotTool(call.args, workspaceRoot, visual, log);
+
+      case 'compare_visual':
+        return await compareVisualTool(call.args, workspaceRoot, visual, log);
 
       default:
         return { ok: false, error: 'Unknown tool: ' + call.tool };
@@ -3409,6 +3491,431 @@ async function writeFilesBatch(
           blocked.join(', ')
         : '')
   };
+}
+
+/* =========================================================================
+ * v2.5.50 FIX 3 — `copy_file`: copiere 1:1 a unui fișier
+ *
+ * Când utilizatorul cere „fă pagina X exact ca pagina Y", modelul trebuia să
+ * scrie tot conținutul (12 KB) prin `write_file`: pe Gemini ajungea un tool
+ * call malformat, pe restul providerilor un output uriaș (split lent). Aici
+ * modelul numește doar SURSA, DESTINAȚIA și (opțional) câteva înlocuiri
+ * simple, iar Freekit citește fișierul și îl scrie la destinație.
+ *
+ * `replace` e o listă de perechi {old, new}; `old` trebuie să apară EXACT o
+ * dată în fișier (potrivire tolerantă la EOL, ca `edit_file`) — altfel doar un
+ * warning și se continuă cu celelalte perechi.
+ * ========================================================================= */
+
+/** Aplică înlocuirile `replace` pe conținutul copiat (tolerant la EOL). */
+function applyCopyReplacements(
+  content: string,
+  replace: unknown,
+  log: (msg: string) => void
+): { content: string; applied: number; warnings: string[] } {
+  const list = Array.isArray(replace) ? replace : [];
+  const warnings: string[] = [];
+  let out = content;
+  let applied = 0;
+
+  for (let i = 0; i < list.length; i++) {
+    const r: any = list[i];
+    if (
+      !r ||
+      typeof r.old !== 'string' ||
+      typeof r.new !== 'string' ||
+      !r.old.trim()
+    ) {
+      warnings.push(
+        'replace[' + i + ']: expected {old, new} (non-empty strings) — skipped'
+      );
+      continue;
+    }
+    // numără aparițiile pe textul normalizat la EOL (aceeași treaptă „eol"
+    // folosită de `findTolerantMatch`), ca `old` găsit de două ori să nu
+    // înlocuiască orbeste doar prima apariție
+    const hay = normalizeWithMap(out, {}).text;
+    const needle = normalizeWithMap(r.old, {}).text;
+    let count = 0;
+    let at = needle ? hay.indexOf(needle) : -1;
+    while (at >= 0) {
+      count++;
+      at = hay.indexOf(needle, at + needle.length);
+    }
+    if (count !== 1) {
+      warnings.push(
+        'replace[' +
+          i +
+          ']: old text found ' +
+          count +
+          ' time(s) — skipped (it must appear exactly once)'
+      );
+      continue;
+    }
+    const match = findTolerantMatch(out, r.old);
+    if (!match) {
+      warnings.push('replace[' + i + ']: old text not found — skipped');
+      continue;
+    }
+    if (match.strategy !== 'exact') {
+      log(
+        '[copy] replace[' + i + ']: tolerant match (' + match.strategy + ')'
+      );
+    }
+    out = out.slice(0, match.start) + r.new + out.slice(match.end);
+    applied++;
+  }
+
+  return { content: out, applied, warnings };
+}
+
+async function copyFileTool(
+  args: Record<string, any>,
+  root: string,
+  approve: ApprovalFn,
+  log: (msg: string) => void
+): Promise<ToolResult> {
+  const from = typeof args.from === 'string' ? args.from.trim() : '';
+  const to = typeof args.to === 'string' ? args.to.trim() : '';
+  if (!from || !to) {
+    return {
+      ok: false,
+      error:
+        'copy_file: args.from and args.to are required. Expected ' +
+        '{"action":"copy_file","args":{"from":"src/a.astro","to":"src/b.astro",' +
+        '"replace":[{"old":"old text","new":"new text"}]}}'
+    };
+  }
+  if (from === to) {
+    return {
+      ok: false,
+      error: 'copy_file: args.from and args.to are the same path (' + from + ')'
+    };
+  }
+  // ambele căi validate (workspace / allowExternalPaths) ÎNAINTE de citire
+  const absFrom = safePath(from, root);
+  safePath(to, root);
+
+  let source: string;
+  try {
+    source = Buffer.from(
+      await vscode.workspace.fs.readFile(vscode.Uri.file(absFrom))
+    ).toString('utf8');
+  } catch (e: any) {
+    logLine('tool', 'copy_file failed: cannot read source ' + from);
+    return {
+      ok: false,
+      error:
+        'copy_file: cannot read source "' +
+        from +
+        '": ' +
+        (e?.message ?? String(e)) +
+        '. Check the path with list_files / read_file.'
+    };
+  }
+
+  const replaced = applyCopyReplacements(source, args.replace, log);
+  const bytes = Buffer.byteLength(replaced.content, 'utf8');
+  log('[copy] ' + from + ' → ' + to + ' (' + bytes + ' bytes)');
+  if (Array.isArray(args.replace)) {
+    log(
+      '[copy] applied ' +
+        replaced.applied +
+        ' replacement' +
+        (replaced.applied === 1 ? '' : 's')
+    );
+  }
+  for (const w of replaced.warnings) log('[copy] warning: ' + w);
+
+  // anti-spam: aceeași limită ca write_file/edit_file, verificată ÎNAINTE de card
+  const limitErr = checkWriteLimit(to);
+  if (limitErr) return { ok: false, error: limitErr };
+
+  const oldInfo = await tryReadInfo(to, root);
+  const diff = makeDiff(to, oldInfo.content, replaced.content);
+  const changes: FileChangePreview[] = [
+    {
+      label: to,
+      oldContent: oldInfo.content,
+      newContent: replaced.content,
+      isNew: !oldInfo.exists
+    }
+  ];
+  if (!(await approve('copy_file', to, diff, changes))) {
+    return { ok: false, error: 'User rejected' };
+  }
+
+  const res = await writeFile(to, replaced.content, root);
+  if (!res.ok) return res;
+  recordWrite(to);
+  recordWriteCall();
+
+  const parts = [
+    'Copied ' +
+      from +
+      ' → ' +
+      to +
+      ' (' +
+      bytes +
+      ' bytes' +
+      (Array.isArray(args.replace)
+        ? ', ' +
+          replaced.applied +
+          ' replacement' +
+          (replaced.applied === 1 ? '' : 's') +
+          ' applied'
+        : '') +
+      ')'
+  ];
+  if (replaced.warnings.length) {
+    parts.push('WARNINGS:\n- ' + replaced.warnings.join('\n- '));
+  }
+  return { ok: true, result: parts.join('\n') };
+}
+
+/* =========================================================================
+ * v2.5.51 FIX 1/2 — `screenshot` și `compare_visual`
+ * Capturile merg în `docs/screenshots/`; comparația vizuală e trimisă unui
+ * provider cu vision (FIX 3 — comutarea o face puntea din chatView).
+ * ========================================================================= */
+
+/** `viewport` / `full_page` / `description` vin din args-ul modelului, deci validăm strict. */
+function screenshotOptionsFrom(args: any): ScreenshotOptions {
+  const vp = args?.viewport;
+  const viewport =
+    vp && Number(vp.width) > 0 && Number(vp.height) > 0
+      ? { width: Number(vp.width), height: Number(vp.height) }
+      : undefined;
+  const description = args?.description ?? args?.element;
+  return {
+    // v2.5.54 (FIX 9): full_page implicit TRUE — doar `false` explicit capturează viewport-ul
+    fullPage: !(args?.full_page === false || args?.fullPage === false),
+    viewport,
+    selector: typeof args?.selector === 'string' && args.selector ? args.selector : undefined,
+    description:
+      typeof description === 'string' && description ? description : undefined
+  };
+}
+
+/** v2.5.54 (FIX 12): cum se deschide rezultatul unei capturi. */
+type ScreenshotOpenMode = 'preview' | 'beside' | 'none';
+
+function screenshotOpenMode(): ScreenshotOpenMode {
+  const raw = vscode.workspace
+    .getConfiguration('freekit')
+    .get<string>('screenshotOpenMode', 'preview');
+  return raw === 'beside' || raw === 'none' ? raw : 'preview';
+}
+
+export interface VisualArtifact {
+  absPath: string;
+  relPath: string;
+  label: string;
+}
+
+/** Dimensiunea maximă a unui thumbnail trimis în webview (base64 ~1.33×). */
+const MAX_THUMB_BYTES = 1_500_000;
+
+/**
+ * v2.5.54 (FIX 11/12/13) — UX după o captură:
+ *  1) FIX 12: deschide rezultatul în VS Code (`freekit.screenshotOpenMode`:
+ *     preview / beside / none), respectiv side-by-side la `compare_visual`;
+ *  2) FIX 11: readu Chrome în fundal (fereastra nu mai rămâne în față);
+ *  3) FIX 13: trimite thumbnail-urile (base64) în chat.
+ */
+async function revealVisualResult(
+  items: VisualArtifact[],
+  tag: 'screenshot' | 'compare',
+  visual: VisualToolContext | undefined
+): Promise<void> {
+  const mode = screenshotOpenMode();
+  if (mode !== 'none' && items.length) {
+    if (tag === 'compare' && items.length > 1) {
+      await openVisualFile(items[0].absPath, undefined, tag);
+      await openVisualFile(items[1].absPath, vscode.ViewColumn.Beside, tag);
+      logLine('compare', 'opened side by side');
+    } else {
+      await openVisualFile(
+        items[0].absPath,
+        mode === 'beside' ? vscode.ViewColumn.Beside : undefined,
+        tag
+      );
+    }
+  }
+
+  if (visual) {
+    await visual.browser.hideOffscreen().catch(() => undefined);
+    logLine(tag, 'browser hidden after capture');
+  }
+
+  if (visual?.thumbnails) {
+    const thumbs = items
+      .map((item) => {
+        try {
+          const buffer = fs.readFileSync(item.absPath);
+          if (buffer.length > MAX_THUMB_BYTES) return undefined;
+          return {
+            label: item.label,
+            relPath: item.relPath,
+            dataUri: 'data:image/png;base64,' + buffer.toString('base64')
+          };
+        } catch {
+          return undefined;
+        }
+      })
+      .filter((t): t is { label: string; relPath: string; dataUri: string } => !!t);
+    if (thumbs.length) {
+      visual.thumbnails(thumbs);
+      logLine(tag, 'thumbnails rendered in chat');
+    }
+  }
+}
+
+/** Deschide un fișier în editor (preview), opțional într-o coloană anume. */
+async function openVisualFile(
+  absPath: string,
+  column: vscode.ViewColumn | undefined,
+  tag: string
+): Promise<void> {
+  try {
+    await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(absPath), {
+      preview: true,
+      ...(column !== undefined ? { viewColumn: column } : {})
+    });
+    logLine(tag, 'opened in VS Code preview — ' + path.basename(absPath));
+  } catch (e: any) {
+    logLine(tag, 'could not open the file in the editor: ' + (e?.message ?? String(e)));
+  }
+}
+
+function visualUnavailable(tool: string): ToolResult {
+  return {
+    ok: false,
+    error:
+      tool +
+      ' is unavailable here (no browser context). Run it from the chat, not from direct-write mode.'
+  };
+}
+
+async function screenshotTool(
+  args: any,
+  root: string,
+  visual: VisualToolContext | undefined,
+  log: (msg: string) => void
+): Promise<ToolResult> {
+  if (!visual) return visualUnavailable('screenshot');
+  const raw = String(args?.url ?? args?.path ?? '').trim();
+  if (!raw) {
+    return {
+      ok: false,
+      error:
+        'screenshot: args.url is required. Expected ' +
+        '{"action":"screenshot","args":{"url":"http://localhost:4321/","description":"the CTA button"}} ' +
+        '(full_page defaults to true)'
+    };
+  }
+  try {
+    const url = toTargetUrl(raw, root);
+    const shot = await captureScreenshot(
+      visual.browser,
+      url,
+      root,
+      screenshotOptionsFrom(args)
+    );
+    const kb = Math.max(1, Math.round(shot.bytes / 1024));
+    log('screenshot saved: ' + shot.relPath);
+    // v2.5.54 (FIX 11/12/13): deschide PNG-ul + readu Chrome în fundal + thumbnail
+    await revealVisualResult(
+      [{ absPath: shot.absPath, relPath: shot.relPath, label: 'screenshot' }],
+      'screenshot',
+      visual
+    );
+    return {
+      ok: true,
+      result:
+        'Screenshot saved to ' +
+        shot.relPath +
+        ' (' +
+        shot.width +
+        'x' +
+        shot.height +
+        ', ' +
+        kb +
+        ' KB) for ' +
+        url +
+        (shot.element
+          ? ' — element: ' + shot.element + (shot.selector ? ' → ' + shot.selector : '')
+          : ' — full page'),
+      userNotice:
+        '📸 Screenshot: ' + shot.relPath + (shot.element ? ' (' + shot.selector + ')' : '')
+    };
+  } catch (e: any) {
+    return { ok: false, error: 'screenshot failed: ' + (e?.message ?? String(e)) };
+  }
+}
+
+async function compareVisualTool(
+  args: any,
+  root: string,
+  visual: VisualToolContext | undefined,
+  log: (msg: string) => void
+): Promise<ToolResult> {
+  if (!visual) return visualUnavailable('compare_visual');
+  const url1 = String(args?.url1 ?? '').trim();
+  const url2 = String(args?.url2 ?? '').trim();
+  if (!url1 || !url2) {
+    return {
+      ok: false,
+      error:
+        'compare_visual: args.url1 and args.url2 are required. Expected ' +
+        '{"action":"compare_visual","args":{"url1":"https://example.com/page/","url2":"http://localhost:4321/page/"}}'
+    };
+  }
+  try {
+    const target1 = toTargetUrl(url1, root);
+    const target2 = toTargetUrl(url2, root);
+    const res = await compareVisual(visual, root, target1, target2, {
+      // v2.5.54: implicit FULL page (ca la screenshot)
+      fullPage: !(args?.full_page === false || args?.fullPage === false),
+      provider: typeof args?.provider === 'string' ? args.provider : undefined
+    });
+    log('compare saved: ' + res.relPath + ' (' + res.differences + ' differences)');
+    // v2.5.54 (FIX 13): side-by-side în VS Code + thumbnail-uri în chat + Chrome în fundal
+    await revealVisualResult(
+      [
+        { absPath: res.original.absPath, relPath: res.original.relPath, label: 'original' },
+        { absPath: res.replica.absPath, relPath: res.replica.relPath, label: 'replica' }
+      ],
+      'compare',
+      visual
+    );
+    return {
+      ok: true,
+      result:
+        'Visual comparison (' +
+        res.provider +
+        ') found ' +
+        res.differences +
+        ' differences. Screenshots: ' +
+        res.original.relPath +
+        ', ' +
+        res.replica.relPath +
+        '. Report: ' +
+        res.relPath +
+        '\n\n' +
+        res.reply,
+      userNotice:
+        '🔍 compare_visual: ' +
+        res.differences +
+        ' differences found — report: ' +
+        res.relPath
+    };
+  } catch (e: any) {
+    return {
+      ok: false,
+      error: 'compare_visual failed: ' + (e?.message ?? String(e))
+    };
+  }
 }
 
 const MAX_SEARCH_MATCHES = 100;

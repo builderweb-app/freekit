@@ -1,27 +1,47 @@
 const vscode = acquireVsCodeApi();
 
-// v1.9.2: iconițe SVG monochrome (design Claude) — moștenesc culoarea din CSS
-// prin `fill="currentColor"` (alb pe temă dark, negru pe temă light)
-const ICONS = {
-  attachFile: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M3 1h6l4 4v10H3zM4 2v12h8V5.4L8.6 2zM7.5 7.5h1v2h2v1h-2v2h-1v-2h-2v-1h2z"/></svg>`,
-  attachFolder: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M1 3h5l1.5 1.5H15V14H1zM2 4v9h12V5.5H7.1L5.6 4zM7.5 7h1v2h2v1h-2v2h-1v-2h-2V9h2z"/></svg>`,
-  microphone: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M8 1a2 2 0 0 0-2 2v5a2 2 0 0 0 4 0V3a2 2 0 0 0-2-2zM4 7h1v1a3 3 0 0 0 6 0V7h1v1a4 4 0 0 1-3.5 3.96V14H10v1H6v-1h1.5v-2.04A4 4 0 0 1 4 8z"/></svg>`,
-  editPrompt: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M11.3 1.7l3 3-8.8 8.8-4 1 1-4zM3.6 11.3l-.5 1.6 1.6-.5 7.9-7.9-1.1-1.1z"/></svg>`,
-  forkConversation: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M2 3a2 2 0 1 0 4 0 2 2 0 1 0-4 0zM3 3a1 1 0 1 0 2 0 1 1 0 1 0-2 0zM2 13a2 2 0 1 0 4 0 2 2 0 1 0-4 0zM3 13a1 1 0 1 0 2 0 1 1 0 1 0-2 0zM10 5a2 2 0 1 0 4 0 2 2 0 1 0-4 0zM11 5a1 1 0 1 0 2 0 1 1 0 1 0-2 0zM3.5 5h1v6h-1zM11 7h1v1a3 3 0 0 1-3 3H4.5v-1H9a2 2 0 0 0 2-2z"/></svg>`,
-  restoreCheckpoint: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M1 5.5L4.5 2v7zM4.5 5h5a3.5 3.5 0 0 1 0 7H5v-1h4.5a2.5 2.5 0 0 0 0-5h-5z"/></svg>`,
-  readAloud: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M2 6h2.5L8 3v10l-3.5-3H2zM10.83 5.17a4 4 0 0 1 0 5.66l-.71-.71a3 3 0 0 0 0-4.24zM12.6 3.4a6.5 6.5 0 0 1 0 9.2l-.71-.71a5.5 5.5 0 0 0 0-7.78z"/></svg>`,
-  copy: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M6 5h8v10H6zM7 6v8h6V6zM2 1h8v3H9V2H3v9h3v1H2z"/></svg>`,
-  send: `<svg viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 1.8L14.7 8 1.5 14.2l1.7-5.4L9 8 3.2 7.2z"/></svg>`,
-  clear: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M6 1h4v2H6zM2 3h12v1H2zM3 5h10v10H3zM4 6v8h8V6zM6 8h1v4H6zM9 8h1v4H9z"/></svg>`,
-  newConversation: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M2 2h12v9H8l-3 3v-3H2zM3 3v7h3v1.6L7.6 10H13V3zM7.5 4h1v2h2v1h-2v2h-1V7h-2V6h2z"/></svg>`,
-  conversationsList: `<svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 3h2v2H2zM6 3.5h8v1H6zM2 7h2v2H2zM6 7.5h8v1H6zM2 11h2v2H2zM6 11.5h8v1H6z"/></svg>`,
-  verboseMode: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M1 2h14v12H1zM2 3v10h12V3zM3.7 5.4l.7-.7L7.7 8l-3.3 3.3-.7-.7L6.3 8zM8.5 10h3v1h-3z"/></svg>`,
-  settings: `<svg viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" d="M9.2 3.15A5 5 0 0 1 10.58 3.72L12.1 2.2 13.8 3.9 12.28 5.42A5 5 0 0 1 12.85 6.8H15v2.4h-2.15A5 5 0 0 1 12.28 10.58L13.8 12.1 12.1 13.8 10.58 12.28A5 5 0 0 1 9.2 12.85V15H6.8v-2.15A5 5 0 0 1 5.42 12.28L3.9 13.8 2.2 12.1 3.72 10.58A5 5 0 0 1 3.15 9.2H1V6.8h2.15A5 5 0 0 1 3.72 5.42L2.2 3.9 3.9 2.2 5.42 3.72A5 5 0 0 1 6.8 3.15V1h2.4zM8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 1 0 0-5z"/></svg>`
-};
 
-// starea „oprit" (dictare / citire cu voce tare) — nu are corespondent în ICONS
-const ICON_STOP =
-  '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5"/></svg>';
+/* =========================================================================
+ * v2.5.50 — CODNICONS în locul emoji-urilor (același stil monochrome ca în
+ * meniurile VS Code). Fontul @vscode/codicons vine din media/codicon.css
+ * (încărcat în <head> de host). În text folosim tokenul `$(name)`, convertit
+ * aici în <i class="codicon codicon-name"></i> — fără innerHTML.
+ * ========================================================================= */
+const CODICON_RE = /\$\(([a-z0-9-]+)\)/g;
+
+/** Element <i class="codicon codicon-NAME"> (opțional rotativ: sync~spin). */
+function codiconEl(name, spin) {
+  const i = document.createElement('i');
+  i.className = 'codicon codicon-' + name + (spin ? ' codicon-modifier-spin' : '');
+  i.setAttribute('aria-hidden', 'true');
+  return i;
+}
+
+/** Același codicon, ca string HTML (pentru `innerHTML`). */
+function codiconHtml(name) {
+  return '<i class="codicon codicon-' + name + '" aria-hidden="true"></i>';
+}
+
+/**
+ * Scrie text în `el` transformând tokenii `$(name)` în codiconi. Textul simplu
+ * rămâne textContent (fără HTML) — sigur pentru orice text venit din host.
+ */
+function setRichText(el, text) {
+  if (!el) return;
+  const s = String(text == null ? '' : text);
+  el.textContent = '';
+  CODICON_RE.lastIndex = 0;
+  let last = 0;
+  let m;
+  while ((m = CODICON_RE.exec(s))) {
+    if (m.index > last) {
+      el.appendChild(document.createTextNode(s.slice(last, m.index)));
+    }
+    el.appendChild(codiconEl(m[1]));
+    last = m.index + m[0].length;
+  }
+  if (last < s.length) el.appendChild(document.createTextNode(s.slice(last)));
+}
 
 // v2.0.1: layout nou (mockup) — #chat + composer
 const messages = document.getElementById('chat');
@@ -213,11 +233,14 @@ const ICON_USER =
   '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 7.5a2.75 2.75 0 1 0 0-5.5 2.75 2.75 0 0 0 0 5.5ZM2.5 14a5.5 5.5 0 0 1 11 0v.5h-11V14Z"/></svg>';
 const ICON_AI =
   '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1l1.8 4.7L14.5 7.5l-4.7 1.8L8 14l-1.8-4.7L1.5 7.5l4.7-1.8L8 1Z"/></svg>';
-const ICON_CHECK =
-  '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"/></svg>';
-
 // ===== FAZA II (A): atașamente (chip-uri) =====
-const KIND_ICON = { text: '📄', image: '🖼️', folder: '📁', binary: '📦' };
+// v2.5.50: numele codiconului (nu emoji) pentru fiecare tip de fișier
+const KIND_ICON = {
+  text: 'file',
+  image: 'file-media',
+  folder: 'folder',
+  binary: 'file-binary'
+};
 
 let attachments = [];
 
@@ -241,8 +264,7 @@ function renderAttachments() {
     chip.className = 'chip';
 
     const icon = document.createElement('span');
-    icon.className = 'chip-icon';
-    icon.textContent = KIND_ICON[a.kind] || '📄';
+    icon.className = 'chip-icon codicon codicon-' + (KIND_ICON[a.kind] || 'file');
     chip.appendChild(icon);
 
     const name = document.createElement('span');
@@ -276,7 +298,8 @@ function renderChipsInto(wrap, items) {
   for (const a of items) {
     const c = document.createElement('span');
     c.className = 'chip chip-static';
-    c.textContent = (KIND_ICON[a.kind] || '📄') + ' ' + a.name;
+    c.appendChild(codiconEl(KIND_ICON[a.kind] || 'file'));
+    c.appendChild(document.createTextNode(' ' + a.name));
     c.title = a.relPath || a.name;
     row.appendChild(c);
   }
@@ -363,7 +386,7 @@ function setPendingText(text) {
   pendingEl.classList.remove('md');
   pendingEl.classList.remove('streaming');
   const body = msgBody(pendingEl);
-  body.textContent = text;
+  setRichText(body, text);
   // v2.5.12 (bug #32): „Step X of N" e iterația din bucla agentică, nu un
   // contor de încercări — tooltip la hover cât timp pasul e afișat.
   const m = /(?:^|\s)Step (\d+) of (\d+)\b/.exec(String(text || ''));
@@ -383,7 +406,8 @@ function addNotice(text, action, actionLabel) {
   el.className = 'notice' + (action ? ' notice-actionable' : '');
   const body = document.createElement('div');
   body.className = 'notice-text';
-  body.textContent = action ? text : '🛠️ ' + text;
+  // v2.5.50: tokenii $(name) devin codiconi; restul rămâne text simplu
+  setRichText(body, action ? text : '$(tools) ' + text);
   el.appendChild(body);
   if (action) {
     const row = document.createElement('div');
@@ -417,19 +441,24 @@ function updateAIFinderCard(msg) {
   }
   const phase = String(msg.phase || 'running');
   card.className = 'ai-finder-card ' + phase;
+  let icon = 'search';
   let text;
   if (phase === 'success') {
     const selectors = Array.isArray(msg.selectors) ? msg.selectors.join(', ') : '';
-    text = '✅ Selectors repaired: ' + (selectors || 'validated');
+    icon = 'pass-filled';
+    text = 'Selectors repaired: ' + (selectors || 'validated');
   } else if (phase === 'failed') {
-    text = '❌ Repair failed. Manual intervention required.';
+    icon = 'error';
+    text = 'Repair failed. Manual intervention required.';
   } else if (phase === 'timeout') {
-    text = '⏱ ' + (msg.message || 'AI finder timed out after 60s. Bundled selectors are not working.');
+    icon = 'watch';
+    text = String(msg.message || 'AI finder timed out after 60s. Bundled selectors are not working.');
   } else if (phase === 'cancelled') {
+    icon = '';
     text = 'Repair cancelled. Bundled selectors remain active.';
   } else {
     const label = String(msg.providerName || msg.providerId || 'provider');
-    text = '🔍 Repairing ' + label + ' selectors…\n' +
+    text = 'Repairing ' + label + ' selectors…\n' +
       String(msg.message || 'Analyzing DOM…');
   }
 
@@ -439,7 +468,7 @@ function updateAIFinderCard(msg) {
     body.className = 'ai-finder-text';
     card.appendChild(body);
   }
-  body.textContent = text;
+  setRichText(body, (icon ? '$(' + icon + ') ' : '') + text);
   let actions = card.querySelector('.ai-finder-actions');
   if (actions) actions.remove();
   if (phase === 'running' || phase === 'attempt' || phase === 'failed' || phase === 'timeout') {
@@ -479,7 +508,7 @@ function updateAIFinderCard(msg) {
 function addHeal(text) {
   const el = document.createElement('div');
   el.className = 'notice heal';
-  el.textContent = text;
+  setRichText(el, text);
   messages.appendChild(el);
   scrollAfterAppend();
 }
@@ -499,7 +528,7 @@ function addLoginRequiredCard(text) {
 
   const retry = document.createElement('button');
   retry.className = 'retry-btn';
-  retry.textContent = '⟳ Retry';
+  setRichText(retry, '$(refresh) Retry');
   retry.onclick = () => {
     card.remove();
     pendingEl = add('assistant', '', Date.now());
@@ -510,7 +539,7 @@ function addLoginRequiredCard(text) {
 
   const show = document.createElement('button');
   show.className = 'show-chrome-btn';
-  show.textContent = '🌐 Show Browser';
+  setRichText(show, '$(globe) Show Browser');
   show.onclick = () => vscode.postMessage({ type: 'show_chrome' });
 
   row.appendChild(retry);
@@ -547,7 +576,7 @@ function addGuestModeCard(text) {
   const decide = (label, choice, cls) => {
     const b = document.createElement('button');
     b.className = cls;
-    b.textContent = label;
+    setRichText(b, label);
     b.onclick = () => {
       removeGuestModeCard();
       vscode.postMessage({ type: 'guest_decision', choice });
@@ -555,9 +584,9 @@ function addGuestModeCard(text) {
     return b;
   };
 
-  row.appendChild(decide('🌐 Show Browser', 'show', 'show-chrome-btn'));
-  row.appendChild(decide('💬 Continue as guest', 'guest', 'guest-btn'));
-  row.appendChild(decide('⏹ Cancel', 'cancel', 'guest-cancel-btn'));
+  row.appendChild(decide('$(globe) Show Browser', 'show', 'show-chrome-btn'));
+  row.appendChild(decide('$(comment-discussion) Continue as guest', 'guest', 'guest-btn'));
+  row.appendChild(decide('$(debug-stop) Cancel', 'cancel', 'guest-cancel-btn'));
 
   card.appendChild(msgEl);
   card.appendChild(row);
@@ -591,7 +620,7 @@ function addMemoryFullCard(msg) {
   const decide = (label, choice, cls) => {
     const b = document.createElement('button');
     b.className = cls;
-    b.textContent = label;
+    setRichText(b, label);
     b.onclick = () => {
       removeMemoryFullCard();
       vscode.postMessage({ type: 'memory_full_decision', choice });
@@ -602,12 +631,12 @@ function addMemoryFullCard(msg) {
   // Show Browser nu închide cardul (decizia rămâne în așteptare)
   const show = document.createElement('button');
   show.className = 'show-chrome-btn';
-  show.textContent = '🌐 Show Browser';
+  setRichText(show, '$(globe) Show Browser');
   show.onclick = () => vscode.postMessage({ type: 'show_chrome' });
 
   row.appendChild(show);
-  row.appendChild(decide('💬 New chat & continue', 'continue', 'guest-btn'));
-  row.appendChild(decide('⏹ Stop', 'cancel', 'guest-cancel-btn'));
+  row.appendChild(decide('$(comment-discussion) New chat & continue', 'continue', 'guest-btn'));
+  row.appendChild(decide('$(debug-stop) Stop', 'cancel', 'guest-cancel-btn'));
 
   card.appendChild(msgEl);
   card.appendChild(row);
@@ -648,13 +677,16 @@ function addProviderErrorCard(msg) {
   const providerName = PROVIDER_NAMES[msg.providerId] || msg.providerId || 'Provider';
 
   const title = document.createElement('b');
-  title.textContent = isModelMissing
-    ? '⚠️ Ollama — model not installed'
-    : isDown
-      ? '⚠️ ' + providerName + ' stopped responding'
-      : isPlanLimit
-        ? '⚠️ ' + providerName + ' — free plan / limit reached'
-        : '⚠️ ' + providerName + ' unavailable';
+  setRichText(
+    title,
+    isModelMissing
+      ? '$(warning) Ollama — model not installed'
+      : isDown
+        ? '$(warning) ' + providerName + ' stopped responding'
+        : isPlanLimit
+          ? '$(warning) ' + providerName + ' — free plan / limit reached'
+          : '$(warning) ' + providerName + ' unavailable'
+  );
 
   const text = document.createElement('div');
   text.className = 'pe-msg';
@@ -670,7 +702,7 @@ function addProviderErrorCard(msg) {
   const makeBtn = (label, action, payload) => {
     const b = document.createElement('button');
     b.className = 'pe-btn';
-    b.textContent = label;
+    setRichText(b, label);
     b.addEventListener('click', () => {
       vscode.postMessage(Object.assign({ type: action }, payload || {}));
     });
@@ -681,7 +713,7 @@ function addProviderErrorCard(msg) {
     // v2.5.11 (bug #24): descarcă exact modelul care lipsește (fluxul existent)
     if (modelId) {
       actions.appendChild(
-        makeBtn('📥 Download ' + modelId, 'pull_model', { modelId: modelId })
+        makeBtn('$(cloud-download) Download ' + modelId, 'pull_model', { modelId: modelId })
       );
     }
     actions.appendChild(makeBtn('Switch to another model', 'open_model_menu'));
@@ -689,7 +721,7 @@ function addProviderErrorCard(msg) {
     // v2.5.31 (bug #73): Ollama a căzut → restart / alt provider / retry
     // (fără „Show Browser": providerul e local, nu are fereastră Chrome).
     if (msg.providerId === 'ollama') {
-      actions.appendChild(makeBtn('🦙 Restart Ollama', 'restart_ollama'));
+      actions.appendChild(makeBtn('$(server-process) Restart Ollama', 'restart_ollama'));
     }
     actions.appendChild(makeBtn('Switch provider', 'open_model_menu'));
     actions.appendChild(makeBtn('Retry', 'retry_message'));
@@ -726,12 +758,12 @@ function addProviderErrorCard(msg) {
 
 // ===== v1.7.1: pași verbose (Thinking / Executing / Result / Decision) =====
 const VSTEP_KINDS = {
-  thinking: { icon: '🧠', label: 'Thinking' },
-  executing: { icon: '⚙️', label: 'Executing' },
-  result: { icon: '📄', label: 'Result' },
-  decision: { icon: '🔀', label: 'Decision' }
+  thinking: { icon: 'lightbulb', label: 'Thinking' },
+  executing: { icon: 'gear', label: 'Executing' },
+  result: { icon: 'file', label: 'Result' },
+  decision: { icon: 'arrow-swap', label: 'Decision' }
 };
-const VSTEP_STATUS = { running: '⏳', done: '✓', error: '✗' };
+const VSTEP_STATUS = { running: 'sync', done: 'check', error: 'error' };
 
 /**
  * v2.5.18 (bug #49): setează starea pliat/extins a unui pas (clasă + aria).
@@ -758,12 +790,12 @@ function ensureVerboseStepEl(step) {
   let el = verboseSteps.get(step.id);
   if (el) return el;
   const meta = VSTEP_KINDS[step.kind] || {
-    icon: '🔎',
+    icon: 'search',
     label: String(step.kind || 'Step')
   };
   const kindClass = VSTEP_KINDS[step.kind] ? step.kind : 'other';
   // v1.10.3: cardul „Thinking" e colapsabil (<details>): deschis cât timp
-  // modelul raționează, pliat automat la final, cu săgeată ▼/▶ și durată.
+  // modelul raționează, pliat automat la final, cu chevron codicon și durată.
   const isThinking = step.kind === 'thinking';
 
   el = document.createElement(isThinking ? 'details' : 'div');
@@ -775,8 +807,8 @@ function ensureVerboseStepEl(step) {
   head.title = 'Click: collapse / expand details';
 
   const icon = document.createElement('span');
-  icon.className = 'vstep-icon';
-  icon.textContent = meta.icon;
+  icon.className = 'vstep-icon codicon codicon-' + meta.icon;
+  icon.setAttribute('aria-hidden', 'true');
   const label = document.createElement('span');
   label.className = 'vstep-label';
   label.textContent = meta.label;
@@ -900,7 +932,9 @@ function addVerboseStep(step) {
         if (durationEl) durationEl.textContent = ' (' + secs + 's)';
       }
     } else if (statusEl) {
-      statusEl.textContent = VSTEP_STATUS[step.status] || '';
+      statusEl.textContent = '';
+      const st = VSTEP_STATUS[step.status];
+      if (st) statusEl.appendChild(codiconEl(st, step.status === 'running'));
       if (step.status === 'running') {
         setStepCollapsed(el, false);
       } else if (step.kind === 'result') {
@@ -952,14 +986,14 @@ function addCopyButton(el, rawText) {
   const btn = document.createElement('button');
   btn.className = 'copy-btn';
   btn.title = 'Copy response';
-  btn.innerHTML = ICONS.copy;
+  btn.innerHTML = codiconHtml('copy');
   btn.onclick = () => {
     vscode.postMessage({ type: 'copy', text: rawText });
     btn.classList.add('copied');
-    btn.innerHTML = ICON_CHECK;
+    btn.innerHTML = codiconHtml('check');
     setTimeout(() => {
       btn.classList.remove('copied');
-      btn.innerHTML = ICONS.copy;
+      btn.innerHTML = codiconHtml('copy');
     }, 1500);
   };
   head.appendChild(btn);
@@ -1027,7 +1061,7 @@ let speaking = null; // { el, btn, token }
 function resetSpeakBtn(btn) {
   if (!btn) return;
   btn.classList.remove('speaking');
-  btn.innerHTML = ICONS.readAloud;
+  btn.innerHTML = codiconHtml('play');
   btn.title = 'Read the response aloud';
 }
 
@@ -1058,7 +1092,7 @@ function speakEl(el, btn) {
   const token = {};
   speaking = { el, btn, token };
   btn.classList.add('speaking');
-  btn.innerHTML = ICON_STOP;
+  btn.innerHTML = codiconHtml('debug-stop');
   btn.title = 'Stop reading';
 
   const voice = pickSpeechVoice();
@@ -1093,7 +1127,7 @@ function addSpeakButton(el, rawText) {
   rawTexts.set(el, rawText);
   const btn = document.createElement('button');
   btn.className = 'speak-btn';
-  btn.innerHTML = ICONS.readAloud;
+  btn.innerHTML = codiconHtml('play');
   btn.title = 'Read the response aloud';
   btn.onclick = () => speakEl(el, btn);
   // înaintea butonului Copy (care are margin-left:auto) — rămân lipite la dreapta
@@ -1221,7 +1255,7 @@ function attachRestoreButtons() {
     if (!box.querySelector('.edit-btn')) {
       const edit = document.createElement('button');
       edit.className = 'edit-btn';
-      edit.innerHTML = ICONS.editPrompt;
+      edit.innerHTML = codiconHtml('edit');
       edit.title =
         'Edit prompt: restore the state before it, delete what followed and resend the edited text';
       edit.onclick = () => startEditPrompt(wrap);
@@ -1232,12 +1266,12 @@ function attachRestoreButtons() {
     if (!box.querySelector('.fork-btn')) {
       const fork = document.createElement('button');
       fork.className = 'fork-btn';
-      fork.innerHTML = ICONS.forkConversation;
+      fork.innerHTML = codiconHtml('git-branch');
       fork.title =
         'Fork: start a new conversation from this prompt (the current conversation stays in the list)';
       fork.onclick = () => {
         if (busy) {
-          addNotice('⏳ Wait for the current response to finish before creating a fork.');
+          addNotice('$(clock) Wait for the current response to finish before creating a fork.');
           return;
         }
         vscode.postMessage({ type: 'fork_conversation', messageId: id });
@@ -1250,7 +1284,7 @@ function attachRestoreButtons() {
       const cp = restoreCheckpoints.get(id);
       const btn = document.createElement('button');
       btn.className = 'restore-btn';
-      btn.innerHTML = ICONS.restoreCheckpoint;
+      btn.innerHTML = codiconHtml('history');
       btn.title =
         'Restore: go back to the state before "' +
         String(cp.text || '').slice(0, 60) +
@@ -1271,7 +1305,7 @@ function markRestored(messageId) {
   const btn = wrap && wrap.querySelector('.restore-btn');
   if (btn) {
     btn.classList.add('restored');
-    btn.innerHTML = ICON_CHECK;
+    btn.innerHTML = codiconHtml('check');
     btn.title = 'Checkpoint restored';
   }
 }
@@ -1290,7 +1324,7 @@ function closeEditPrompt(messageId) {
 
 function startEditPrompt(wrap) {
   if (busy) {
-    addNotice('⏳ Wait for the current response to finish before editing a prompt.');
+    addNotice('$(clock) Wait for the current response to finish before editing a prompt.');
     return;
   }
   if (wrap.querySelector('.edit-area')) return; // deja în editare
@@ -1418,13 +1452,13 @@ function autoResize() {
 // ===== v2.5.6 (bug #10): avertisment „AI-ul a improvizat" =====
 // WARNING ONLY — nu blochează nimic; utilizatorul decide dacă acceptă.
 const DIVERGENCE_WARNING_TEXT =
-  '⚠️ The AI wrote substantially different content than your prompt ' +
+  '$(warning) The AI wrote substantially different content than your prompt ' +
   'provided. It may have improvised. Check carefully before accepting.';
 
 function divergenceWarning() {
   const el = document.createElement('div');
   el.className = 'divergence-warning';
-  el.textContent = DIVERGENCE_WARNING_TEXT;
+  setRichText(el, DIVERGENCE_WARNING_TEXT);
   return el;
 }
 
@@ -1434,7 +1468,7 @@ function addApprovalCard(toolName, path, diff, divergent, onApprove, onReject) {
 
   const title = document.createElement('div');
   title.className = 'approval-title';
-  title.textContent = '🔧 ' + toolName + ' → ' + path;
+  setRichText(title, '$(gear) ' + toolName + ' → ' + path);
   card.appendChild(title);
 
   const pre = document.createElement('pre');
@@ -1449,7 +1483,7 @@ function addApprovalCard(toolName, path, diff, divergent, onApprove, onReject) {
   btnRow.className = 'approval-buttons';
 
   const approve = document.createElement('button');
-  approve.textContent = '✓ Approve';
+  setRichText(approve, '$(check) Approve');
   approve.className = 'approve-btn';
   approve.onclick = () => {
     card.classList.add('resolved');
@@ -1458,7 +1492,7 @@ function addApprovalCard(toolName, path, diff, divergent, onApprove, onReject) {
   };
 
   const reject = document.createElement('button');
-  reject.textContent = '✗ Reject';
+  setRichText(reject, '$(close) Reject');
   reject.className = 'reject-btn';
   reject.onclick = () => {
     card.classList.add('resolved');
@@ -1475,8 +1509,50 @@ function addApprovalCard(toolName, path, diff, divergent, onApprove, onReject) {
   return card;
 }
 
-// ===== FIX v1.2.1: card inline de review diff (Accept/Reject în chat) =====
-// v2.5.11 (bug #27): cardul din chat e SINGURA suprafață de decizie.
+/**
+ * v2.5.54 (FIX 13) — thumbnail-urile capturilor (screenshot / compare_visual).
+ * Click pe un thumbnail cere host-ului să deschidă PNG-ul mare în editor.
+ */
+function addVisualThumbnails(items) {
+  if (!Array.isArray(items) || !items.length) return;
+  const card = document.createElement('div');
+  card.className = 'msg visual-thumbs';
+
+  const title = document.createElement('div');
+  title.className = 'visual-thumbs-title';
+  setRichText(title, '$(file-media) Screenshots');
+  card.appendChild(title);
+
+  const row = document.createElement('div');
+  row.className = 'visual-thumbs-row';
+
+  items.forEach((item) => {
+    const fig = document.createElement('figure');
+    fig.className = 'visual-thumb';
+
+    const img = document.createElement('img');
+    img.src = item.dataUri;
+    img.alt = item.label || 'screenshot';
+    img.loading = 'lazy';
+    fig.appendChild(img);
+
+    const cap = document.createElement('figcaption');
+    setRichText(cap, item.label || 'screenshot');
+    fig.appendChild(cap);
+
+    fig.title = 'Click to open ' + (item.relPath || '');
+    fig.onclick = () =>
+      vscode.postMessage({ type: 'open_visual_file', path: item.relPath || '' });
+    row.appendChild(fig);
+  });
+
+  card.appendChild(row);
+  messages.appendChild(card);
+  messages.scrollTop = messages.scrollHeight;
+  return card;
+}
+
+// ===== FIX v1.2.1: card inline de review diff (Accept/Reject în chat) =====// v2.5.11 (bug #27): cardul din chat e SINGURA suprafață de decizie.
 // Notificarea VS Code (Accept/Reject) apare doar ca fallback, când cardul nu
 // poate fi livrat webview-ului — nu mai rulează în paralel cu acest card.
 function findDiffReviewCard(id) {
@@ -1493,7 +1569,7 @@ function setDiffReviewStatus(card, text) {
   if (!card.querySelector('.approval-status')) {
     const st = document.createElement('div');
     st.className = 'approval-status';
-    st.textContent = text;
+    setRichText(st, text);
     card.appendChild(st);
   }
 }
@@ -1507,8 +1583,10 @@ function addDiffReviewCard(payload) {
 
   const title = document.createElement('div');
   title.className = 'approval-title';
-  title.textContent =
-    '⚖️ Review: ' + (payload.tool || '') + ' → ' + (payload.target || '');
+  setRichText(
+    title,
+    '$(diff) Review: ' + (payload.tool || '') + ' → ' + (payload.target || '')
+  );
   card.appendChild(title);
 
   const pre = document.createElement('pre');
@@ -1534,12 +1612,12 @@ function addDiffReviewCard(payload) {
   }
 
   const accept = document.createElement('button');
-  accept.textContent = '✓ Accept';
+  setRichText(accept, '$(check) Accept');
   accept.className = 'approve-btn';
   accept.onclick = () => decide(true);
 
   const reject = document.createElement('button');
-  reject.textContent = '✗ Reject';
+  setRichText(reject, '$(close) Reject');
   reject.className = 'reject-btn';
   reject.onclick = () => decide(false);
 
@@ -1595,7 +1673,7 @@ input.addEventListener('input', autoResize);
 // ===== Stop =====
 stopBtn.addEventListener('click', () => {
   vscode.postMessage({ type: 'stop' });
-  if (pendingEl) pendingEl.textContent = '⏹ Stopping...';
+  setPendingText('$(debug-stop) Stopping...');
 });
 
 // ===== Clear =====
@@ -1621,7 +1699,7 @@ function resetChatUi() {
 }
 
 // ===== v2.0.1: punctul colorat de pe chip-ul de model =====
-// (înlocuiește vechiul badge emoji 🟢🟡🔴 din toolbar)
+// (înlocuiește vechiul badge colorat din toolbar — acum codicon monocrom)
 const STATUS_DOT = {
   green: 'green',
   yellow: 'orange',
@@ -1798,7 +1876,7 @@ document.addEventListener('drop', (e) => {
   if (paths.length) {
     vscode.postMessage({ type: 'attach_paths', paths });
   } else {
-    addNotice('Could not determine the path of the dropped files — use the 📎 button.');
+    addNotice('Could not determine the path of the dropped files — use the $(attach) button.');
   }
 });
 
@@ -2291,7 +2369,7 @@ window.addEventListener('message', (event) => {
   } else if (msg.type === 'error') {
     collapseAllSteps(); // v2.5.18 (bug #49)
     try {
-      if (pendingEl) setPendingText('⚠️ ' + msg.text);
+      if (pendingEl) setPendingText('$(warning) ' + msg.text);
     } finally {
       pendingEl = null;
       setBusy(false);
@@ -2336,12 +2414,14 @@ window.addEventListener('message', (event) => {
   } else if (msg.type === 'status') {
     if (pendingEl) setPendingText(msg.text);
     keepBottom();
-  } else if (msg.type === 'notice') {
-    addNotice(msg.text || '', msg.action, msg.actionLabel);
+  } else if (msg.type === 'notice') {    addNotice(msg.text || '', msg.action, msg.actionLabel);
   } else if (msg.type === 'ai_finder_status') {
     updateAIFinderCard(msg);
   } else if (msg.type === 'heal') {
     addHeal(msg.text || '');
+  } else if (msg.type === 'visual_thumbnails') {
+    // v2.5.54 (FIX 13): thumbnail-urile capturilor (screenshot / compare_visual)
+    addVisualThumbnails(msg.items);
   } else if (msg.type === 'verbose') {
     // v1.7.1: pas verbose (thinking / executing / result / decision)
     addVerboseStep(msg.step);
@@ -2377,10 +2457,10 @@ window.addEventListener('message', (event) => {
         input.focus();
         syncSendState();
       } else {
-        addNotice('🎤 No speech detected in the recording.');
+        addNotice('$(mic) No speech detected in the recording.');
       }
     } else {
-      const prefix = msg.stage === 'transcribe' ? '🎤 Transcription failed: ' : '🎤 ';
+      const prefix = msg.stage === 'transcribe' ? '$(mic) Transcription failed: ' : '$(mic) ';
       addNotice(prefix + (msg.error || 'unknown error'));
     }
   } else if (msg.type === 'attachments') {
@@ -2460,11 +2540,11 @@ window.addEventListener('message', (event) => {
     if (card) {
       const labels = {
         accept:
-          msg.via === 'auto' ? '✅ Accepted (auto-approve)' : '✅ Accepted',
-        accept_no_ask: '✅ Accepted (don\'t ask again)',
-        reject: msg.via === 'stop' ? '⏹ Cancelled (Stop)' : '❌ Rejected'
+          msg.via === 'auto' ? '$(check) Accepted (auto-approve)' : '$(check) Accepted',
+        accept_no_ask: '$(check) Accepted (don\'t ask again)',
+        reject: msg.via === 'stop' ? '$(debug-stop) Cancelled (Stop)' : '$(close) Rejected'
       };
-      setDiffReviewStatus(card, labels[msg.decision] || '⏹ Closed');
+      setDiffReviewStatus(card, labels[msg.decision] || '$(debug-stop) Closed');
     }
     // v2.0.1: aceeași decizie închide și rândurile inline de „file change"
     resolveFileRows(

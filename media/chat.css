@@ -11,6 +11,23 @@
   --mono: var(--vscode-editor-font-family, "Cascadia Code", Consolas, "Courier New", monospace);
 }
 
+/* =========================================================================
+ * v2.5.50: codiconi în chat (monocrom, ca în meniurile VS Code) — înlocuiesc
+ * emoji-urile colorate de status. Mărime = textul chatului; culoarea urmează
+ * tema. Doar butoanele (fără itemii de meniu) își schimbă culoarea la hover.
+ * ========================================================================= */
+.codicon,
+.codicon[class*='codicon-'] {
+  font-size: 14px;
+  vertical-align: middle;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+}
+
+button:not(.mi):hover .codicon,
+a.pe-btn-link:hover .codicon {
+  color: var(--vscode-focusBorder, #007fd4);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -769,6 +786,56 @@ pre.code code {
   margin: 4px 0 0 0;
 }
 
+/* ===== v2.5.54 (FIX 13): thumbnail-uri capturi (screenshot / compare_visual) ===== */
+.visual-thumbs {
+  margin: 0 0 12px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+}
+
+.visual-thumbs-title {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.85;
+  margin-bottom: 6px;
+}
+
+.visual-thumbs-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.visual-thumb {
+  margin: 0;
+  max-width: 260px;
+  cursor: pointer;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--vscode-editor-background, transparent);
+}
+
+.visual-thumb img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 180px;
+  object-fit: cover;
+}
+
+.visual-thumb figcaption {
+  font-size: 11px;
+  padding: 4px 6px;
+  opacity: 0.85;
+}
+
+.visual-thumb:hover {
+  border-color: var(--vscode-focusBorder, #007fd4);
+}
+
 /* ===== v2.0.1: rând inline de „file change" ===== */
 .change {
   display: flex;
@@ -1498,7 +1565,7 @@ pre.code code {
   border-left-color: #2ea043;
 }
 
-/* v1.10.3: cardul „Thinking" colapsabil (săgeată ▼/▶ + durată) */
+/* v1.10.3: cardul „Thinking" colapsabil (chevron codicon + durată) */
 .vstep.thinking-card > .vstep-head {
   list-style: none;
 }
@@ -1513,23 +1580,24 @@ pre.code code {
 
 .vstep-arrow {
   flex-shrink: 0;
-  width: 9px;
-  font-size: 8px;
+  width: 14px;
+  font-family: 'codicon';
+  font-size: 14px;
   line-height: 1;
   opacity: 0.7;
 }
 
-/* v2.5.18 (bug #49): chevron pe TOȚI pașii — ▼ extins, ▶ pliat */
+/* v2.5.50: chevron codicon (înlocuiește glifele vechi) — jos extins, dreapta pliat */
 .vstep-arrow::before {
-  content: '▼';
+  content: '\eab4'; /* codicon-chevron-down */
 }
 
 .vstep.collapsed .vstep-arrow::before {
-  content: '▶';
+  content: '\eab6'; /* codicon-chevron-right */
 }
 
 .vstep.thinking-card:not([open]) > .vstep-head .vstep-arrow::before {
-  content: '▶';
+  content: '\eab6'; /* codicon-chevron-right */
 }
 
 .thinking-duration {

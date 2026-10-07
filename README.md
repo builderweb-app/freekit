@@ -174,7 +174,8 @@ Additional safeguards:
 | `freekit.autoInitGit` | `true` | Run `git init` (plus a minimal `.gitignore`, if missing) when the project folder isn't a git repo yet, so checkpoints / ⟲ restore work out of the box |
 | `freekit.selectorsUrl` | *(empty)* | Raw URL of a public Gist with `selectors.json` (`version` + `providers`); empty = remote selectors disabled |
 | `freekit.checkSelectorsOnStartup` | `true` | Look for a newer selector config at startup — at most once every 24 h (only when `freekit.selectorsUrl` is set) |
-| `freekit.humanTyping` | `true` | Type messages with human timing (random delays, punctuation pauses, bursts); off = instant insertion |
+| `freekit.handoffThreshold` | `20` | Tool results pasted in the **same** browser chat before Freekit opens a **new chat** with a full handoff (original task, every action already executed, the files already read with their content). `0` disables the handoff; raise it for long tasks |
+| `freekit.humanTyping` | `true` | Type messages with human timing (random delays, punctuation pauses, bursts); off = instant insertion. DeepSeek, Gemini and Ollama always use instant paste (human typing is kept only for ChatGPT and Claude) |
 | `freekit.humanBehavior` | `true` | Small mouse moves before clicks + occasional gentle scroll (anti-detect) |
 | `freekit.mutationObserver` | `false` | Experimental: end-of-generation detection via MutationObserver (fast, low CPU). Can be flaky when Chrome runs offscreen — JS is suspended in invisible windows; default off = reliable 500 ms polling |
 | `freekit.autoAcceptPopups` | `true` | Automatically accept consent popups (cookie / terms / “OK” / “Got it”). Safe exact-match on three confidence tiers; refusal wording (Reject / Only necessary / Customize / Not now) is never clicked; max 3 clicks per pass |

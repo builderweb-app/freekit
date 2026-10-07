@@ -68,10 +68,12 @@ import {
   scopeLabel
 } from './tools';
 import {
+  LARGE_OUTPUT_CHARS,
   MALFORMED_TOOL_CALL_ERROR,
   MALFORMED_TOOL_CALL_NUDGE,
   MAX_MALFORMED_RETRIES,
   drainParserLogs,
+  largeOutputNotice,
   looksLikeToolCallAttempt,
   parseToolCallText
 } from './toolCallParser';
@@ -144,12 +146,19 @@ const log = (msg: string) => logLine('chat', msg);
 const MAX_ITERATIONS = 40;
 
 /**
- * v2.5.23: câte rezultate de unealtă se lipesc în ACELAȘI chat web înainte de a
+ * v2.5.48: câte rezultate de unealtă se lipesc în ACELAȘI chat web înainte de a
  * porni proactiv un chat nou (cu handoff). Fiecare rezultat e un paste mare;
  * contextul acumulat face web app-ul din ce în ce mai lent la procesare, deci
- * ținem conversația mică. 0 = dezactivat (vezi freekit.newChatAfterToolCalls).
+ * ținem conversația rezonabil de mică. Valoarea e doar fallback-ul: pragul real
+ * vine din setarea `freekit.handoffThreshold` (0 = dezactivat).
  */
-const DEFAULT_NEW_CHAT_AFTER_TOOL_CALLS = 4;
+const DEFAULT_HANDOFF_THRESHOLD = 20;
+
+/**
+ * v2.5.48: câte apeluri de unelte ținem minte per chat de browser pentru
+ * handoff (unealtă + țintă + ok/fail). Plafon de siguranță al paste-ului.
+ */
+const MAX_TRACKED_TOOL_CALLS = 120;
 
 // FAZA II (A): limita de atașamente simultane
 const MAX_ATTACHMENTS = 20;
@@ -184,6 +193,26 @@ function fileTargetsOf(call: ToolCall): string[] {
   }
   const rel = call.args?.path;
   return typeof rel === 'string' && rel ? [rel] : [];
+}
+
+/**
+ * v2.5.48: câte caractere scrie un `write_file` / `write_files` (0 pentru
+ * restul uneltelor). Peste `LARGE_OUTPUT_CHARS`, site-ul trunchiază răspunsul —
+ * îi sugerăm modelului să împartă scrierea.
+ */
+function writeContentChars(call: ToolCall): number {
+  const args: any = call.args ?? {};
+  if (call.tool === 'write_file') {
+    return typeof args.content === 'string' ? args.content.length : 0;
+  }
+  if (call.tool === 'write_files' && Array.isArray(args.files)) {
+    return args.files.reduce(
+      (n: number, f: any) =>
+        n + (typeof f?.content === 'string' ? f.content.length : 0),
+      0
+    );
+  }
+  return 0;
 }
 
 // FAZA E: persistență — istoricul conversației (max 100 mesaje, în globalState)
@@ -438,9 +467,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * v2.5.23: câte rezultate de unealtă au fost lipite în chatul web CURENT
    * (numărătoarea ține per conversație de browser, nu per mesaj VS Code — la
    * reluarea unui chat salvat contextul e deja acolo). La atingerea pragului
-   * `freekit.newChatAfterToolCalls` pornim un chat nou cu handoff.
+   * `freekit.handoffThreshold` pornim un chat nou cu handoff.
    */
   private chatToolSteps = 0;
+  /**
+   * v2.5.48: TOATE apelurile de unelte trimise în chatul web CURENT, ca
+   * „unealtă + țintă + ok/fail". Handoff-ul le duce mai departe pe toate, ca
+   * chatul nou să știe exact ce s-a executat deja (fără să re-citească).
+   * Viață: per chat de browser (vezi resetBrowserChatState).
+   */
+  private chatToolCalls: string[] = [];
   /**
    * v2.5.25 (bug #62): fișierele citite în chatul web CURENT (cale → conținut).
    * Chatul nou de la o rotire NU are rezultatele uneltelor, deci handoff-ul
@@ -1868,6 +1904,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       /** v2.5.31 (bug #74): ultima eroare a unei unelte (mesajul de buclă). */
       let lastToolError = '';
       /**
+       * v2.5.48: când un `write_file` / `write_files` chiar a reușit dar a
+       * depășit `LARGE_OUTPUT_CHARS`, atașăm sugestia de împărțire la mesajul
+       * următor (site-ul trunchiază paste-urile mari). Se resetează per pas.
+       */
+      let splitHint = '';
+      /**
        * v2.5.36 (bug #87): am injectat deja template-ul TS6059 proactiv odată în
        * acest task? (fix-urile #82/#85 rămân active pentru rescrierile repetate)
        */
@@ -1887,7 +1929,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             .getActive()
             ?.messages.find((m) => m.role === 'user')?.text ?? ''
         );
-      if (readEverythingTask && this.newChatAfterToolCalls() > 0) {
+      if (readEverythingTask && this.handoffThreshold() > 0) {
         log(
           'rotation disabled for this task ("read every/all …") — ' +
             'the new chat would have to re-read everything; letting memory-full decide'
@@ -1978,9 +2020,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           // n-o poate recupera (JSON trunchiat, ghilimele neescapate) — în loc
           // să afișăm JSON-ul brut ca răspuns final, dăm o eroare clară.
           if (looksLikeToolCallAttempt(aiReply)) {
-            // v2.5.3 FIX 7: mai întâi o singură reluare cu un nudge explicit
+            // v2.5.3 FIX 7: mai întâi o reluare cu un nudge explicit
             // (DeepSeek ecouază promptul și strivește conținutul pe o linie) —
-            // abia dacă și a doua încercare e malformată afișăm eroarea.
+            // abia dacă și următoarele încercări sunt malformate afișăm eroarea.
+            // v2.5.48: 3 reluări (nu 1); când răspunsul e prea mare îi spunem
+            // explicit modelului să împartă scrierea în apeluri mai mici.
+            const tooLarge = aiReply.length > LARGE_OUTPUT_CHARS;
+            if (tooLarge) {
+              logLine(
+                'chat',
+                'output too large (' +
+                  aiReply.length +
+                  ' chars) — suggesting split'
+              );
+            }
             if (malformedRetries < MAX_MALFORMED_RETRIES) {
               malformedRetries++;
               log(
@@ -1995,7 +2048,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                   malformedRetries +
                   '/' +
                   MAX_MALFORMED_RETRIES +
-                  ': the tool call was malformed — asking again for the marker format with the content in a code fence.'
+                  (tooLarge
+                    ? ': the output was too large (' +
+                      aiReply.length +
+                      ' chars) — asking it to split the file into smaller write_file calls.'
+                    : ': the tool call was malformed — asking again for the marker format with the content in a code fence.')
               );
               this.postVerboseStep({
                 kind: 'decision',
@@ -2005,12 +2062,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                   '/' +
                   MAX_MALFORMED_RETRIES +
                   ' (malformed tool call)',
-                text: 'Tool call malformed — asking again for the marker format with the content in a code fence.',
+                text: tooLarge
+                  ? 'Output too large (' +
+                    aiReply.length +
+                    ' chars) — asking the model to split the file into smaller write_file calls.'
+                  : 'Tool call malformed — asking again for the marker format with the content in a code fence.',
                 status: 'done'
               });
               aiReply = await provider.send(
                 page,
-                MALFORMED_TOOL_CALL_NUDGE,
+                tooLarge
+                  ? largeOutputNotice(aiReply.length) +
+                    '\n\n' +
+                    MALFORMED_TOOL_CALL_NUDGE
+                  : MALFORMED_TOOL_CALL_NUDGE,
                 signal,
                 followUpOpts
               );
@@ -2021,14 +2086,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 malformedRetries +
                 ' auto-retries — surfacing an error'
             );
+            // v2.5.48: dacă eșecul vine din output prea mare, cardul spune ce
+            // are de făcut utilizatorul (împărțire manuală), nu „try again".
+            const failText = tooLarge
+              ? 'Output too large (' +
+                aiReply.length +
+                ' chars). Split the target file into smaller files, or ask for a smaller change.'
+              : MALFORMED_TOOL_CALL_ERROR;
             this.postVerboseStep({
               kind: 'decision',
-              title: 'Malformed tool call',
-              text: MALFORMED_TOOL_CALL_ERROR,
+              title: tooLarge
+                ? 'Output too large — split into smaller writes'
+                : 'Malformed tool call',
+              text: failText,
               status: 'done'
             });
-            this.post('error', MALFORMED_TOOL_CALL_ERROR);
-            await this.appendHistory('assistant', MALFORMED_TOOL_CALL_ERROR);
+            this.post('error', failText);
+            await this.appendHistory('assistant', failText);
             break;
           }
 
@@ -2070,6 +2144,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
 
         log('tool call #' + iterations + '/' + MAX_ITERATIONS + ': ' + toolCall.tool);
+        // v2.5.48: scriere uriașă (peste LARGE_OUTPUT_CHARS) — site-ul o poate
+        // trunchia la următorul pas; îi spunem modelului să împartă.
+        splitHint = '';
+        const written = writeContentChars(toolCall);
+        if (written > LARGE_OUTPUT_CHARS) {
+          logLine(
+            'chat',
+            'output too large (' +
+              written +
+              ' chars) — suggesting split'
+          );
+          splitHint = largeOutputNotice(written);
+          this.post(
+            'notice',
+            '⚠️ Large write (' +
+              written +
+              ' chars) — the web chat can truncate it. Asking the model to split it into smaller writes.'
+          );
+        }
         // v2.5.12 (bug #26 + #32): EN string; „X of 40" e iterația din bucla
         // agentică (nu numărul de încercări) — clarificat și prin tooltip în chat.js
         this.post(
@@ -2443,9 +2536,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           : 'TOOL_ERROR for ' + toolCall.tool + ':\n' + result.error;
 
         // v2.5.23: pașii recenți (în memorie) pentru handoff-ul de rotire
-        recentSteps.push(
-          vSummary + ' — ' + (result.ok ? 'ok' : 'failed')
+        const stepSummary =
+          vSummary + ' — ' + (result.ok ? 'ok' : 'failed');
+        recentSteps.push(stepSummary);
+        // v2.5.48: jurnalul per-chat al acțiunilor (unealtă + țintă + ok/fail),
+        // dus mai departe de handoff ca chatul nou să nu repete pașii. Se
+        // acumulează peste rotiri (ca `chatReadFiles`), cu un plafon de
+        // siguranță ca paste-ul de handoff să nu crească la infinit.
+        this.chatToolCalls.push(
+          toolCall.tool + (vSummary ? ' ' + vSummary : '') +
+            ' — ' + (result.ok ? 'ok' : 'failed')
         );
+        if (this.chatToolCalls.length > MAX_TRACKED_TOOL_CALLS) {
+          this.chatToolCalls.splice(
+            0,
+            this.chatToolCalls.length - MAX_TRACKED_TOOL_CALLS
+          );
+        }
 
         // v2.5.23: înainte de a lipi încă un rezultat, verificăm dacă chatul
         // web a acumulat destule paste-uri: peste prag pornim un chat nou (cu
@@ -2464,6 +2571,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             selfFix +
             // v2.5.29 (bug #67): nudge de loop detection + context de eroare
             (loopNudge ? '\n\n' + loopNudge : '') +
+            // v2.5.48: scriere prea mare → cere împărțirea în apeluri mici
+            (splitHint ? '\n\n' + splitHint : '') +
             commandHints,
           signal,
           followUpOpts
@@ -3208,6 +3317,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * încetinește web app-ul), `'memory-full'` = chatul chiar a ajuns la limită.
    * La rotire primim și pașii recenți (numai în memorie — tool call-urile nu
    * ajung în istoric până la răspunsul final).
+   * v2.5.48: corpul NU mai e trunchiat la 4000 de caractere — task-ul original
+   * merge complet, apelurile de unelte și fișierele citite au secțiuni proprii,
+   * iar extrasul de conținut respectă regula „<8k complet / >8k head+tail 4000".
    */
   private buildChatHandoff(
     label: string,
@@ -3216,7 +3328,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   ): string {
     try {
       const msgs = this.conversations.getActive()?.messages ?? [];
-      if (!msgs.length && !recentSteps.length && !this.chatReadFiles.size)
+      if (
+        !msgs.length &&
+        !recentSteps.length &&
+        !this.chatReadFiles.size &&
+        !this.chatToolCalls.length
+      )
         return '';
       const clip = (s: string, max: number): string => {
         const t = String(s ?? '').replace(/\s+/g, ' ').trim();
@@ -3224,8 +3341,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       };
       const excerpts = formatReadFilesExcerpts(this.chatReadFiles);
       const lines: string[] = [];
+      // v2.5.48: task-ul original COMPLET — un rezumat trunchiat făcea chatul
+      // nou să piardă cerințe și să re-deschidă decizii deja luate.
       const task = msgs.find((m) => m.role === 'user');
-      if (task) lines.push('Original task: ' + clip(task.text, 1000));
+      if (task) lines.push('Original task (complete):\n' + String(task.text ?? '').trim());
       // v2.5.25 (bug #62): lista fișierelor deja citite stă în corp (deci
       // supraviețuiește clip-ului de 4000); extrasele lor se adaugă separat,
       // cu newline-uri păstrate (conținutul de cod nu suportă flatten).
@@ -3236,10 +3355,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             (excerpts ? ' Their content is included below as excerpts.' : '')
         );
       }
-      if (recentSteps.length) {
+      // v2.5.48: TOATE acțiunile executate în chatul vechi (path + ok/fail),
+      // construite dinamic; `recentSteps` rămâne doar plasa de siguranță când
+      // numărătoarea per-chat nu are încă nimic (ex: primul handoff imediat).
+      const actions = this.chatToolCalls.length
+        ? this.chatToolCalls
+        : recentSteps;
+      if (actions.length) {
         lines.push(
-          'Steps already done in the previous chat:\n' +
-            recentSteps.slice(-8).map((s) => '- ' + clip(s, 200)).join('\n')
+          'Actions already executed in the previous chat (' +
+            actions.length +
+            ' — do NOT repeat them):\n' +
+            actions.map((s) => '- ' + clip(s, 200)).join('\n')
         );
       }
       const recap: string[] = [];
@@ -3258,7 +3385,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
       }
       if (recap.length) lines.push('Conversation so far:\n' + recap.join('\n'));
-      const body = clip(lines.join('\n\n'), 4000);
+      // v2.5.48: starea curentă + următorul pas concret (fără el, chatul nou
+      // repornea cu „let me start by reading …").
+      const lastAction = actions.length ? actions[actions.length - 1] : '';
+      lines.push(
+        'Current state: ' +
+          actions.length +
+          ' action(s) done, ' +
+          this.chatReadFiles.size +
+          ' file(s) read' +
+          (lastAction ? ', last action: ' + clip(lastAction, 200) : '') +
+          '.\n' +
+          'Next step: ' +
+          (reason === 'rotation'
+            ? 'send the pending tool call for the step described in the message below, then keep going with the original task.'
+            : 'continue the original task from where it stopped.')
+      );
       const header =
         reason === 'memory-full'
           ? '[Freekit handoff — the previous ' + label + ' chat ran out of context, ' +
@@ -3268,7 +3410,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return (
         header +
         '\n\n' +
-        body +
+        lines.join('\n\n') +
         // v2.5.25 (bug #62): conținutul fișierelor deja citite, ca chatul nou
         // să nu ceară re-citirea lor (buget propriu, în src/chatRotation.ts)
         (excerpts ? '\n\n' + excerpts : '') +
@@ -3287,7 +3429,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /* ======================================================================
    * v2.5.23 — ROTIRE PROACTIVĂ A CHATULUI WEB (payload mic = răspuns rapid)
    * Fiecare rezultat de unealtă e un paste mare. După N pași lipiți în ACELAȘI
-   * chat web (setarea `freekit.newChatAfterToolCalls`, implicit 4), contextul
+   * chat web (setarea `freekit.handoffThreshold`, implicit 20), contextul
    * acumulat încetinește web app-ul și poate duce la „Chat memory full".
    * Deschidem proactiv un chat nou și întoarcem handoff-ul cu care se
    * prefixează următorul mesaj (rezultatul pasului curent), ca taskul să
@@ -3300,17 +3442,37 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     signal: AbortSignal,
     recentSteps: string[]
   ): Promise<string> {
-    const limit = this.newChatAfterToolCalls();
+    const limit = this.handoffThreshold();
     // doar providerii web au un chat de rotit (Ollama nu are browser)
     if (limit <= 0 || !page || provider.local) return '';
     this.chatToolSteps++;
-    if (this.chatToolSteps < limit) return '';
+    const msgCount = this.conversations.getActive()?.messages.length ?? 0;
+    if (this.chatToolSteps < limit) {
+      logLine(
+        'handoff',
+        'skipped — chat still fast (' +
+          this.chatToolSteps +
+          ' tool results, ' +
+          msgCount +
+          ' messages)'
+      );
+      return '';
+    }
     const label = PROVIDER_LABELS[provider.name] ?? provider.name;
     const prov = provider;
     const pg = page;
-    log(
-      label + ': ' + this.chatToolSteps + ' tool results in this chat — ' +
-        'starting a fresh chat (threshold ' + limit + ')'
+    // „context window" e aproximat de umplerea pragului (chatul nou pornește gol)
+    logLine(
+      'handoff',
+      'triggered — context window ' +
+        Math.round((this.chatToolSteps / limit) * 100) +
+        '% full (' +
+        label +
+        ', ' +
+        this.chatToolSteps +
+        ' tool results, ' +
+        msgCount +
+        ' messages)'
     );
     this.post(
       'notice',
@@ -3355,15 +3517,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private resetBrowserChatState(): void {
     this.chatToolSteps = 0;
     this.chatReadFiles.clear();
+    this.chatToolCalls.length = 0;
   }
 
-  /** Setarea `freekit.newChatAfterToolCalls` (0 = rotirea e dezactivată). */
-  private newChatAfterToolCalls(): number {
+  /** Setarea `freekit.handoffThreshold` (0 = rotirea e dezactivată). */
+  private handoffThreshold(): number {
     const raw = vscode.workspace
       .getConfiguration('freekit')
-      .get<number>('newChatAfterToolCalls', DEFAULT_NEW_CHAT_AFTER_TOOL_CALLS);
+      .get<number>('handoffThreshold', DEFAULT_HANDOFF_THRESHOLD);
     const n = Number(raw);
-    if (!Number.isFinite(n) || n < 0) return DEFAULT_NEW_CHAT_AFTER_TOOL_CALLS;
+    if (!Number.isFinite(n) || n < 0) return DEFAULT_HANDOFF_THRESHOLD;
     return Math.floor(n);
   }
 

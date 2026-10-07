@@ -93,8 +93,36 @@ export const MALFORMED_TOOL_CALL_ERROR =
  *  dar parserul acceptă în continuare și vechiul prefix „TOOL:" (retrocompat). */
 const MARKER_PREFIX = '(?:TOOL|ACTION)';
 
-/** v2.5.3 FIX 7: câte reluări facem înainte de a afișa MALFORMED_TOOL_CALL_ERROR. */
-export const MAX_MALFORMED_RETRIES = 1;
+/**
+ * v2.5.48: câte reluări facem înainte de a afișa MALFORMED_TOOL_CALL_ERROR.
+ * Ridicat de la 1 la 3 — un răspuns trunchiat (write_file mare) merită câteva
+ * încercări, fiecare cu mesajul explicit de împărțire.
+ */
+export const MAX_MALFORMED_RETRIES = 3;
+
+/**
+ * v2.5.48: peste atâtea caractere un răspuns de tip write_file e considerat
+ * „output prea mare" — site-ul îl trunchiază, tool call-ul iese malformat.
+ */
+export const LARGE_OUTPUT_CHARS = 15000;
+
+/**
+ * v2.5.48: sugestia trimisă modelului când output-ul lui e prea mare. Cerută
+ * explicit și la fiecare reluare de „malformed tool call".
+ */
+export function largeOutputNotice(chars: number): string {
+  return (
+    'SYSTEM NOTICE — OUTPUT TOO LARGE.\n\n' +
+    'Output too large (' +
+    chars +
+    ' chars). Split into smaller write_file calls or use write_files batch.\n' +
+    'Your previous output was truncated (' +
+    chars +
+    ' chars) — keep every write_file under ' +
+    LARGE_OUTPUT_CHARS +
+    ' characters and send the rest in a second call.'
+  );
+}
 
 /**
  * v2.5.3 FIX 7: nudge trimis modelului când răspunsul conține `TOOL:` /

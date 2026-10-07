@@ -1164,14 +1164,18 @@ export async function sendAndWait(
     // v0.8.0: tastare "umană" (evenimente reale de tastatură); v2.0.6: mesajele
     // lungi tastează natural doar începutul, restul se lipește — vezi humanType.
     try {
-      if (
-        human.typing &&
-        providerId !== 'deepseek' &&
-        providerId !== 'gemini' &&
-        providerId !== 'ollama'
-      ) {
+      // v2.5.48: providerii rapizi (DeepSeek/Gemini/Ollama) primesc paste
+      // instant chiar și cu tastarea „umană" pornită — typing-ul caracter-cu-
+      // caracter încetinea vizibil trimiterea; ChatGPT/Claude păstrează
+      // tastarea umană (stealth).
+      const fastPaste =
+        providerId === 'deepseek' ||
+        providerId === 'gemini' ||
+        providerId === 'ollama';
+      if (human.typing && !fastPaste) {
         await humanType(page, text, {}, signal);
       } else {
+        if (fastPaste) logLine('human', 'fast paste for ' + providerId);
         await page.keyboard.insertText(text);
       }
     } catch (e: any) {

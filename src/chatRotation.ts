@@ -19,16 +19,26 @@ import { stripTsAliasPath, toAiPath, TS_ALIAS_NOTE } from './tsAlias';
 
 /** câte fișiere ținem minte per chat de browser (handoff-ul rămâne mărginit) */
 const MAX_TRACKED_FILES = 120;
-/** conținutul păstrat per fișier (read_file întoarce deja max 6000, vezi payload.ts) */
-const MAX_TRACKED_CHARS = 6000;
+/**
+ * v2.5.48: cât conținut păstrăm per fișier. Sub pragul `FULL_FILE_CHARS` fișierul
+ * e dus COMPLET în handoff (nu mai e trunchiat la 500 de caractere).
+ */
+const MAX_TRACKED_CHARS = 20000;
+/** sub atâția caractere fișierul intră COMPLET în handoff */
+const FULL_FILE_CHARS = 8000;
+/** peste prag: head + tail de atâția caracteri fiecare (8000 per fișier) */
+const HEAD_TAIL_CHARS = 4000;
 /** câte căi intră în lista „Already read: …" */
 const MAX_LISTED_PATHS = 60;
 /** lungimea maximă a listei inline de căi (cap pentru chatul nou) */
 const MAX_PATH_LIST_CHARS = 1200;
-/** extrasul per fișier trimis chatului nou (head + tail) */
-const MAX_EXCERPT_PER_FILE = 500;
-/** bugetul total al extraselor (peste asta, restul fișierelor nu mai primesc conținut) */
-const MAX_EXCERPT_TOTAL = 2000;
+/**
+ * v2.5.48: bugetul total al extraselor de conținut. Mult mai generos decât
+ * înainte (2000), ca handoff-ul să nu mai piardă fișierele citite — dar tot
+ * mărginit, ca paste-ul de la rotire să nu umple singur contextul chatului
+ * nou. Fișierele rămase sunt oricum listate în „Already read: …".
+ */
+const MAX_EXCERPT_TOTAL = 32000;
 /** sub atât nu mai are sens să începem un extras nou */
 const MIN_EXCERPT_BUDGET = 200;
 
@@ -163,34 +173,42 @@ export function formatReadFilesList(files: Map<string, string>): string {
   );
 }
 
-/** Trunchiere head+tail (ca payload.ts): începutul + sfârșitul, nu doar capul. */
-function headTail(text: string, max: number): string {
+/**
+ * v2.5.48 — conținutul unui fișier pentru handoff: sub 8k caractere trimite
+ * fișierul COMPLET (nu mai pierdem context), peste trimite începutul + sfârșitul
+ * de câte 4000 de caractere (head + tail, nu doar capul).
+ */
+function handoffBody(text: string): string {
   const t = String(text ?? '').replace(/\r\n/g, '\n').trim();
   if (!t) return '';
-  if (t.length <= max) return t;
+  if (t.length <= FULL_FILE_CHARS) return t;
   const marker = '\n…\n';
-  const head = Math.max(1, Math.floor((max - marker.length) * 0.6));
-  const tail = Math.max(1, max - marker.length - head);
-  return t.slice(0, head) + marker + t.slice(-tail);
+  return t.slice(0, HEAD_TAIL_CHARS) + marker + t.slice(-HEAD_TAIL_CHARS);
 }
 
 /**
- * Extrasele (head+tail) ale fișierelor citite — așa chatul nou primește chiar
- * conținutul, nu doar numele fișierelor. Buget total mărginit, ca paste-ul de
- * la rotire să rămână mic.
+ * Conținutul fișierelor citite — așa chatul nou primește chiar conținutul, nu
+ * doar numele fișierelor.
+ * v2.5.48: NU se mai trunchiază agresiv — fișierele sub 8k caractere merg
+ * COMPLET, cele peste merg head+tail de 4000 de caractere fiecare. Bugetul
+ * total rămâne doar o plasă de siguranță pentru paste-uri patologice.
  * v2.5.27 (bug #63): fișierele TS se trimit și aici ca `.ts.txt` (+ notă).
  */
 export function formatReadFilesExcerpts(
   files: Map<string, string>,
-  maxTotal: number = MAX_EXCERPT_TOTAL,
-  maxPerFile: number = MAX_EXCERPT_PER_FILE
+  maxTotal: number = MAX_EXCERPT_TOTAL
 ): string {
   if (!files.size) return '';
   const parts: string[] = [];
   let budget = maxTotal;
+  let skipped = 0;
   for (const [p, content] of files) {
-    if (budget < MIN_EXCERPT_BUDGET) break;
-    const body = headTail(content, Math.min(maxPerFile, budget));
+    if (budget < MIN_EXCERPT_BUDGET) {
+      skipped++;
+      continue;
+    }
+    // <8k → complet; >8k → head+tail 4000+4000 (regula din handoffBody)
+    const body = handoffBody(content);
     if (!body) continue;
     const aiPath = toAiPath(p);
     const block =
@@ -202,7 +220,11 @@ export function formatReadFilesExcerpts(
   }
   if (!parts.length) return '';
   return (
-    'Excerpts (head + tail, as read in the previous chat) of the files already read:\n' +
+    'Excerpts (content as read in the previous chat) of the files already read:' +
+    (skipped
+      ? '\n(' + skipped + ' smaller excerpt(s) omitted for size; re-read them only if needed.)'
+      : '') +
+    '\n' +
     parts.join('\n\n')
   );
 }

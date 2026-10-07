@@ -2062,13 +2062,45 @@ function makeDiff(filePath: string, oldText: string, newText: string): string {
   return out.join('\n') || '(no changes)';
 }
 
+/**
+ * v2.5.48: rădăcinile acceptate = rădăcina principală + TOATE folderele
+ * deschise în workspace (multi-root). Un folder adăugat cu „Add Folder to
+ * Workspace" (ex: Z:\ proiectat prin RaiDrive) devine astfel accesibil.
+ */
+function allowedRoots(primary: string): string[] {
+  const roots = [primary];
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    if (folder.uri.scheme !== 'file') continue;
+    if (!folder.uri.fsPath) continue;
+    roots.push(folder.uri.fsPath);
+  }
+  return roots;
+}
+
+function isInsideRoot(target: string, root: string): boolean {
+  const r = path.normalize(root);
+  if (target === r) return true;
+  return target.startsWith(r.endsWith(path.sep) ? r : r + path.sep);
+}
+
 function safePath(rel: string, root: string): string {
   const abs = path.resolve(root, rel);
   const normalized = path.normalize(abs);
-  if (!normalized.startsWith(path.normalize(root))) {
-    throw new Error('Path outside workspace: ' + rel);
+  if (isInsideRoot(normalized, root)) return normalized;
+  // v2.5.48: multi-root workspace — acceptăm și celelalte foldere deschise
+  for (const extra of allowedRoots(root)) {
+    if (extra === root) continue;
+    if (isInsideRoot(normalized, extra)) {
+      logLine(
+        'scope',
+        'allowed path outside primary root: ' +
+          normalized +
+          ' (multi-root workspace)'
+      );
+      return normalized;
+    }
   }
-  return normalized;
+  throw new Error('Path outside workspace: ' + rel);
 }
 
 async function readFile(

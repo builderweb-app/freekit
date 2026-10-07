@@ -233,12 +233,12 @@
           "default": 20,
           "description": "Total time budget (minutes) for one message in the agentic loop."
         },
-        "freekit.newChatAfterToolCalls": {
+        "freekit.handoffThreshold": {
           "type": "number",
-          "default": 4,
+          "default": 20,
           "minimum": 0,
-          "maximum": 40,
-          "markdownDescription": "Starts a **new web chat** (with a short handoff of the task, the recent steps and the files already read) after this many tool results have been pasted into the **same** browser chat. A large tool payload makes ChatGPT/Claude/Gemini process every later message slowly, and the accumulated context can hit the site's „Chat memory full” limit — a fresh chat keeps the paste small and fast. The handoff carries the list of files already read plus short head+tail excerpts of their content, so the new chat does not ask to re-read them; tasks that read *many* files and summarize them („read every file in src/ and summarize”) skip the rotation entirely, because the new chat would have to re-read everything. **0** disables the rotation (the chat is only restarted when the site reports a full context)."
+          "maximum": 100,
+          "markdownDescription": "Number of tool results pasted into the **same** browser chat before starting a **new chat** with a full handoff. A large tool payload makes ChatGPT/Claude/Gemini process every later message slowly, and the accumulated context can hit the site's „Chat memory full” limit — a fresh chat keeps the paste small and fast. Raise it for long tasks (more context kept in one chat); lower it if the web app gets slow. **0** disables the handoff entirely (the chat is only restarted when the site reports a full context). Note: the handoff is never triggered for tasks that read *many* files and summarize them („read every file in src/ and summarize”), because the new chat would have to re-read everything."
         },
         "freekit.autoVerify": {
           "type": "boolean",

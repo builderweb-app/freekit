@@ -287,14 +287,14 @@ export function providerErrorMessage(
         name + ' is rate-limiting requests right now. Wait a minute, then retry.'
       );
     case 'plan_limit':
+      // v2.5.48: mesaj clar pentru limita temporară de provider (ex: DeepSeek
+      // „is limiting this account") — cât aștepți și ce alternative ai.
       return (
         name +
-        ' is limiting this account (' +
+        ' reached its temporary limit (' +
         e.message +
-        '). ' +
-        (e.upgradeUrl
-          ? 'Upgrade for more messages: ' + e.upgradeUrl
-          : 'Wait for the limit to reset, or switch to another provider.')
+        '). Wait 15–30 minutes and try again, or switch to another provider.' +
+        (e.upgradeUrl ? ' Upgrade for more messages: ' + e.upgradeUrl : '')
       );
     case 'captcha':
       return (

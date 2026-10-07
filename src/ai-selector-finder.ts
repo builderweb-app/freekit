@@ -1205,7 +1205,7 @@ async function runFindSelectorsWithAI(
         maxAttempts: AI_FINDER_MAX_ATTEMPTS,
         message:
           attempt === 1
-            ? 'Analyzing DOM (attempt 1/2) — this may take up to 30s.'
+            ? 'Analyzing DOM (attempt 1/2) — up to 30s per attempt, 60s max.'
             : 'Attempt 2/2 — retrying with a more specific prompt…'
       });
     }

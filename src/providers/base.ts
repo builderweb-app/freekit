@@ -9,9 +9,9 @@ import {
   inputAvailable,
   inputRepair,
   notifyNotReady,
-  proactiveDiscovery,
   resolveSlot,
-  selectors
+  selectors,
+  SlotName
 } from '../selectors';
 import { SendOptions } from './types';
 import {
@@ -23,6 +23,7 @@ import {
 } from '../human-behavior';
 import { installMutationTracker, waitForAbort, waitStep } from '../mutation';
 import { autoAcceptPopups } from '../popups';
+import { logLine } from '../log';
 import {
   DetectedProviderError,
   detectProviderError,
@@ -189,9 +190,7 @@ export async function findInput(
   if (await detectLoginPage(page)) {
     const url = page.url();
     log(label + ': input missing, login page detected (' + url + ')');
-    // v2.5.45 (bug #102): descoperirea proactivă nu se poate face pe pagina de
-    // login — o lăsăm „în așteptare" și se reia singură după autentificare
-    // (chatView reia open() când login-ul reușește).
+    // Login pages are not valid targets for selector healing.
     notifyNotReady(providerId, 'login page?');
     throw loginError(providerId, url);
   }
@@ -203,37 +202,50 @@ export async function findInput(
       label +
       ' (selectors tried: ' +
       selectors.candidates(providerId, 'input').join(', ') +
-      '). Are you logged in to Chrome with the Freekit profile?'
+      '). Are you logged in to Chrome with the Freekit profile? ' +
+      'If the selector is broken, run "Freekit: Repair Selectors".'
   );
 }
 
-/* =========================================================================
- * v2.5.45 (bug #102) — DESCOPERIRE PROACTIVĂ LA CONECTARE
- * AI finder-ul rula doar reactiv (când un slot cădea deja), deci pe providerii
- * noi inputul se trunchia înainte ca cineva să observe. Acum, imediat după ce
- * pagina s-a încărcat și sesiunea e autentificată, primește o șansă să
- * descopere TOATE sloturile dintr-o dată (o dată per provider la 7 zile — vezi
- * proactiveDiscover()). Best-effort: fără hook sau cu eroare, fluxul continuă.
- * ========================================================================= */
-
-async function runProactiveDiscovery(
+/** Check bundled selectors quickly; only missing slots enter the healer path. */
+async function validateConnectSelectors(
   page: Page,
   providerId: string,
   label: string
 ): Promise<void> {
-  const discover = proactiveDiscovery();
-  if (!discover) return;
-  try {
-    const outcome = await discover(page, providerId);
-    if (outcome.ran) {
+  const slots: SlotName[] = ['input', 'response', 'newChat'];
+  const missing = await Promise.all(
+    slots.map(async (slot) => {
+      const primary = selectors.primary(providerId, slot);
+      if (!primary) return { slot, present: false };
+      const locator = page.locator(primary).first();
+      try {
+        return {
+          slot,
+          present:
+            (await locator.count()) > 0 &&
+            (await locator.isVisible()) &&
+            (await locator.isEnabled())
+        };
+      } catch {
+        return { slot, present: false };
+      }
+    })
+  );
+  if (missing.every((item) => item.present)) {
+    logLine('ai-finder', 'skip ' + providerId + ' — bundled selectors work');
+    return;
+  }
+  for (const item of missing) {
+    if (item.present) continue;
+    log(label + ': bundled ' + item.slot + ' selector missing — trying fingerprint healer');
+    const healed = await healSlot(page, providerId, item.slot);
+    if (!healed) {
       log(
-        label +
-          ': proactive discovery — ' +
-          (outcome.applied.length ? 'saved ' + outcome.applied.join(', ') : outcome.reason)
+        label + ': could not repair ' + item.slot +
+          ' automatically; run "Freekit: Repair Selectors"'
       );
     }
-  } catch (e: any) {
-    log(label + ': proactive discovery failed — ' + (e?.message ?? String(e)));
   }
 }
 
@@ -604,11 +616,8 @@ export async function openProvider(page: Page, providerId: string, label: string
   if (current.startsWith(host)) {
     // v1.8.0: popup-uri de consimțământ care pot bloca inputul
     await autoAcceptPopups(page, { log }).catch(() => []);
-    if (await inputAvailable(page, providerId, 20000)) {
-      // v2.5.45 (bug #102): pagina e deja încărcată și logată — descoperirea
-      // proactivă pornește și pe această ramură (altfel ar fi sărită exact la
-      // reconectare, unde selectors-user.json se poate completa).
-      await runProactiveDiscovery(page, providerId, label);
+    await validateConnectSelectors(page, providerId, label);
+    if (await inputAvailable(page, providerId, 200)) {
       return;
     }
     log(label + ': input not found on ' + current + ', navigating to ' + url);
@@ -623,10 +632,8 @@ export async function openProvider(page: Page, providerId: string, label: string
     notifyNotReady(providerId, 'login page?');
     throw loginError(providerId, page.url());
   }
-  await findInput(page, providerId, label, 60000);
-  // v2.5.45 (bug #102): pagină încărcată + sesiune autentificată → descoperire
-  // proactivă (Fix 1), cu cache de 7 zile (Fix 5).
-  await runProactiveDiscovery(page, providerId, label);
+  await validateConnectSelectors(page, providerId, label);
+  await findInput(page, providerId, label, 200);
 }
 
 /** Chat nou: buton dedicat -> auto-reparare (DOAR dacă butonul nu mai există) -> navigare. */
@@ -748,9 +755,6 @@ export async function resumeConversation(
     }
   }
   await findInput(page, providerId, label, 30000);
-  // v2.5.45 (bug #102): URL schimbat = chat real (nu pagina de login) →
-  // descoperirea proactivă rămasă în așteptare se reia aici (Fix 2).
-  await runProactiveDiscovery(page, providerId, label);
 }
 
 /** Apasă butonul de Stop al site-ului (best-effort, folosit la anulare). */
@@ -1160,7 +1164,12 @@ export async function sendAndWait(
     // v0.8.0: tastare "umană" (evenimente reale de tastatură); v2.0.6: mesajele
     // lungi tastează natural doar începutul, restul se lipește — vezi humanType.
     try {
-      if (human.typing) {
+      if (
+        human.typing &&
+        providerId !== 'deepseek' &&
+        providerId !== 'gemini' &&
+        providerId !== 'ollama'
+      ) {
         await humanType(page, text, {}, signal);
       } else {
         await page.keyboard.insertText(text);

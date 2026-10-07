@@ -1,7 +1,7 @@
 {
-  "version": "1.5.3",
-  "updated": "2026-10-06",
-  "changelog": "v1.5.3: ChatGPT response selectors re-validated on the live page (bug #47) — the turn container is a `<section data-testid='conversation-turn-N'>`, so the `article[data-testid^='conversation-turn'] .markdown` alternative could never match; it is now the tag-agnostic `[data-testid^='conversation-turn'] .markdown`. Primary `[data-message-author-role='assistant']` and the still-valid `.markdown` alternative were confirmed on a real conversation (the `model-response` element only exists on Gemini). v1.5.2: new `loggedOut` slot for ChatGPT (bug #35) — detects the visible „Log in”/„Sign up for free” CTAs (header/aside) on the logged-out page, including the guest mode where the composer still works; validated live against the real page. v1.5.1: Gemini selectors cleaned up — removed the dead `textarea` and `button[aria-label*=…]` candidates (the „New chat” element is an `<a>`), added stable role/aria/data-* alternatives (`[role='textbox'][contenteditable='true']`, `[aria-label='Enter a prompt for Gemini']`, `a[data-test-id='side-nav-sparkle-button']`); the health check no longer reports a false `not_found` on non-app pages (bug #34). v1.5.0: the Kimi provider was removed — the site migrated to kimi.ai and the kimi.com selectors no longer work (no test account on kimi.ai).",
+  "version": "1.5.4",
+  "updated": "2026-10-07",
+  "changelog": "v1.5.4: refreshed bundled Qwen and Mistral selectors for current composer, assistant response, and new-chat elements.",
   "providers": {
     "deepseek": {
       "url": "https://chat.deepseek.com/",
@@ -252,9 +252,9 @@
     },
 
     "mistral": {
-      "url": "https://chat.mistral.ai/chat",
+      "url": "https://chat.mistral.ai/",
       "input": {
-        "primary": "div[contenteditable='true'][role='textbox']",
+        "primary": "div.ProseMirror",
         "alternatives": [
           "textarea[placeholder*='message' i]",
           "textarea",
@@ -269,7 +269,7 @@
         "preferredKeywords": ["message", "chat", "input", "prompt"]
       },
       "response": {
-        "primary": "[class*='message'][class*='assistant'], [data-message-role='assistant']",
+        "primary": "[data-message-author-role=\"assistant\"]",
         "alternatives": [
           "[class*='assistant-message']",
           "[data-message-author-role='assistant']",
@@ -287,7 +287,7 @@
         "preferredKeywords": ["assistant", "message", "response", "markdown", "prose"]
       },
       "newChat": {
-        "primary": "button[aria-label*='new chat' i], button[aria-label*='nouvelle' i], a[href*='/new']",
+        "primary": "a[href=\"/work/temporary-chat\"]",
         "alternatives": [
           "[data-testid*='new-chat']",
           "button[class*='new-chat']",
@@ -316,7 +316,7 @@
     "qwen": {
       "url": "https://chat.qwen.ai/",
       "input": {
-        "primary": "textarea[placeholder], div[contenteditable='true']",
+        "primary": "textarea.message-input-textarea",
         "alternatives": [
           "textarea",
           "div[contenteditable='true'][role='textbox']"
@@ -330,7 +330,7 @@
         "preferredKeywords": ["message", "chat", "input"]
       },
       "response": {
-        "primary": "[class*='assistant'], [class*='message-content'], [class*='markdown']",
+        "primary": "[data-message-author-role=\"assistant\"]",
         "alternatives": [
           "div[class*='response']",
           "[data-role='assistant']"
@@ -343,7 +343,7 @@
         "preferredKeywords": ["assistant", "message", "response", "markdown"]
       },
       "newChat": {
-        "primary": "button[aria-label*='new' i], a[href='/']",
+        "primary": "div.sidebar-entry-fixed-list-content",
         "alternatives": [
           "[class*='new-chat']",
           "button[class*='plus']"

@@ -402,6 +402,79 @@ function addNotice(text, action, actionLabel) {
   scrollAfterAppend();
 }
 
+const aiFinderCards = new Map();
+
+function updateAIFinderCard(msg) {
+  const id = String(msg.id || '');
+  if (!id) return;
+  let card = aiFinderCards.get(id);
+  if (!card) {
+    card = document.createElement('div');
+    card.className = 'ai-finder-card';
+    card.dataset.finderId = id;
+    aiFinderCards.set(id, card);
+    messages.appendChild(card);
+  }
+  const phase = String(msg.phase || 'running');
+  card.className = 'ai-finder-card ' + phase;
+  let text;
+  if (phase === 'success') {
+    const selectors = Array.isArray(msg.selectors) ? msg.selectors.join(', ') : '';
+    text = '✅ Selectors repaired: ' + (selectors || 'validated');
+  } else if (phase === 'failed') {
+    text = '❌ Repair failed. Manual intervention required.';
+  } else if (phase === 'timeout') {
+    text = '⏱ ' + (msg.message || 'AI finder timed out after 60s. Bundled selectors are not working.');
+  } else if (phase === 'cancelled') {
+    text = 'Repair cancelled. Bundled selectors remain active.';
+  } else {
+    const label = String(msg.providerName || msg.providerId || 'provider');
+    text = '🔍 Repairing ' + label + ' selectors…\n' +
+      String(msg.message || 'Analyzing DOM…');
+  }
+
+  let body = card.querySelector('.ai-finder-text');
+  if (!body) {
+    body = document.createElement('div');
+    body.className = 'ai-finder-text';
+    card.appendChild(body);
+  }
+  body.textContent = text;
+  let actions = card.querySelector('.ai-finder-actions');
+  if (actions) actions.remove();
+  if (phase === 'running' || phase === 'attempt' || phase === 'failed' || phase === 'timeout') {
+    actions = document.createElement('div');
+    actions.className = 'ai-finder-actions';
+    const addButton = (label, type) => {
+      const button = document.createElement('button');
+      button.className = 'retry-btn';
+      button.textContent = label;
+      button.onclick = () => vscode.postMessage({
+        type,
+        id,
+        providerId: msg.providerId
+      });
+      actions.appendChild(button);
+    };
+    if (phase === 'running' || phase === 'attempt') {
+      addButton('Cancel', 'ai_finder_cancel');
+    } else {
+      addButton('Repair Selectors', 'ai_finder_manual_repair');
+    }
+    addButton('Switch provider', 'ai_finder_switch_provider');
+    addButton('Show Browser', 'ai_finder_show_browser');
+    card.appendChild(actions);
+  }
+  scrollAfterAppend();
+  if (phase === 'success' || phase === 'cancelled') {
+    setTimeout(() => {
+      if (aiFinderCards.get(id) !== card) return;
+      card.remove();
+      aiFinderCards.delete(id);
+    }, 5000);
+  }
+}
+
 // v0.6.0: notificare de auto-reparare terminal (textul are deja emoji-ul)
 function addHeal(text) {
   const el = document.createElement('div');
@@ -2265,6 +2338,8 @@ window.addEventListener('message', (event) => {
     keepBottom();
   } else if (msg.type === 'notice') {
     addNotice(msg.text || '', msg.action, msg.actionLabel);
+  } else if (msg.type === 'ai_finder_status') {
+    updateAIFinderCard(msg);
   } else if (msg.type === 'heal') {
     addHeal(msg.text || '');
   } else if (msg.type === 'verbose') {

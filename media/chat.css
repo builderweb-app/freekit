@@ -441,6 +441,38 @@ pre.code code {
   color: var(--vscode-foreground);
 }
 
+.ai-finder-card {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--vscode-editorWidget-border, var(--vscode-input-border, transparent));
+  border-left: 3px solid var(--vscode-progressBar-background, #3794ff);
+  border-radius: 8px;
+  background: var(--vscode-editorWidget-background, transparent);
+  color: var(--vscode-foreground);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ai-finder-card.success {
+  border-left-color: var(--vscode-testing-iconPassed, #73c991);
+}
+
+.ai-finder-card.failed,
+.ai-finder-card.timeout {
+  border-left-color: var(--vscode-editorError-foreground, #f14c4c);
+}
+
+.ai-finder-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
 /* v2.5.11 (bug #28/#29): notificare cu buton de acțiune (model mic / hardware) */
 .notice.notice-actionable {
   border-style: solid;

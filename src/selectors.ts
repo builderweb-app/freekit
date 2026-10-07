@@ -1714,6 +1714,8 @@ export interface DiscoveryOutcome {
   applied: string[];
   /** Motivul (pentru log/comandă): poate fi și motivul pentru care nu s-a rulat. */
   reason: string;
+  /** Login/CAPTCHA page; retry only after the user is ready. */
+  pending?: boolean;
 }
 
 export type ProactiveDiscoveryFn = (
@@ -1755,7 +1757,7 @@ export function setNotReadyNotifier(fn: NotReadyFn | null) {
   notReadyFn = fn;
 }
 
-/** Descoperirea proactivă înregistrată (sau null). */
+/** Descoperirea completă înregistrată (sau null); folosită de reparația manuală. */
 export function proactiveDiscovery(): ProactiveDiscoveryFn | null {
   return proactiveDiscoveryFn;
 }

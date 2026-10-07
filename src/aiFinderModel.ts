@@ -57,8 +57,8 @@ function paramsB(name: string): number {
 }
 
 /**
- * Cel mai mic model din listă — analiza de DOM are un timeout de 120 s
- * (freekit.aiFinderTimeoutSeconds), deci un model mic e alegerea sigură când
+ * Cel mai mic model din listă — analiza de DOM are un timeout de 30 s per
+ * încercare (freekit.aiFinderTimeoutSeconds), deci un model mic e alegerea sigură când
  * tier-ul conține mai multe variante de mărimi. Numele fără tag (`:…b`) trece
  * ultimul, dar rămâne candidat.
  */

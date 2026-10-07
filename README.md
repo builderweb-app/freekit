@@ -2,7 +2,7 @@
 
 > **Free AI coding agent for VS Code.** Use your existing web AI accounts (DeepSeek, ChatGPT, Claude, Gemini, Mistral, Qwen) or a local Ollama model. No API keys, no subscriptions, no costs.
 
-[![Version](https://img.shields.io/badge/version-2.4.9-blue)](https://marketplace.visualstudio.com/items?itemName=builderweb.freekit)
+[![Version](https://img.shields.io/badge/version-2.5.48-blue)](https://marketplace.visualstudio.com/items?itemName=builderweb.freekit)
 [![VS Code](https://img.shields.io/badge/VS%20Code-%3E%3D1.90-blue)](https://code.visualstudio.com)
 
 ## Screenshots
@@ -182,9 +182,9 @@ Additional safeguards:
 | `freekit.whisperCliPath` | *(empty)* | Path to `whisper-cli` (whisper.cpp) for offline voice input; empty = auto-detect (global storage → classic whisper.cpp locations → PATH) |
 | `freekit.whisperModelPath` | *(empty)* | Path to the Whisper ggml model (e.g. `ggml-base.bin`); empty = auto-detect |
 | `freekit.whisperTimeoutSeconds` | `180` | Timeout for one Whisper transcription (10–1200 s) |
-| `freekit.aiSelectorFinder` | `true` | AI selector-discovery fallback: when the classic healer finds nothing, a filtered DOM snapshot (interactive elements + their ancestors only, not the whole page) is analyzed by local Ollama. The proposed chat-input selector is strictly validated in the page (visible, enabled, accepts typed text, inside the viewport, in the bottom half) and the analysis is retried up to 3 times with a more specific prompt, so a hidden helper input (`input[aria-label="Line wrap"]`) can no longer be saved; only validated selectors reach `selectors-user.json`. A proposed **response** selector is validated on its *content*, read with the same reader used at run time: it must return more than 200 real characters, must not lose a tool call that is in the page (`ACTION:` / `TOOL:` / ` ``` ` / `---FILE---`), is lifted to a parent holding twice as much text when it only caught a fragment (a thinking block or a single paragraph), and falls back to `[data-message-author-role="assistant"]` / the last new big text block when nothing else works. With no reply in the DOM yet the response selector is not guessed at all — discovery is deferred to the first reactive repair, when there is real reply text to measure |
+| `freekit.aiSelectorFinder` | `false` | AI selector-discovery fallback: when enabled, a filtered DOM snapshot is analyzed by local Ollama only after fingerprint healing fails (hard cap: 60 s). It is disabled by default; the manual `Freekit: Repair Selectors` command can run discovery on demand |
 | `freekit.aiFinderModel` | `auto` | Ollama model for the AI selector finder (independent of `freekit.ollamaModel`). `auto` = best installed chat model (`gemma3:12b` when available, else `qwen2.5-coder` → `qwen-coder` → `qwen` → `llama` → `mistral` → any other); embeddings models are never used |
-| `freekit.aiFinderTimeoutSeconds` | `120` | Timeout (5–300 s) for the AI selector analysis; on expiry the stale locally learned selector is dropped and the static `selectors.json` one is used again |
+| `freekit.aiFinderTimeoutSeconds` | `30` | Timeout per AI selector-analysis attempt (maximum 30 s); the complete finder is capped at 60 s and two attempts |
 | `freekit.mcpEnabled` | `true` | Start the configured MCP servers and expose their tools to the AI (`mcp_<server>_<tool>`) |
 | `freekit.mcpServers` | `{}` | MCP servers to launch (stdio), e.g. `{"filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]}}` |
 | `freekit.mcpToolTimeoutSeconds` | `60` | Timeout for a single MCP tool call (`tools/call`) |

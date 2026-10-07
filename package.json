@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.5.47",
+  "version": "2.5.48",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -112,7 +112,7 @@
       },
       {
         "command": "freekit.rediscoverSelectors",
-        "title": "Freekit: Re-discover Selectors",
+        "title": "Freekit: Repair Selectors",
         "icon": "$(search)"
       },
       {
@@ -196,8 +196,8 @@
         },
         "freekit.aiSelectorFinder": {
           "type": "boolean",
-          "default": true,
-          "markdownDescription": "When the classic selector healer fails completely (no valid candidate), sends a cleaned DOM snapshot to **local Ollama** (`freekit.aiFinderModel`) to discover new selectors. Proposed selectors are validated in the real page, used immediately and saved to `selectors-user.json` (globalStorage). Requires Ollama running; any failure does not block the normal flow."
+          "default": false,
+          "markdownDescription": "When enabled, sends a DOM snapshot to local Ollama to discover selectors when the fingerprint healer fails. Turn ON only if a provider's selectors break; analysis is capped at 60 seconds. The manual `Freekit: Repair Selectors` command can run discovery regardless of this setting."
         },
         "freekit.aiFinderModel": {
           "type": "string",
@@ -206,8 +206,10 @@
         },
         "freekit.aiFinderTimeoutSeconds": {
           "type": "number",
-          "default": 120,
-          "markdownDescription": "Timeout (seconds, 5–300) for the AI selector analysis. After it expires, the AI fallback is abandoned, the stale locally learned selector (if any) is dropped, and the static selector from `selectors.json` is used again."
+          "default": 30,
+          "minimum": 5,
+          "maximum": 30,
+          "markdownDescription": "Timeout per AI selector-analysis attempt (maximum 30s). The complete finder has a hard 60s timeout and at most two attempts."
         },
         "freekit.responseTimeoutMs": {
           "type": "number",

@@ -396,11 +396,11 @@ export async function activate(ctx: vscode.ExtensionContext) {
     })
   );
 
-  // v2.5.45 (bug #102): re-descoperirea manuală a selectorilor (Fix 5) —
-  // ocolește cache-ul de 7 zile. Pornește de la tab-ul deschis în Chrome:
+  // Repair Selectors is manual and bypasses the automatic-discovery setting.
+  // Pornește de la tab-ul deschis în Chrome:
   // providerul e dedus din URL (nu există o „selecție activă" în extensie).
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('freekit.rediscoverSelectors', async () => {
+    vscode.commands.registerCommand('freekit.rediscoverSelectors', async (statusId?: string) => {
       if (isRestricted()) {
         showRestrictedNotification(true);
         return;
@@ -415,10 +415,10 @@ export async function activate(ctx: vscode.ExtensionContext) {
       await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: 'Freekit: discovering selectors for the provider open in Chrome…'
+          title: 'Freekit: repairing selectors for the provider open in Chrome…'
         },
         async () => {
-          const { providerId, outcome } = await rediscoverSelectors(page);
+          const { providerId, outcome } = await rediscoverSelectors(page, statusId);
           if (!providerId) {
             vscode.window.showWarningMessage(
               'Freekit: no provider chat is open in the Chrome window — open one ' +

@@ -4,6 +4,11 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { Page } from 'playwright';
+import { cancelAIFinder } from './ai-selector-finder';
+import {
+  AIFinderStatus,
+  setAIFinderStatusListener
+} from './ai-finder-events';
 import {
   createProvider,
   PROVIDER_IDS,
@@ -407,6 +412,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private abortRequested = false;
   private abortController?: AbortController;
+  private readonly aiFinderStatuses = new Map<string, AIFinderStatus>();
   /** FAZA I: providerul + pagina folosite acum (pentru Stop / auto-reparare). */
   private active?: { provider: AIProvider; page?: Page };
   /** FAZA II (A): atașamentele curente (chip-urile din UI). */
@@ -551,6 +557,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.checkpoints = state.get<Checkpoint[]>(CHECKPOINTS_KEY, []) ?? [];
     // v1.9.0: magazinul de conversații (listă + conversația activă, în globalState)
     this.conversations = new ConversationStore(state);
+    setAIFinderStatusListener((status) => {
+      this.aiFinderStatuses.set(status.id, status);
+      if (this.aiFinderStatuses.size > 8) {
+        const oldest = this.aiFinderStatuses.keys().next().value;
+        if (oldest) this.aiFinderStatuses.delete(oldest);
+      }
+      logLine('ai-finder', 'status card updated: ' + status.phase);
+      this.view?.webview.postMessage({ type: 'ai_finder_status', ...status });
+      if (status.phase === 'success' || status.phase === 'cancelled') {
+        setTimeout(() => {
+          if (this.aiFinderStatuses.get(status.id) === status) {
+            this.aiFinderStatuses.delete(status.id);
+          }
+        }, 5000);
+      }
+    });
 
     // FAZA I: anunță în chat când un selector a fost reparat automat
     selectors.setNotifier((info) => {
@@ -574,6 +596,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     };
     view.webview.html = this.getHtml(view.webview);
     view.webview.onDidReceiveMessage((msg) => this.handleMessage(msg));
+    for (const status of this.aiFinderStatuses.values()) {
+      view.webview.postMessage({ type: 'ai_finder_status', ...status });
+    }
     // v2.4.1: în Restricted Mode cardul rămâne vizibil în chat — notificarea
     // VS Code poate fi închisă, dar aici utilizatorul vede mereu ce are de făcut.
     if (!vscode.workspace.isTrusted) {
@@ -910,6 +935,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleMessage(msg: any) {
+    if (msg.type === 'ai_finder_cancel') {
+      cancelAIFinder(String(msg.id || ''));
+      return;
+    }
+    if (msg.type === 'ai_finder_show_browser') {
+      await this.showChrome();
+      return;
+    }
+    if (msg.type === 'ai_finder_manual_repair') {
+      logLine('ai-finder', 'manual repair triggered from chat card');
+      await vscode.commands.executeCommand('freekit.rediscoverSelectors', String(msg.id || ''));
+      return;
+    }
+    if (msg.type === 'ai_finder_switch_provider') {
+      const current = String(msg.providerId || '');
+      cancelAIFinder(String(msg.id || ''));
+      this.abortRequested = true;
+      this.abortController?.abort();
+      const currentIndex = BROWSER_PROVIDER_IDS.indexOf(current);
+      const next =
+        BROWSER_PROVIDER_IDS[
+          currentIndex < 0 ? 0 : (currentIndex + 1) % BROWSER_PROVIDER_IDS.length
+        ] || 'deepseek';
+      await vscode.workspace
+        .getConfiguration('freekit')
+        .update('provider', next, vscode.ConfigurationTarget.Global);
+      await this.state.update(LAST_BROWSER_KEY, next);
+      this.post('provider', next);
+      this.post('notice', '🔄 Switched to ' + (PROVIDER_LABELS[next] || next) + '. Resend your prompt to continue.');
+      logLine('ai-finder', 'cancelled, switching provider to ' + next);
+      void this.refreshProviderStatus();
+      return;
+    }
+
     // Răspuns la o cerere de aprobare
     if (msg.type === 'approval_response') {
       const resolver = pendingApprovals.get(msg.id);

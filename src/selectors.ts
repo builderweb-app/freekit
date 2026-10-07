@@ -402,8 +402,11 @@ function isBlacklistedSelector(slot: SlotName, selector: string): boolean {
  * chat” al Gemini stă chiar în sidebar, deci la `newChat`/`stopButton` zonele
  * astea rămân valide. Lista se trimite ca argument funcțiilor care rulează în
  * pagină (sursă unică de adevăr — ca la `blacklist`/`promoText`).
+ *
+ * v2.5.47 (bug #106): exportată și pentru validarea de conținut a selectorului
+ * de răspuns din ai-selector-finder.ts — aceeași listă, aceeași excludere.
  */
-const NAV_SELECTORS = [
+export const NAV_SELECTORS = [
   'nav',
   'aside',
   '[role="navigation"]',
@@ -431,7 +434,13 @@ function isPersistBlocked(slot: SlotName, selector: string): boolean {
   return isBlacklistedSelector(slot, selector) || forbiddenSelectorHit(selector) !== null;
 }
 
-function isUsableSelector(sel: string): boolean {
+/**
+ * v2.5.47 (bug #106): exportată și pentru AI finder — candidații de răspuns
+ * propuși de el (părinte/fallback) se filtrează cu ACEEAȘI regulă cu care
+ * `learn()` îi respinge la salvare, ca să nu raportăm „validat" pentru un
+ * selector care nu se poate stoca.
+ */
+export function isUsableSelector(sel: string): boolean {
   if (!sel) return false;
   const bare = sel.trim().toLowerCase();
   if (bare.length > 400) return false;

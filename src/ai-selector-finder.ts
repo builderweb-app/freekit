@@ -13,6 +13,8 @@ import {
   getLastResponseText,
   inputAvailable,
   InputRepairResult,
+  isUsableSelector,
+  NAV_SELECTORS,
   promoPhraseHit,
   selectors,
   setAIFinder,
@@ -692,7 +694,10 @@ export function buildPrompt(ctx: PromptContext): string {
     "  BOTTOM HALF of the page and it is VISIBLE, ENABLED and accepts typed text: a <textarea>,",
     '  an <input type="text">/<input type="search">, a <div contenteditable="true"> (often with',
     '  class ProseMirror or ql-editor) or an element with role="textbox".',
-    "- response: the container holding the AI assistant's LATEST reply (NOT the user's message bubble, NOT the input box, NOT promo/marketing cards)",
+    "- response: the container holding the AI assistant's LATEST reply (NOT the user's message bubble, NOT the input box, NOT promo/marketing cards).",
+    '  It must be the WHOLE reply: reading that element has to return the full reply text — every',
+    '  paragraph, every code fence and any `ACTION:` / `TOOL:` block it contains. A fragment of the',
+    '  reply, an inner "thinking"/"reasoning" block or a single paragraph is WRONG.',
     '- newChat: button to start a new conversation',
     '- stopButton: button to stop AI generation (visible only while generating)',
     '',
@@ -720,11 +725,23 @@ export function buildPrompt(ctx: PromptContext): string {
       '',
       'ATTEMPT ' + ctx.attempt + ' OF ' + AI_FINDER_MAX_ATTEMPTS + ' — YOUR PREVIOUS ANSWER WAS REJECTED:',
       '- rejected selector: ' + (ctx.rejectedSelector || '(none)'),
-      '- why it was rejected: ' + ctx.failureReason,
-      'That element is NOT the chat input. Read INTERACTIVE CANDIDATES again and answer with a',
-      'DIFFERENT element that satisfies rule 1 (visible=yes, enabled=yes, acceptsText=yes,',
-      'inViewport=yes, largest y). If no candidate qualifies, return null.'
+      '- why it was rejected: ' + ctx.failureReason
     );
+    if (ctx.missingSlots.indexOf('input') >= 0) {
+      lines.push(
+        'That element is NOT the chat input. Read INTERACTIVE CANDIDATES again and answer with a',
+        'DIFFERENT element that satisfies rule 1 (visible=yes, enabled=yes, acceptsText=yes,',
+        'inViewport=yes, largest y).'
+      );
+    }
+    if (ctx.missingSlots.indexOf('response') >= 0) {
+      lines.push(
+        'That element does NOT return the whole reply. Answer with the CONTAINER of the latest',
+        'assistant reply — reading it must give the FULL reply text (all paragraphs, code fences and',
+        'any ACTION:/TOOL: block), not a fragment and not the inner "thinking" block.'
+      );
+    }
+    lines.push('If no candidate qualifies, return null.');
   }
 
   if (ctx.inputOnly) {
@@ -871,18 +888,45 @@ async function checkRequestedSlots(
   page: Page,
   discovered: DiscoveredSelectors,
   missingSlots: string[],
-  required: string[]
+  required: string[],
+  opts: { echoText?: string } = {}
 ): Promise<{ ok: true } | { ok: false; reason: string; selector?: string }> {
   for (const slot of SLOTS) {
     if (missingSlots.indexOf(slot) < 0) continue;
     const sel = discovered[slot];
     if (!sel) {
+      if (slot === 'response') {
+        // v2.5.47 (bug #106): AI-ul n-a propus nimic, dar fallback-ul generic
+        // (data-message-author-role etc.) poate prinde totuși răspunsul.
+        const check = await validateResponseSelector(page, '', opts);
+        if (check.ok) {
+          discovered.response = check.selector;
+          continue;
+        }
+        // fără text de răspuns în DOM nu insistăm — descoperirea se amână
+        return check.retryable ? { ok: false, reason: check.reason } : { ok: true };
+      }
       if (required.indexOf(slot) < 0) continue;
       return { ok: false, reason: 'the AI answered null for "' + slot + '"' };
     }
-    if (slot !== 'input') continue;
-    const check = await validateChatInputSelector(page, sel);
-    if (!check.ok) return { ok: false, reason: String(check.reason), selector: sel };
+    if (slot === 'input') {
+      const check = await validateChatInputSelector(page, sel);
+      if (!check.ok) return { ok: false, reason: String(check.reason), selector: sel };
+      continue;
+    }
+    if (slot === 'response') {
+      const check = await validateResponseSelector(page, sel, opts);
+      if (check.ok) {
+        // selectorul validat poate fi un părinte (Fix 3) sau fallback-ul (Fix 4)
+        discovered.response = check.selector;
+        continue;
+      }
+      if (check.retryable) return { ok: false, reason: check.reason, selector: sel };
+      // fragment de răspuns, dar în pagină nu există text mai bun de măsurat:
+      // slotul rămâne null (healer-ul va relua când chiar există un răspuns)
+      delete discovered.response;
+      continue;
+    }
   }
   return { ok: true };
 }
@@ -899,18 +943,50 @@ async function checkRequestedSlots(
  * v2.5.45 (bug #102): `opts.required` (implicit = toate sloturile cerute) spune
  * care sloturi rămase null resping analiza, iar `opts.inputOnly` adaugă în
  * prompt blocul „căutăm doar căsuța de chat" (reparația de composer trunchiat).
+ *
+ * v2.5.47 (bug #106): `opts.providerId`/`opts.echoText` permit verificarea
+ * „există răspuns în DOM?"; fără el, slotul `response` nu se cere deloc — vezi
+ * deferral-ul de mai jos. `opts.replyPresent` sare peste verificare (apelantul
+ * a dovedit-o deja).
  */
 export async function findSelectorsWithAI(
   page: Page,
   providerName: string,
   missingSlots: string[],
-  opts: { required?: string[]; inputOnly?: boolean; onboarding?: boolean } = {}
+  opts: {
+    required?: string[];
+    inputOnly?: boolean;
+    onboarding?: boolean;
+    providerId?: string;
+    echoText?: string;
+    /** Apelantul a verificat deja că în DOM există un răspuns de măsurat. */
+    replyPresent?: boolean;
+  } = {}
 ): Promise<DiscoveredSelectors | null> {
   log('caut selectori cu AI pentru ' + providerName + ' (lipsesc: ' + missingSlots.join(',') + ')');
 
   // v2.5.45 (bug #102): fără `required` explicit, toate sloturile cerute sunt
   // obligatorii (comportamentul de dinainte, folosit de healer pe un singur slot).
   const required = opts.required ?? missingSlots;
+
+  // v2.5.47 (bug #106): fără răspuns în DOM nu cerem (și nu acceptăm) un
+  // selector de `response` — AI-ul ar ghici un container parțial, exact ca la
+  // Qwen. Amânăm slotul pentru prima reparare reactivă, când există un răspuns
+  // real de măsurat (validateResponseSelector are nevoie de conținut).
+  let wanted = missingSlots;
+  if (missingSlots.indexOf('response') >= 0) {
+    const replyPresent =
+      opts.replyPresent ??
+      (opts.providerId !== undefined
+        ? await hasResponseContentToFind(page, opts.providerId, opts.echoText)
+        : false);
+    if (!replyPresent) {
+      wanted = missingSlots.filter((s) => s !== 'response');
+      log('no reply in the DOM yet — deferring the response selector');
+      if (!wanted.length) return null;
+    }
+  }
+  const wantedRequired = required.filter((s) => wanted.indexOf(s) >= 0);
 
   // v2.5.40 (bug #93): modelul se rezolvă ÎNAINTE de capturarea DOM-ului — cu
   // doar embeddings instalate nu mai plătim snapshot-ul degeaba.
@@ -928,7 +1004,7 @@ export async function findSelectorsWithAI(
   try {
     // v2.5.41 (bug #96): textul conversației se păstrează doar când căutăm
     // containerul de răspuns — la input/butoane e exact zgomotul care strică.
-    dom = await captureCleanDom(page, { includeText: missingSlots.indexOf('response') >= 0 });
+    dom = await captureCleanDom(page, { includeText: wanted.indexOf('response') >= 0 });
   } catch (e: any) {
     log('captura DOM a eșuat: ' + (e?.message ?? String(e)));
     return null;
@@ -951,7 +1027,7 @@ export async function findSelectorsWithAI(
         buildPrompt({
           providerName,
           url,
-          missingSlots,
+          missingSlots: wanted,
           dom,
           attempt,
           failureReason,
@@ -975,7 +1051,9 @@ export async function findSelectorsWithAI(
       continue;
     }
 
-    const verdict = await checkRequestedSlots(page, parsed, missingSlots, required);
+    const verdict = await checkRequestedSlots(page, parsed, wanted, wantedRequired, {
+      echoText: opts.echoText
+    });
     if (verdict.ok) return parsed;
 
     failureReason = verdict.reason;
@@ -1000,10 +1078,6 @@ export async function findSelectorsWithAI(
 interface SlotProbe {
   count: number;
   visible?: boolean;
-  text?: string;
-  editable?: boolean;
-  role?: string | null;
-  userAncestor?: boolean;
 }
 
 export interface ValidateOptions {
@@ -1080,6 +1154,574 @@ export async function validateChatInputSelector(
   return { ...checkInputCandidate(probe, viewport), count };
 }
 
+/* -------------------------------------------------------------------------
+ * v2.5.47 (bug #106) — SELECTORUL DE RĂSPUNS E VALIDAT PE CONȚINUT
+ *
+ * Test Qwen (7 Oct 2026, 17:20): AI finder-ul a propus `div.chat-response-message`
+ * pentru `qwen.response`, iar validarea de dinainte (bug #95: există, vizibil,
+ * jos) a trecut — dar citirea dădea doar 67 de caractere, în timp ce în browser
+ * răspunsul era complet (ACTION: write_files + 5 fișiere) ⇒ tool call pierdut.
+ * Cauza: se verifica EXISTENȚA elementului, nu CONȚINUTUL lui; un container
+ * parțial (fragment de răspuns sau blocul de raționament) era acceptat.
+ *
+ * Reguli (toate măsurate cu reader-ul real — getLastResponseText, care scoate
+ * și blocurile de thinking, vezi scanResponses):
+ *  1. selectorul trebuie să dea ≥ RESPONSE_MIN_CHARS (200) caractere de text;
+ *  2. dacă în pagină există un tool call (ACTION:/TOOL:/```/---FILE---) pe care
+ *     selectorul nu-l citește, selectorul e respins (Fix 2);
+ *  3. un selector prea specific urcă la părintele cu de 2x mai mult text (Fix 3);
+ *  4. dacă tot nu iese nimic: fallback `[data-message-author-role="assistant"]`,
+ *     apoi ultimul bloc mare de text din DOM (Fix 4);
+ *  5. fără text de răspuns în DOM nu se acceptă NIMIC și nu se reîncearcă —
+ *     descoperirea se amână pentru prima reparare reactivă, când există un
+ *     răspuns real de măsurat (vezi și deferral-ul din findSelectorsWithAI).
+ * ------------------------------------------------------------------------- */
+
+/** Sub atâtea caractere de text real, „răspunsul" e doar un fragment. */
+export const RESPONSE_MIN_CHARS = 200;
+
+/** Markerii unui tool call: dacă sunt în pagină, selectorul trebuie să-i prindă. */
+export const RESPONSE_TOOL_MARKERS = ['ACTION:', 'TOOL:', '```', '---FILE---'];
+
+/** Părintele înlocuiește selectorul prea specific doar dacă are de atâtea ori text. */
+export const RESPONSE_PARENT_TEXT_RATIO = 2;
+
+/** Peste atâtea caractere, un „bloc" nu mai poate fi răspunsul (e tot chatul). */
+const RESPONSE_MAX_CHARS = 20000;
+
+/** Câți strămoși inspectăm (containerul de răspuns e aproape de fragment). */
+const RESPONSE_MAX_ANCESTORS = 3;
+
+/**
+ * Numărul maxim de potriviri acceptat pentru selectorul propus de AI.
+ * v2.5.47 (bug #106): mare intenționat — un selector de răspuns CORECT prinde
+ * sute de noduri într-o conversație lungă (`[data-message-author-role="assistant"]`
+ * e chiar selectorul static de la ChatGPT, iar citirea ia oricum ULTIMUL nod).
+ * Plasa de siguranță pentru `response` e CONȚINUTUL (≥ 200 caractere, tool call
+ * prins, fără promo/ecou), nu numărul de potriviri.
+ */
+const RESPONSE_MAX_MATCHES = 500;
+
+/** Fix 4: containerul standard de răspuns al asistentului (ca la ChatGPT). */
+export const RESPONSE_FALLBACK_SELECTORS = ['[data-message-author-role="assistant"]'];
+
+export type ResponseSelectorSource = 'ai' | 'parent' | 'fallback';
+
+export interface ResponseContentCheck {
+  ok: boolean;
+  /** Motivul respingerii (ajunge în promptul de reîncercare și în log). */
+  reason: string;
+  /** Selectorul de folosit: propunerea AI, părintele sau fallback-ul generic. */
+  selector: string;
+  source: ResponseSelectorSource | 'none';
+  /** Câte caractere dă propunerea AI (0 dacă nu a propus nimic). */
+  chars: number;
+  /** Cel mai lung text găsit în pagină (hotărăște dacă merită reîncercat). */
+  bestChars: number;
+  /** true = există text de răspuns în DOM, deci alt selector poate reuși. */
+  retryable: boolean;
+}
+
+interface ResponseProbeArgs {
+  s: string;
+  navSels: string[];
+  markers: string[];
+  minChars: number;
+  maxChars: number;
+  maxAncestors: number;
+  maxMatches: number;
+  /** Mesajul tocmai trimis — ancorează „textul NOU" (Fix 4b). */
+  echo: string;
+}
+
+interface ResponseProbe {
+  /** Selector cu sintaxă invalidă. */
+  invalid: boolean;
+  count: number;
+  visible: boolean;
+  editable: boolean;
+  role: string | null;
+  userAncestor: boolean;
+  /**
+   * Unde e ultimul bloc de tool call din pagină față de ultimul nod potrivit:
+   * `inside` = e prins de selector, `after` = e mai nou (selectorul îl ratează),
+   * `before` = e un mesaj mai vechi (nu ne interesează), `none` = nu există.
+   */
+  markerBlock: 'none' | 'inside' | 'after' | 'before';
+  /** Strămoșii ultimului nod potrivit (inner → outer), cu selector stabil. */
+  parentCandidates: string[];
+  /** Blocul generic de răspuns (Fix 4): cel mai complet, apoi sămânța. */
+  genericCandidates: string[];
+}
+
+/**
+ * Citește din pagină tot ce trebuie pentru validarea de conținut: starea
+ * ultimului nod potrivit, poziția tool call-ului, strămoșii folosibili ca
+ * selector (Fix 3) și ultimul bloc mare de text (Fix 4). Rulează ÎN PAGINĂ
+ * (page.evaluate) — toate utilitarele sunt definite local (funcția e
+ * serializată), iar constantele vin prin `args`.
+ */
+async function probeResponseElement(
+  page: Page,
+  selector: string,
+  opts: { minChars: number; maxChars: number; maxAncestors: number; maxMatches: number; echo?: string }
+): Promise<ResponseProbe> {
+  return page.evaluate<ResponseProbe, ResponseProbeArgs>(
+    (args) => {
+      /**
+       * textContent (nu innerText): scanul trece prin toate blocurile paginii,
+       * iar innerText ar forța un reflow pentru fiecare. Măsurarea „reală" se
+       * face oricum în Node, cu reader-ul paginii.
+       */
+      const textOf = (el: Element): string => String(el.textContent || '').trim();
+
+      const isVisible = (el: Element): boolean => {
+        const r = el.getBoundingClientRect();
+        if (r.width < 6 || r.height < 6) return false;
+        const st = window.getComputedStyle(el);
+        return st.visibility !== 'hidden' && st.display !== 'none';
+      };
+
+      // v2.5.13 (bug #37): sidebar-ul nu e răspuns — aceeași listă ca la citire.
+      const inNav = (el: Element): boolean => {
+        for (let i = 0; i < args.navSels.length; i++) {
+          try {
+            if (el.closest(args.navSels[i]) !== null) return true;
+          } catch {
+            /* selector invalid — îl ignorăm */
+          }
+        }
+        return false;
+      };
+
+      /** Composer-ul (sau un copil al lui) nu e niciodată „răspuns". */
+      const inComposer = (el: Element): boolean =>
+        el.closest('textarea, input, [contenteditable="true"], [role="textbox"]') !== null;
+
+      const hasMarker = (t: string): boolean => {
+        for (let i = 0; i < args.markers.length; i++) {
+          if (t.indexOf(args.markers[i]) >= 0) return true;
+        }
+        return false;
+      };
+
+      const escapeSel = (v: string): string => v.replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+
+      /**
+       * Selector STABIL pentru un element (id > data-* > aria-label/role >
+       * tag.clasă; tag-uri custom gen <chat-message>). Fără drumuri
+       * poziționale — learn() le respinge oricum (isFragileSelector).
+       */
+      const simpleSelector = (el: Element): string | null => {
+        const tag = el.tagName.toLowerCase();
+        if (tag === 'html' || tag === 'body') return null;
+        const matches = (sel: string): boolean => {
+          try {
+            const n = document.querySelectorAll(sel).length;
+            return n > 0 && n <= args.maxMatches;
+          } catch {
+            return false;
+          }
+        };
+        const id = el.getAttribute('id');
+        if (id && /^[A-Za-z_][\w-]*$/.test(id) && matches('#' + escapeSel(id))) return '#' + id;
+        const attrs = [
+          'data-testid',
+          'data-test-id',
+          'data-message-author-role',
+          'data-role',
+          'aria-label',
+          'role'
+        ];
+        for (let i = 0; i < attrs.length; i++) {
+          const v = el.getAttribute(attrs[i]);
+          if (!v || v.length > 60) continue;
+          const sel = tag + '[' + attrs[i] + '="' + v.replace(/"/g, '\\"') + '"]';
+          if (matches(sel)) return sel;
+        }
+        const classes = String((el as HTMLElement).className || '')
+          .split(/\s+/)
+          .filter((c: string) => c && c.length < 40 && !/[^a-zA-Z0-9_-]/.test(c));
+        if (classes.length) {
+          const sel = tag + '.' + escapeSel(classes[0]);
+          if (matches(sel)) return sel;
+        }
+        return /-/.test(tag) ? tag : null;
+      };
+
+      const empty: ResponseProbe = {
+        invalid: true,
+        count: 0,
+        visible: false,
+        editable: false,
+        role: null,
+        userAncestor: false,
+        markerBlock: 'none',
+        parentCandidates: [],
+        genericCandidates: []
+      };
+
+      let nodes: Element[] = [];
+      try {
+        nodes = Array.prototype.slice.call(document.querySelectorAll(args.s)) as Element[];
+      } catch {
+        return empty;
+      }
+      const count = nodes.length;
+      const node = count ? (nodes[count - 1] as HTMLElement) : null;
+      const rect = node ? node.getBoundingClientRect() : null;
+      const style = node ? window.getComputedStyle(node) : null;
+      const visible = !!(
+        node &&
+        rect &&
+        style &&
+        rect.width >= 6 &&
+        rect.height >= 6 &&
+        style.visibility !== 'hidden' &&
+        style.display !== 'none'
+      );
+      const editable = !!(
+        node &&
+        (node.tagName === 'TEXTAREA' ||
+          node.tagName === 'INPUT' ||
+          node.isContentEditable === true ||
+          node.getAttribute('contenteditable') === 'true')
+      );
+      let userAncestor = false;
+      let up: Element | null = node;
+      let depth = 0;
+      while (up && depth < 6) {
+        const cls =
+          typeof (up as HTMLElement).className === 'string' ? (up as HTMLElement).className : '';
+        const ids = up.getAttribute('id') || '';
+        if (/(^|[\s_-])user([\s_-]|$)/i.test(cls + ' ' + ids)) {
+          userAncestor = true;
+          break;
+        }
+        up = up.parentElement;
+        depth++;
+      }
+
+      const pool = Array.prototype.slice.call(
+        document.querySelectorAll('div, p, pre, code, li, article, section, blockquote, span')
+      ) as Element[];
+
+      /**
+       * Fix 4b: „text NOU" = tot ce vine DUPĂ mesajul tocmai trimis. Fără
+       * ancora lui, ultimul bloc mare din DOM poate fi un răspuns VECHI (dacă
+       * răspunsul nou e scurt) sau un mesaj al userului.
+       */
+      let anchor: Element | null = null;
+      const echoFlat = String(args.echo || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+      if (echoFlat.length >= 40) {
+        const head = echoFlat.slice(0, 60);
+        for (let i = pool.length - 1; i >= 0; i--) {
+          const el = pool[i];
+          if (inNav(el) || inComposer(el)) continue;
+          const raw = el.textContent || '';
+          if (raw.length > args.maxChars) continue;
+          const flat = raw.replace(/\s+/g, ' ').trim().toLowerCase();
+          if (flat.indexOf(head) >= 0) {
+            anchor = el;
+            break;
+          }
+        }
+      }
+      const isNew = (el: Element): boolean => {
+        if (!anchor) return true;
+        if (anchor === el || anchor.contains(el)) return true;
+        // 4 = Node.DOCUMENT_POSITION_FOLLOWING
+        return (anchor.compareDocumentPosition(el) & 4) !== 0;
+      };
+
+      // Fix 2: ultimul bloc care conține un marker de tool call. Copiii vin
+      // DUPĂ părinți în ordinea documentului, deci primul găsit mergând invers
+      // e cel mai interior; un marker dintr-un mesaj mai VECHI e înaintea
+      // ancorei, deci nu poate produce un fals „after".
+      let markerEl: Element | null = null;
+      for (let i = pool.length - 1; i >= 0; i--) {
+        const el = pool[i];
+        const t = textOf(el);
+        if (!t || t.length > args.maxChars || !hasMarker(t)) continue;
+        if (!isVisible(el) || inNav(el) || inComposer(el) || !isNew(el)) continue;
+        markerEl = el;
+        break;
+      }
+      let markerBlock: ResponseProbe['markerBlock'] = 'none';
+      if (markerEl && node) {
+        if (node === markerEl || node.contains(markerEl)) markerBlock = 'inside';
+        else {
+          // 4 = Node.DOCUMENT_POSITION_FOLLOWING
+          markerBlock = node.compareDocumentPosition(markerEl) & 4 ? 'after' : 'before';
+        }
+      }
+
+      // Fix 3: strămoșii ultimului nod potrivit, inner → outer.
+      const parentCandidates: string[] = [];
+      let parent: Element | null = node ? node.parentElement : null;
+      let levels = 0;
+      while (parent && levels < args.maxAncestors) {
+        levels++;
+        if (textOf(parent).length <= args.maxChars && isVisible(parent) && !inNav(parent) && !inComposer(parent)) {
+          const sel = simpleSelector(parent);
+          if (sel) parentCandidates.push(sel);
+        }
+        parent = parent.parentElement;
+      }
+
+      // Fix 4b: ultimul bloc mare de text din DOM + urcarea „2x" până la
+      // containerul de mesaj (peste el, textul crește prea puțin — e chatul).
+      const genericCandidates: string[] = [];
+      let seed: Element | null = null;
+      for (let i = pool.length - 1; i >= 0; i--) {
+        const el = pool[i];
+        const t = textOf(el);
+        if (t.length < args.minChars || t.length > args.maxChars) continue;
+        if (!isVisible(el) || inNav(el) || inComposer(el) || !isNew(el)) continue;
+        seed = el;
+        break;
+      }
+      if (seed) {
+        let cur: Element = seed;
+        let curLen = textOf(seed).length;
+        for (let step = 0; step <= args.maxAncestors; step++) {
+          const above: Element | null = cur.parentElement;
+          if (!above) break;
+          const aboveLen = textOf(above).length;
+          if (aboveLen > args.maxChars || inNav(above) || inComposer(above)) break;
+          if (aboveLen < curLen * 2) break;
+          cur = above;
+          curLen = aboveLen;
+        }
+        const topSel = simpleSelector(cur);
+        const seedSel = simpleSelector(seed);
+        if (topSel) genericCandidates.push(topSel);
+        if (seedSel && seedSel !== topSel) genericCandidates.push(seedSel);
+      }
+
+      return {
+        invalid: false,
+        count,
+        visible,
+        editable,
+        role: node ? node.getAttribute('role') : null,
+        userAncestor,
+        markerBlock,
+        parentCandidates,
+        genericCandidates
+      };
+    },
+    {
+      s: selector,
+      navSels: NAV_SELECTORS,
+      markers: RESPONSE_TOOL_MARKERS,
+      minChars: opts.minChars,
+      maxChars: opts.maxChars,
+      maxAncestors: opts.maxAncestors,
+      maxMatches: opts.maxMatches,
+      echo: String(opts.echo || '')
+    }
+  );
+}
+
+function hasToolMarker(text: string): boolean {
+  for (const m of RESPONSE_TOOL_MARKERS) {
+    if (text.indexOf(m) >= 0) return true;
+  }
+  return false;
+}
+
+/** Textul pe care îl dă un selector azi, cu ACELAȘI reader ca la rulare. */
+async function readResponseText(page: Page, selector: string): Promise<string> {
+  try {
+    return await getLastResponseText(page, [selector]);
+  } catch (e: any) {
+    log('reading a candidate response failed (' + selector + '): ' + (e?.message ?? String(e)));
+    return '';
+  }
+}
+
+/**
+ * v2.5.47 (bug #106): validează CONȚINUTUL unui selector de răspuns (vezi
+ * blocul de mai sus). Întoarce `ok` + selectorul de folosit — care poate fi
+ * propunerea AI, un părinte mai bogat (Fix 3) sau fallback-ul generic (Fix 4).
+ */
+export async function validateResponseSelector(
+  page: Page,
+  selector: string,
+  opts: { echoText?: string } = {}
+): Promise<ResponseContentCheck> {
+  const want = String(selector || '').trim();
+  let probe: ResponseProbe | null = null;
+  if (want) {
+    try {
+      probe = await probeResponseElement(page, want, {
+        minChars: RESPONSE_MIN_CHARS,
+        maxChars: RESPONSE_MAX_CHARS,
+        maxAncestors: RESPONSE_MAX_ANCESTORS,
+        maxMatches: RESPONSE_MAX_MATCHES,
+        echo: opts.echoText
+      });
+    } catch (e: any) {
+      log('probe of the proposed response failed (' + want + '): ' + (e?.message ?? String(e)));
+      probe = null;
+    }
+  }
+
+  let reason = 'the AI answered null for "response"';
+  let chars = 0;
+  let bestChars = 0;
+  let needMarker = false;
+  /** Propunerea AI a trecut de verificările structurale (nu e input/bulă/etc.). */
+  let structurallyOk = false;
+  /** Cel mai mult text dat de părinți/fallback-uri (baza excepției de mai jos). */
+  let bestOther = 0;
+
+  if (want && probe) {
+    let structural: string | null = null;
+    if (probe.invalid) structural = 'invalid selector';
+    else if (probe.count === 0) structural = 'no element matches';
+    else if (probe.count > RESPONSE_MAX_MATCHES)
+      structural = 'too generic (' + probe.count + ' matches)';
+    else if (!probe.visible) structural = 'not visible';
+    else if (probe.editable || probe.role === 'textbox') structural = 'it matches the chat input';
+    else if (probe.userAncestor) structural = 'it matches the user message bubble';
+    // ce nu se poate stoca nu se acceptă nici aici (learn() îl refuză oricum):
+    // altfel am raporta „validat" pentru un selector care moare la salvare
+    else if (!isUsableSelector(want)) structural = 'overly generic selector (' + want + ')';
+
+    if (structural) {
+      reason = structural;
+      // măsurăm și propunerea respinsă structural: `chars` e baza regulii 2x
+      // pentru părinți (altfel orice părinte ar trece drept „mai bogat")
+      if (probe.count > 0) {
+        const text = await readResponseText(page, want);
+        chars = text.length;
+        bestChars = chars;
+      }
+    } else {
+      structurallyOk = true;
+      const text = await readResponseText(page, want);
+      chars = text.length;
+      bestChars = chars;
+      // Fix 2: un tool call din pagină care nu ajunge în textul citit = pierdut.
+      const markerRequired = probe.markerBlock === 'after' || probe.markerBlock === 'inside';
+      if (!hasToolMarker(text) && markerRequired) {
+        needMarker = true;
+        log('response selector missed tool call markers');
+        reason = 'response selector missed tool call markers';
+      } else if (chars < RESPONSE_MIN_CHARS) {
+        // Fix 1: fragment de răspuns, nu răspunsul întreg.
+        log('response selector rejected: only ' + chars + ' chars (need >' + RESPONSE_MIN_CHARS + ')');
+        reason = 'only ' + chars + ' chars (need >' + RESPONSE_MIN_CHARS + ')';
+      } else {
+        const phrase = promoPhraseHit(text);
+        if (phrase) {
+          log('response selector rejected (promo text „' + phrase + '"): ' + want);
+          reason = 'the text is a promo card ("' + phrase + '")';
+        } else if (opts.echoText && echoContains(text, opts.echoText)) {
+          log('response selector rejected (it contains the message we just sent): ' + want);
+          reason = 'it contains the message we just sent';
+        } else {
+          return {
+            ok: true,
+            reason: 'ok',
+            selector: want,
+            source: 'ai',
+            chars,
+            bestChars: chars,
+            retryable: false
+          };
+        }
+      }
+    }
+  }
+
+  // Fix 3 + Fix 4: părintele cu de 2x mai mult text, apoi fallback-ul generic.
+  const candidates: Array<{ selector: string; source: ResponseSelectorSource }> = [];
+  if (probe) {
+    for (const p of probe.parentCandidates) candidates.push({ selector: p, source: 'parent' });
+  }
+  for (const f of RESPONSE_FALLBACK_SELECTORS) candidates.push({ selector: f, source: 'fallback' });
+  // Fix 4b doar când știm că tocmai s-a trimis un mesaj (ancora = mesajul
+  // nostru, deci „text nou"): la descoperirea proactivă, de pe un ecran de
+  // bun-venit, un bloc generic de 200+ caractere poate fi marketing sau
+  // istoric, nu răspuns (Fix 5: mai bine amânăm decât să învățăm ceva greșit).
+  if (probe && opts.echoText) {
+    for (const g of probe.genericCandidates) candidates.push({ selector: g, source: 'fallback' });
+  }
+
+  const tried = new Set<string>(want ? [want] : []);
+  for (const c of candidates) {
+    if (!c.selector || tried.has(c.selector) || !isUsableSelector(c.selector)) continue;
+    tried.add(c.selector);
+    const text = await readResponseText(page, c.selector);
+    const n = text.length;
+    if (n > bestChars) bestChars = n;
+    if (n > bestOther) bestOther = n;
+    if (n < RESPONSE_MIN_CHARS) continue;
+    if (c.source === 'parent' && n <= Math.max(chars, 1) * RESPONSE_PARENT_TEXT_RATIO) continue;
+    if (needMarker && !hasToolMarker(text)) continue;
+    if (promoPhraseHit(text)) continue;
+    if (opts.echoText && echoContains(text, opts.echoText)) continue;
+    log(
+      (c.source === 'parent'
+        ? 'response selector upgraded to parent: '
+        : 'response selector fallback: ') + c.selector
+    );
+    return {
+      ok: true,
+      reason: 'ok',
+      selector: c.selector,
+      source: c.source,
+      chars: n,
+      bestChars,
+      retryable: false
+    };
+  }
+
+  // Fix 1 (excepție): un răspuns CHIAR scurt (sub 200 de caractere) nu e un
+  // fragment. Dacă propunerea a trecut verificările structurale, nu pierde
+  // niciun tool call și în pagină nu există text semnificativ mai mare, e cea
+  // mai bună variantă — altfel am refuza orice răspuns scurt („Ok, gata.")
+  // exact când selectorul static e rupt. Doar în reparația reactivă: `echoText`
+  // e mesajul tocmai trimis, deci știm că un răspuns există.
+  if (
+    structurallyOk &&
+    chars > 0 &&
+    chars < RESPONSE_MIN_CHARS &&
+    !needMarker &&
+    opts.echoText &&
+    bestOther < Math.max(chars * RESPONSE_PARENT_TEXT_RATIO, RESPONSE_MIN_CHARS)
+  ) {
+    log('response selector accepted as-is (short reply, ' + chars + ' chars)');
+    return {
+      ok: true,
+      reason: 'ok',
+      selector: want,
+      source: 'ai',
+      chars,
+      bestChars,
+      retryable: false
+    };
+  }
+
+  // Fix 1.5/Fix 5: reîncercăm doar dacă ÎN PAGINĂ există text de răspuns de
+  // măsurat — altfel AI-ul ar ghici iar un container parțial (bug #106).
+  return {
+    ok: false,
+    reason,
+    selector: '',
+    source: 'none',
+    chars,
+    bestChars,
+    retryable: bestChars >= RESPONSE_MIN_CHARS
+  };
+}
+
 /**
  * Validează selectorii propuși de AI în pagina reală (fără să învețe nimic).
  * Aplică aceleași reguli de siguranță ca scanul healer-ului: nu acceptăm
@@ -1111,8 +1753,23 @@ export async function validateSelectors(
       log('validat ' + slot + ': ' + sel + ' (' + check.count + ' potriviri)');
       continue;
     }
+    if (slot === 'response') {
+      // v2.5.47 (bug #106): conținutul, nu doar existența — vezi
+      // validateResponseSelector (≥200 caractere, tool call prins, părinte,
+      // fallback generic).
+      const check = await validateResponseSelector(page, sel, { echoText: opts.echoText });
+      if (!check.ok) {
+        log('respins response (' + check.reason + '): ' + sel);
+        continue;
+      }
+      assignSlot(valid, slot, check.selector);
+      log('validat ' + slot + ': ' + check.selector + ' (' + check.chars + ' caractere)');
+      continue;
+    }
     try {
-      const probe = await page.evaluate<SlotProbe, { s: string; sl: string }>(
+      // v2.5.47 (bug #106): aici rămân doar `newChat`/`stopButton` — `response`
+      // are propriul drum, cu validare de conținut (validateResponseSelector).
+      const probe = await page.evaluate<SlotProbe, { s: string }>(
         (args) => {
           let nodes: NodeListOf<Element>;
           try {
@@ -1122,33 +1779,14 @@ export async function validateSelectors(
           }
           const count = nodes.length;
           if (count === 0 || count > 20) return { count };
-          const el = (args.sl === 'response' ? nodes[count - 1] : nodes[0]) as HTMLElement;
+          const el = nodes[0] as HTMLElement;
           const r = el.getBoundingClientRect();
           const st = window.getComputedStyle(el);
           const visible =
             r.width >= 6 && r.height >= 6 && st.visibility !== 'hidden' && st.display !== 'none';
-          const text = ((el.innerText || el.textContent || '') as string).trim();
-          const editable =
-            el.tagName === 'TEXTAREA' ||
-            el.tagName === 'INPUT' ||
-            el.isContentEditable === true ||
-            el.getAttribute('contenteditable') === 'true';
-          let userAncestor = false;
-          let up: Element | null = el;
-          let depth = 0;
-          while (up && depth < 6) {
-            const cls = typeof (up as HTMLElement).className === 'string' ? (up as HTMLElement).className : '';
-            const ids = up.getAttribute('id') || '';
-            if (/(^|[\s_-])user([\s_-]|$)/i.test(cls + ' ' + ids)) {
-              userAncestor = true;
-              break;
-            }
-            up = up.parentElement;
-            depth++;
-          }
-          return { count, visible, text, editable, role: el.getAttribute('role'), userAncestor };
+          return { count, visible };
         },
-        { s: sel, sl: slot }
+        { s: sel }
       );
 
       if (!probe || probe.count === -1) {
@@ -1166,30 +1804,6 @@ export async function validateSelectors(
       if (!probe.visible) {
         log('respins ' + slot + ' (invizibil): ' + sel);
         continue;
-      }
-      if (slot === 'response') {
-        if (probe.editable || probe.role === 'textbox') {
-          log('respins response (e căsuța de input): ' + sel);
-          continue;
-        }
-        if (probe.userAncestor) {
-          log('respins response (bulă de user): ' + sel);
-          continue;
-        }
-        const text = String(probe.text || '');
-        if (text.length < 8) {
-          log('respins response (fără text de răspuns): ' + sel);
-          continue;
-        }
-        const phrase = promoPhraseHit(text);
-        if (phrase) {
-          log('respins response (text promo „' + phrase + '”): ' + sel);
-          continue;
-        }
-        if (opts.echoText && echoContains(text, opts.echoText)) {
-          log('respins response (conține mesajul trimis): ' + sel);
-          continue;
-        }
       }
       if ((slot === 'newChat' || slot === 'stopButton') && NON_ACTION_RE.test(sel)) {
         log('respins ' + slot + ' (buton non-acțiune): ' + sel);
@@ -1617,7 +2231,12 @@ async function discoverForHealer(
   }
   try {
     const label = PROVIDER_LABELS[providerId] || providerId;
-    const discovered = await findSelectorsWithAI(page, label, [slot]);
+    const discovered = await findSelectorsWithAI(page, label, [slot], {
+      providerId,
+      echoText,
+      // conținutul de răspuns a fost verificat mai sus (hasResponseContentToFind)
+      replyPresent: slot === 'response' ? true : undefined
+    });
     if (!discovered) {
       dropStaleOverride(providerId, slot);
       return null;
@@ -1831,7 +2450,8 @@ export async function proactiveDiscover(
   try {
     const discovered = await findSelectorsWithAI(page, label, slots, {
       required: ['input'],
-      onboarding: true
+      onboarding: true,
+      providerId
     });
     if (!discovered) {
       discoveryFailed.add(providerId);

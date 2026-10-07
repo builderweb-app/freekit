@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.5.34",
+  "version": "2.5.35",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -198,6 +198,13 @@
           "type": "number",
           "default": 120,
           "markdownDescription": "Timeout (seconds, 5–300) for the AI selector analysis. After it expires, the AI fallback is abandoned, the stale locally learned selector (if any) is dropped, and the static selector from `selectors.json` is used again."
+        },
+        "freekit.responseTimeoutMs": {
+          "type": "number",
+          "default": 300000,
+          "minimum": 10000,
+          "maximum": 1800000,
+          "markdownDescription": "How long (milliseconds, 10000–1800000) to wait for one response from the web chat (ChatGPT/Claude/Gemini/DeepSeek/Mistral). Long answers that contain a whole file (e.g. a `test.ts`) can take several minutes, so the default is 300000 (5 minutes). At expiry Freekit still makes a last-chance read of the assistant bubble and returns it when it looks like a real answer; only when nothing usable is found does the `Timeout: no stable response … after Ns.` error appear."
         },
         "freekit.cdpPort": {
           "type": "number",

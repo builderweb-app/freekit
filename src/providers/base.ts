@@ -32,8 +32,34 @@ const log = (msg: string) => console.log('[Freekit]', msg);
 const HEAL_CHECKPOINTS = [4000, 9000, 20000, 40000];
 
 /** v0.8.0: bugetul total de așteptare + pragul de stabilitate a textului. */
-const HARD_TIMEOUT_MS = 150_000;
+/** v2.5.35 (bug #86): 150s era prea scurt pentru răspunsuri lungi (Gemini). */
+const DEFAULT_RESPONSE_TIMEOUT_MS = 300_000;
+const MIN_RESPONSE_TIMEOUT_MS = 10_000;
+const MAX_RESPONSE_TIMEOUT_MS = 1_800_000;
 const STABLE_MS = 2000;
+
+/**
+ * v2.5.35 (bug #86): bugetul de așteptare a unui răspuns, din setarea
+ * `freekit.responseTimeoutMs` (implicit 300s). Citit o dată per mesaj.
+ */
+export function responseTimeoutMs(): number {
+  try {
+    // require lazy — în teste Node modulul 'vscode' poate lipsi
+    const v = require('vscode') as typeof import('vscode');
+    const raw = Number(
+      v.workspace
+        .getConfiguration('freekit')
+        .get<number>('responseTimeoutMs', DEFAULT_RESPONSE_TIMEOUT_MS)
+    );
+    if (!Number.isFinite(raw)) return DEFAULT_RESPONSE_TIMEOUT_MS;
+    return Math.min(
+      MAX_RESPONSE_TIMEOUT_MS,
+      Math.max(MIN_RESPONSE_TIMEOUT_MS, Math.floor(raw))
+    );
+  } catch {
+    return DEFAULT_RESPONSE_TIMEOUT_MS;
+  }
+}
 
 /** v2.5.15 (bug #41): câte continuări „new chat" acceptăm per mesaj. */
 const MAX_MEMORY_FULL_RESTARTS = 3;
@@ -945,6 +971,9 @@ export async function sendAndWait(
   // v2.5.12 FIX (bug #36): true după ce am văzut un răspuns NOU (count crescut
   // sau text schimbat) — folosit de „rescue" ca să accepte și un răspuns identic.
   let sawNewResponse = false;
+  // v2.5.35 (bug #86): bugetul de așteptare din setări (implicit 300s), citit
+  // o dată per mesaj.
+  const hardTimeoutMs = responseTimeoutMs();
   let started = Date.now();
   // v2.5.15 (bug #41): textul trimis efectiv în chat (poate include prefixul de
   // handoff după o continuare) — gardele de ecou se raportează la el.
@@ -996,7 +1025,7 @@ export async function sendAndWait(
     // v2.5.15 (bug #41): bugetul de așteptare s-a consumat → RESCUE + scanul
     // final de erori. O continuare într-un chat nou (memory full) resetează
     // `started` și reia bucla.
-    if (Date.now() - started >= HARD_TIMEOUT_MS) {
+    if (Date.now() - started >= hardTimeoutMs) {
       // RESCUE: ultima șansă — extragere generică, ca să nu blocăm utilizatorul
       const rescuedRaw = await getLastResponseText(
         page,
@@ -1037,7 +1066,8 @@ export async function sendAndWait(
       if (pageError) throwProviderError(providerId, pageError, page);
 
       throw new Error(
-        'Timeout: no stable response from ' + label + ' after 150s.'
+        'Timeout: no stable response from ' + label + ' after ' +
+          Math.round(hardTimeoutMs / 1000) + 's.'
       );
     }
 
@@ -1092,7 +1122,7 @@ export async function sendAndWait(
 
     // v2.5.1: la fiecare checkpoint verificăm și erorile afișate în pagină —
     // „out of free messages” / rate limit / CAPTCHA opresc imediat, cu mesaj
-    // clar, în loc să așteptăm 150s pentru un timeout sec.
+    // clar, în loc să așteptăm tot bugetul de așteptare pentru un timeout sec.
     if (healIndex > lastErrorCheckpoint) {
       lastErrorCheckpoint = healIndex;
       const pageError = await detectProviderErrorOnPage(page, providerId, sentText);

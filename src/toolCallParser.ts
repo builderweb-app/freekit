@@ -124,28 +124,216 @@ export function largeOutputNotice(chars: number): string {
   );
 }
 
+/* =========================================================================
+ * v2.5.56 (FIX 1/2) — retry prompt SPECIFIC per tip de unealtă
+ *
+ * Formatul cerut depinde de unealta pe care modelul încerca s-o apeleze:
+ *  - write_file / edit_file / write_files → formatul marker (conținut RAW);
+ *  - orice altă unealtă (read_file, list_files, run_command, git_*, …) →
+ *    JSON single-line {"action":"NAME","args":{…}}.
+ * Înainte, TOATE reluările cereau formatul marker de write_file — un model
+ * care încerca un `read_file` primea instrucțiuni greșite și eșua toate
+ * cele 3 reluări (log 2026-10-08 15:36).
+ *
+ * Escaladare (FIX 2), după numărul reluării:
+ *  1. promptul specific tipului;
+ *  2. același prompt + exemplul concret al task-ului curent (calea detectată);
+ *  3. FINAL ATTEMPT — un singur format, nimic altceva.
+ * ========================================================================= */
+
+export type MalformedIntent = 'read' | 'write' | 'unknown';
+
+export interface MalformedAttempt {
+  intent: MalformedIntent;
+  /** Numele uneltei detectat în textul parțial, dacă există. */
+  tool?: string;
+  /** Prima cale detectată (`"path":"…"` / `PATH: …`), dacă există. */
+  path?: string;
+}
+
+/** Uneltele cu conținut liber — singurele care folosesc formatul marker. */
+const WRITE_INTENT_TOOLS = new Set(['write_file', 'edit_file', 'write_files']);
+
+/** Uneltele care așteaptă JSON single-line (restul, plus orice `git_*`). */
+const JSON_INTENT_TOOLS = new Set([
+  'read_file',
+  'read_files',
+  'list_files',
+  'search_files',
+  'search_semantic',
+  'run_command',
+  'run_npm',
+  'copy_file',
+  'delete_file',
+  'delete_directory',
+  'project_info',
+  'open_workspace',
+  'screenshot',
+  'compare_visual'
+]);
+
+/** Numele uneltei din textul parțial (`"action":"X"` sau `ACTION: X`). */
+function extractAttemptedTool(text: string): string | undefined {
+  const json = /["'](?:action|tool)["']\s*:\s*["']([A-Za-z_][A-Za-z0-9_]*)["']/.exec(text);
+  if (json) return json[1].toLowerCase();
+  const marker = /^[ \t]*(?:ACTION|TOOL)[ \t]*:[ \t]*([A-Za-z_][A-Za-z0-9_]*)/im.exec(text);
+  return marker ? marker[1].toLowerCase() : undefined;
+}
+
+/** Prima cale din textul parțial (`"path"`/`"paths"` JSON sau `PATH:` marker). */
+function extractAttemptedPath(text: string): string | undefined {
+  const jsonPath = /["'](?:path|file|filePath)["']\s*:\s*["']([^"'\r\n]{1,400})["']/i.exec(text);
+  if (jsonPath) return jsonPath[1].trim();
+  const jsonPaths = /["']paths["']\s*:\s*\[\s*["']([^"'\r\n]{1,400})["']/i.exec(text);
+  if (jsonPaths) return jsonPaths[1].trim();
+  const marker = /^[ \t]*PATH[ \t]*:[ \t]*(.+)$/im.exec(text);
+  return marker ? marker[1].trim() : undefined;
+}
+
+/** Unealta e în formatul JSON single-line? (orice în afară de write ops) */
+function isJsonFormatTool(tool: string | undefined): tool is string {
+  return !!tool && !WRITE_INTENT_TOOLS.has(tool) &&
+    (JSON_INTENT_TOOLS.has(tool) || tool.startsWith('git_'));
+}
+
 /**
- * v2.5.3 FIX 7: nudge trimis modelului când răspunsul conține `TOOL:` /
- * `ACTION:` dar nu poate fi parsat (ex: DeepSeek ecouază promptul și strivesc
- * conținutul pe o singură linie). Cerem explicit formatul marker cu conținut
- * în code fence.
- * v2.5.26 (bug #51): nudge-ul folosește același vocabular ca promptul nou
- * („action"), altfel cuvântul „tool" reintroduce refuzul pe care îl reparăm.
+ * v2.5.56 (FIX 1): clasifică încercarea malformată — ce format trebuie cerut
+ * la reluare (read = JSON single-line, write = marker), ce unealtă încerca
+ * modelul și spre ce cale se îndrepta.
  */
-export const MALFORMED_TOOL_CALL_NUDGE = `SYSTEM NOTICE — MALFORMED ACTION CALL.
+export function classifyMalformedAttempt(text: string): MalformedAttempt {
+  const src = String(text ?? '');
+  const tool = extractAttemptedTool(src);
+  const path = extractAttemptedPath(src) || firstPathInText(src);
+  if (tool && WRITE_INTENT_TOOLS.has(tool)) {
+    return { intent: 'write', tool, path };
+  }
+  if (isJsonFormatTool(tool)) {
+    return { intent: 'read', tool, path };
+  }
+  // Fără nume de unealtă (sau nume necunoscut): deducem din formă.
+  // Conținutul multiline (fence sau 3+ rânduri) poate fi doar o scriere.
+  if (src.includes('```') || src.split(/\r?\n/).length >= 3) {
+    return { intent: 'write', tool, path };
+  }
+  if (path || /\b(?:read|cit)/i.test(src)) {
+    return { intent: 'read', tool, path };
+  }
+  return { intent: 'unknown', tool, path };
+}
 
-Your previous response was malformed. Try again.
-Use ACTION: write_file with content in a code fence, one item per line:
+/** Prima cale dintr-un mesaj obișnuit (exemplul concret din reluarea 2). */
+function firstPathInText(text: string): string | undefined {
+  const m = /(?:^|[\s"'`([])((?:[\w.@~+-]+\/)+[\w.@~+-]+\.[A-Za-z0-9]{1,10})/.exec(
+    String(text ?? '')
+  );
+  return m ? m[1] : undefined;
+}
 
-ACTION: write_file
-PATH: <relative path>
-CONTENT:
-\`\`\`text
-<file content — one line per line>
-\`\`\`
-END_CONTENT
+/** Escape pentru un exemplu JSON inline. */
+function jsonEscape(value: string): string {
+  return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
 
-Do NOT echo the user message. Do NOT explain. Reply with EXACTLY ONE action and nothing else.`;
+/** Argumentele exemplului concret pentru o unealtă JSON. */
+function exampleArgs(tool: string, path?: string): string {
+  if (!path) return '{...}';
+  if (tool === 'list_files') return '{"dir":"' + jsonEscape(path) + '"}';
+  if (tool === 'search_files' || tool === 'search_semantic') return '{...}';
+  return '{"path":"' + jsonEscape(path) + '"}';
+}
+
+/** Exemplul de format pentru unealta detectată (JSON sau marker). */
+function jsonExampleCall(tool: string | undefined, path?: string): string {
+  const name = isJsonFormatTool(tool) ? tool : 'read_file';
+  return '{"action":"' + name + '","args":' + exampleArgs(name, path) + '}';
+}
+
+/** Blocul marker al unealtei de scriere detectate (conținut RAW în fence). */
+function writeMarkerTemplate(tool: string | undefined, path: string): string {
+  const name = tool && WRITE_INTENT_TOOLS.has(tool) ? tool : 'write_file';
+  if (name === 'edit_file') {
+    return (
+      'ACTION: edit_file\n' +
+      'PATH: ' + path + '\n' +
+      'OLD_TEXT:\n```text\n<exact old text — copy it from the file>\n```\nEND_OLD_TEXT\n' +
+      'NEW_TEXT:\n```text\n<new text>\n```\nEND_NEW_TEXT'
+    );
+  }
+  if (name === 'write_files') {
+    return (
+      'ACTION: write_files\n' +
+      '---FILE---\n' +
+      'PATH: ' + path + '\n' +
+      'CONTENT:\n```text\n<raw content, no escaping>\n```\nEND_CONTENT'
+    );
+  }
+  return (
+    'ACTION: write_file\n' +
+    'PATH: ' + path + '\n' +
+    'CONTENT:\n```text\n<raw content, no escaping>\n```\nEND_CONTENT'
+  );
+}
+
+/** Promptul de reluare pentru uneltele JSON (read ops). */
+function readJsonNudge(attempt: MalformedAttempt): string {
+  const name = isJsonFormatTool(attempt.tool) ? attempt.tool : '<NAME>';
+  return (
+    'Your previous reply was not a valid tool call. For this action, use SINGLE-LINE JSON (no marker format, no code fence, no explanation):\n\n' +
+    '{"action":"' + name + '","args":{...}}\n\n' +
+    'Example: {"action":"read_file","args":{"path":"src/foo.ts"}}\n\n' +
+    'Reply with ONE JSON line only.'
+  );
+}
+
+/** Promptul de reluare pentru uneltele de scriere (format marker). */
+function writeMarkerNudge(attempt: MalformedAttempt): string {
+  return (
+    'Your previous reply was not a valid tool call. For file writes use the MARKER format exactly:\n\n' +
+    writeMarkerTemplate(attempt.tool, '<path>') +
+    '\n\nONE action. No explanation before it. No code fence around the whole reply.'
+  );
+}
+
+/** Reluarea 3 (FIX 2): un singur format, nimic altceva. */
+function finalAttemptNudge(attempt: MalformedAttempt, path?: string): string {
+  if (attempt.intent === 'write') {
+    return (
+      'Your previous reply was not a valid tool call. FINAL ATTEMPT. Reply with THIS format exactly and nothing else:\n\n' +
+      writeMarkerTemplate(attempt.tool, path || '<path>')
+    );
+  }
+  return (
+    'Your previous reply was not a valid tool call. FINAL ATTEMPT. Reply with EXACTLY this format: ' +
+    jsonExampleCall(attempt.tool, path) +
+    ' Nothing else.'
+  );
+}
+
+/**
+ * v2.5.56 (FIX 1/2): mesajul de reluare pentru încercarea `retry` (1..3) a
+ * unui tool call malformat. `taskText` = mesajul utilizatorului (pentru
+ * exemplul concret din reluarea 2, când textul malformat nu conține calea).
+ */
+export function malformedRetryNudge(
+  attempt: MalformedAttempt,
+  retry: number,
+  taskText = ''
+): string {
+  const path = attempt.path || firstPathInText(taskText);
+  if (retry >= 3) return finalAttemptNudge(attempt, path);
+  const base =
+    attempt.intent === 'write' ? writeMarkerNudge(attempt) : readJsonNudge(attempt);
+  if (retry < 2) return base;
+  // Reluarea 2 (FIX 2): același prompt + exemplul concret al task-ului curent.
+  return (
+    base +
+    '\n\nConcrete example for the current task:\n' +
+    (attempt.intent === 'write'
+      ? '\n' + writeMarkerTemplate(attempt.tool, path || '<path>')
+      : jsonExampleCall(attempt.tool, path))
+  );
+}
 
 /** Început de obiect JSON cu cheia „tool” (acceptă și spații în plus). */
 const TOOL_MARKER_HEAD_RE = /^\{\s*["']?tool["']?\s*:/;

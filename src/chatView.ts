@@ -31,7 +31,7 @@ import {
   recommendModels,
   tierTarget
 } from './hardware';
-import { AIProvider } from './providers/types';
+import { AIProvider, SendOptions } from './providers/types';
 import { applyModel, browserModelKey, listModels, modelLabel } from './modelSelector';
 import { configInfo, selectors } from './selectors';
 import { BrowserManager } from './browser';
@@ -77,13 +77,21 @@ import {
 import {
   LARGE_OUTPUT_CHARS,
   MALFORMED_TOOL_CALL_ERROR,
-  MALFORMED_TOOL_CALL_NUDGE,
   MAX_MALFORMED_RETRIES,
+  classifyMalformedAttempt,
   drainParserLogs,
   largeOutputNotice,
   looksLikeToolCallAttempt,
+  malformedRetryNudge,
   parseToolCallText
 } from './toolCallParser';
+import {
+  PROVIDER_SWITCH_ORDER,
+  nextProviderInOrder,
+  readProviderHealth,
+  recordProviderMalformed,
+  recordProviderSuccess
+} from './providerHealth';
 import {
   buildCircuitBreakerHint,
   buildCircuitBreakerMessage,
@@ -1951,6 +1959,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // primul mesaj (Auto încearcă pe rând până reușește).
       const selectedId = this.currentProviderId();
       const isAuto = selectedId === 'auto';
+      // v2.5.56 (FIX 4): fiabilitatea providerilor din globalStorage — la task
+      // nou, o rată de eșec malformed peste 20% declanșează sugestia de switch.
+      this.reportProviderHealth(selectedId, isAuto);
       let provider: AIProvider | undefined;
       let page: Page | undefined;
 
@@ -2194,6 +2205,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         log('first AI reply length: ' + aiReply.length);
       }
       if (!provider) throw new Error('No provider available.');
+      /** v2.5.56 (FIX 3): providerii folosiți deja pe ACEST mesaj (auto-switch). */
+      const attemptedProviders = new Set<string>([provider.name]);
 
       const approve: ApprovalFn = this.makeApproveCallback();
 
@@ -2448,12 +2461,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             }
             if (malformedRetries < MAX_MALFORMED_RETRIES) {
               malformedRetries++;
+              // v2.5.56 (FIX 1/2/5): prompt SPECIFIC tipului de unealtă
+              // (read = JSON single-line, write = marker) + log detaliat.
+              const malformedAttempt = classifyMalformedAttempt(aiReply);
               log(
-                'malformed tool call — auto-retry ' +
+                'malformed tool call — provider=' +
+                  provider.name +
+                  ', retry=' +
                   malformedRetries +
                   '/' +
-                  MAX_MALFORMED_RETRIES
+                  MAX_MALFORMED_RETRIES +
+                  ', intent=' +
+                  malformedAttempt.intent
               );
+              log(
+                'malformed first 200 chars: ' +
+                  aiReply.slice(0, 200).replace(/\r?\n/g, ' ')
+              );
+              const retryFormat =
+                malformedAttempt.intent === 'write' ? 'marker' : 'JSON';
               this.post(
                 'heal',
                 '🔁 Auto-retry ' +
@@ -2464,7 +2490,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     ? ': the output was too large (' +
                       aiReply.length +
                       ' chars) — asking it to split the file into smaller write_file calls.'
-                    : ': the tool call was malformed — asking again for the marker format with the content in a code fence.')
+                    : ': the tool call was malformed (' +
+                      malformedAttempt.intent +
+                      ') — asking again in the ' +
+                      retryFormat +
+                      ' format.')
               );
               this.postVerboseStep({
                 kind: 'decision',
@@ -2478,19 +2508,48 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                   ? 'Output too large (' +
                     aiReply.length +
                     ' chars) — asking the model to split the file into smaller write_file calls.'
-                  : 'Tool call malformed — asking again for the marker format with the content in a code fence.',
+                  : 'Tool call malformed (intent: ' +
+                    malformedAttempt.intent +
+                    ') — asking again in the ' +
+                    retryFormat +
+                    ' format.',
                 status: 'done'
               });
+              const retryNudge = malformedRetryNudge(
+                malformedAttempt,
+                malformedRetries,
+                userText
+              );
               aiReply = await provider.send(
                 page,
                 tooLarge
-                  ? largeOutputNotice(aiReply.length) +
-                    '\n\n' +
-                    MALFORMED_TOOL_CALL_NUDGE
-                  : MALFORMED_TOOL_CALL_NUDGE,
+                  ? largeOutputNotice(aiReply.length) + '\n\n' + retryNudge
+                  : retryNudge,
                 signal,
                 followUpOpts
               );
+              continue;
+            }
+            // v2.5.56 (FIX 4): eșecul de protocol intră în statisticile de
+            // fiabilitate ale providerului (globalStorage).
+            recordProviderMalformed(this.globalStorageRoot, provider.name);
+            // v2.5.56 (FIX 3): în loc să abandonăm după reluări (4 minute în
+            // logul din 8 Oct), trecem automat pe următorul provider din
+            // ordinea de rezervă, ducem handoff-ul complet și reluăm task-ul.
+            const autoSwitched = await this.tryAutoSwitchProvider(
+              provider.name,
+              attemptedProviders,
+              signal,
+              followUpOpts
+            );
+            if (autoSwitched) {
+              provider = autoSwitched.provider;
+              page = autoSwitched.page;
+              attemptedProviders.add(provider.name);
+              malformedRetries = 0;
+              textRetries = 0;
+              refusalRetries = 0;
+              aiReply = autoSwitched.reply;
               continue;
             }
             log(
@@ -3165,6 +3224,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.appendHistory('assistant', text);
           this.post('reply', text);
         } else {
+          // v2.5.56 (FIX 4): mesaj încheiat cu răspuns final — succes pentru
+          // providerul care l-a servit (statisticile de fiabilitate).
+          recordProviderSuccess(this.globalStorageRoot, provider.name);
           // v2.5.53 (FIX 8): dacă verificarea e încă pe roșu, NU prezentăm
           // „gata, funcționează" al modelului ca adevăr — spunem exact ce e.
           const stillRed = this.autoVerifyEnabled(root) && this.verifyRepairs > 0 && !!lvf;
@@ -3658,6 +3720,107 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       page = await this.browser.ensureOpen(host);
     }
     return { provider, page };
+  }
+
+  /**
+   * v2.5.56 (FIX 4): fiabilitatea providerilor — la un task nou, citește
+   * statisticile din globalStorage (provider-reliability.json) și, dacă rata
+   * de eșecuri „malformed" depășește 20%, sugerează switch-ul (log
+   * `[provider-health] <name>: <N>% malformed`).
+   */
+  private reportProviderHealth(selectedId: string, isAuto: boolean): void {
+    try {
+      if (isAuto || selectedId === 'ollama') return;
+      const entry = readProviderHealth(this.globalStorageRoot)[selectedId];
+      if (!entry) return;
+      const total = entry.malformed + entry.success;
+      if (total <= 0) return;
+      const rate = entry.malformed / total;
+      logLine(
+        'provider-health',
+        selectedId + ': ' + Math.round(rate * 100) + '% malformed'
+      );
+      if (rate <= 0.2) return;
+      const label = PROVIDER_LABELS[selectedId] ?? selectedId;
+      const next = nextProviderInOrder(selectedId);
+      this.post(
+        'notice',
+        '⚠️ ' + label + ': ' + Math.round(rate * 100) +
+          '% of tasks hit malformed tool calls — consider switching to ' +
+          (PROVIDER_LABELS[next] ?? next) + ' (freekit.provider).'
+      );
+    } catch (e: any) {
+      log('provider health check failed: ' + (e?.message ?? String(e)));
+    }
+  }
+
+  /**
+   * v2.5.56 (FIX 3): 3 tool call-uri malformate consecutive pe ACELAȘI mesaj
+   * → trece automat pe următorul provider din `PROVIDER_SWITCH_ORDER`, duce
+   * handoff-ul COMPLET (task + pași + fișiere, ca la schimbarea manuală de
+   * provider) și trimite mesajul de continuare. Întoarce providerul nou +
+   * răspunsul lui, sau `null` când niciun candidat nu e disponibil (apelantul
+   * afișează eroarea de malformed).
+   */
+  private async tryAutoSwitchProvider(
+    currentId: string,
+    attempted: Set<string>,
+    signal: AbortSignal,
+    sendOpts: SendOptions
+  ): Promise<{ provider: AIProvider; page?: Page; reply: string } | null> {
+    for (const id of PROVIDER_SWITCH_ORDER) {
+      if (attempted.has(id) || id === currentId) continue;
+      const label = PROVIDER_LABELS[id] ?? id;
+      try {
+        const prep = await this.prepareProvider(id);
+        const prov = prep.provider;
+        if (this.abortRequested) throw new Error('__ABORTED__');
+        // handoff-ul se construiește ÎNAINTE de deschiderea chatului nou:
+        // openOrResumeChat poate reseta memoria per-chat (fișiere citite /
+        // acțiuni), iar handoff-ul are nevoie de ea.
+        const handoff = this.buildChatHandoff(label, 'cross-provider');
+        // chat NOU pe providerul nou (ca la schimbarea manuală de provider)
+        const openHandoff = await this.openOrResumeChat(
+          prov,
+          prep.page,
+          label,
+          signal
+        );
+        await this.runWithCaptchaAssist(label, prep.page, signal);
+        await this.applySelectedModel(id, prep.page, label);
+        this.active = { provider: prov, page: prep.page };
+        const fromLabel = PROVIDER_LABELS[currentId] ?? currentId;
+        log('auto-switch: ' + currentId + ' -> ' + id + ' (3x malformed)');
+        this.post(
+          'heal',
+          '🔀 Auto-switch: ' + fromLabel + ' → ' + label +
+            ' (3 malformed tool calls on the same message) — sending the full handoff and continuing here.'
+        );
+        this.postVerboseStep({
+          kind: 'decision',
+          title: 'Auto-switch ' + fromLabel + ' → ' + label,
+          text: '3 malformed tool calls in a row — switching provider and resuming the task with the full handoff.',
+          status: 'done'
+        });
+        attempted.add(id);
+        const context = openHandoff || handoff;
+        const resume =
+          (context ? context + '\n\n' : '') +
+          'USER MESSAGE:\nContinue the original task from where it left off — send the next action (ONE tool call), nothing else.';
+        const urlBeforeSend = prep.page?.url();
+        const reply = await prov.send(prep.page, resume, signal, sendOpts);
+        await this.rememberBrowserChat(prov, prep.page, urlBeforeSend);
+        log('auto-switch: ' + label + ' answered (' + reply.length + ' chars)');
+        return { provider: prov, page: prep.page, reply };
+      } catch (e: any) {
+        if (this.abortRequested || e?.message === '__ABORTED__') throw e;
+        attempted.add(id);
+        log(
+          'auto-switch: ' + id + ' unavailable — ' + (e?.message ?? String(e))
+        );
+      }
+    }
+    return null;
   }
 
   /* ======================================================================

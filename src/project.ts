@@ -260,3 +260,124 @@ export async function runProgram(
     };
   }
 }
+
+
+/* =========================================================================
+ * v2.5.55 (FIX 5) — WordPress în context
+ * Raportul din 8 Oct 2026: utilizatorul a întrebat unde e pluginul WordPress
+ * „seo-orase-pro"; AI-ul nu știa că a doua rădăcină a workspace-ului
+ * (Z:\home\bitwanderer\web\identitatebrand.ro, prin RaiDrive) conține un site
+ * WordPress, a căutat cu `find` (comandă Unix) și s-a oprit după 3 eșecuri.
+ * Aici detectăm instalațiile WordPress DIN RĂDĂCINILE WORKSPACE-ULUI (nu
+ * scanăm tot discul) și spunem explicit unde stau pluginurile și temele.
+ * ========================================================================= */
+
+export interface WordPressSite {
+  /** Rădăcina deschisă în workspace (folderul care conține site-ul). */
+  root: string;
+  /** Calea ABSOLUTĂ a folderului `wp-content`. */
+  wpContent: string;
+  /** Subfolderele din `wp-content/plugins` (nume de pluginuri). */
+  plugins: string[];
+  /** Subfolderele din `wp-content/themes` (nume de teme). */
+  themes: string[];
+}
+
+/** Folderele în care poate sta `wp-content` (hosting partajat: `public_html`). */
+const WP_PARENTS = ['', 'public_html', 'htdocs', 'www', 'httpdocs', 'public', 'web'];
+/** Câte nume listăm per folder (un site real poate avea sute de pluginuri). */
+const WP_MAX_LISTED = 40;
+
+/** Subfolderele unui director (nume simple, sortate, plafonate). */
+async function subFolders(dir: string): Promise<string[]> {
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    return entries
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .sort((a, b) => a.localeCompare(b))
+      .slice(0, WP_MAX_LISTED);
+  } catch {
+    return [];
+  }
+}
+
+/** v2.5.55 (FIX 5): instalațiile WordPress găsite în rădăcinile date. */
+export async function detectWordPressSites(roots: string[]): Promise<WordPressSite[]> {
+  const found: WordPressSite[] = [];
+  const seen = new Set<string>();
+  for (const root of roots) {
+    if (!root) continue;
+    for (const parent of WP_PARENTS) {
+      const dir = parent ? path.join(root, parent, 'wp-content') : path.join(root, 'wp-content');
+      if (!(await exists(dir))) continue;
+      const key = dir.toLowerCase();
+      if (seen.has(key)) break;
+      seen.add(key);
+      found.push({
+        root,
+        wpContent: dir,
+        plugins: await subFolders(path.join(dir, 'plugins')),
+        themes: await subFolders(path.join(dir, 'themes'))
+      });
+      break;
+    }
+  }
+  return found;
+}
+
+/** Text scurt cu instalațiile detectate (o linie per `wp-content`). */
+export function formatWordPressSites(sites: WordPressSite[]): string {
+  const lines: string[] = [];
+  for (const s of sites) {
+    lines.push('- ' + s.wpContent);
+    if (s.plugins.length) {
+      lines.push(
+        '  plugins/: ' + s.plugins.join(', ') + (s.plugins.length >= WP_MAX_LISTED ? ', …' : '')
+      );
+    }
+    if (s.themes.length) lines.push('  themes/: ' + s.themes.join(', '));
+  }
+  return lines.join('\n');
+}
+
+/** Utilizatorul vorbește despre WordPress / pluginuri / teme? */
+export function looksLikeWordPressQuestion(text: string): boolean {
+  return /\b(?:wordpress|wp-content|wp-admin|wp-config|woocommerce|plugin\w*|theme\w*|tem[ăa]|teme)\b/i.test(
+    String(text ?? '')
+  );
+}
+
+/**
+ * v2.5.55 (FIX 5): blocul de context WordPress adăugat la prompt. Spune unde
+ * sunt pluginurile/temele ȘI cum se caută acolo (cale absolută — `search_files`
+ * acoperă doar rădăcina primară). Fără o instalație detectată, cerem calea
+ * utilizatorului în loc să lăsăm modelul să scaneze tot discul.
+ */
+export function wordpressContextHint(
+  sites: WordPressSite[],
+  roots: string[]
+): string {
+  const parts: string[] = [
+    'WORDPRESS CONTEXT (the user asked about WordPress).',
+    'WordPress structure: wp-content/plugins/ (one folder per plugin), wp-content/themes/ (one folder per theme).'
+  ];
+  if (sites.length) {
+    parts.push(
+      'WordPress detected in this workspace:\n' + formatWordPressSites(sites) + '\n' +
+        'Search INSIDE those folders — never scan the whole drive. `search_files` and ' +
+        'relative paths only cover the primary root, so use the ABSOLUTE path for every ' +
+        'other workspace folder, e.g.:\n' +
+        '{"action":"list_files","args":{"dir":"' + sites[0].wpContent + '\\plugins"}}\n' +
+        '{"action":"run_command","args":{"command":"dir /s /b \\"' +
+        sites[0].wpContent + '\\plugins\\*<name>*\\""}}'
+    );
+  } else {
+    parts.push(
+      'No wp-content folder was found in the workspace roots' +
+        (roots.length > 1 ? ' (checked ' + roots.length + ' folders)' : '') +
+        '. If the site lives elsewhere, ask the user for its path — do NOT search the whole drive.'
+    );
+  }
+  return parts.join('\n');
+}

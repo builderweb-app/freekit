@@ -7,8 +7,18 @@
  * contorul (e progres real); la 3 eșecuri consecutive bucla se oprește.
  * ========================================================================= */
 
+import { findUnixCommands, unixToWindowsLines } from './unixTranslate';
+
 /** Câte eșecuri consecutive ale aceluiași tool opresc bucla agentică. */
 export const CIRCUIT_BREAKER_THRESHOLD = 3;
+
+/**
+ * v2.5.55 (FIX 3): la prag NU mai oprim direct. Îi trimitem modelului ultima
+ * eroare + echivalentele Windows și îi mai dăm CIRCUIT_BREAKER_GRACE eșecuri
+ * consecutive. Raportul din 8 Oct 2026: 3 × „'find' is not recognized" au oprit
+ * task-ul înainte ca modelul să apuce să încerce varianta Windows.
+ */
+export const CIRCUIT_BREAKER_GRACE = 3;
 
 /** Rezultatul înregistrării unui tool call. */
 export interface CircuitBreakerOutcome {
@@ -16,6 +26,8 @@ export interface CircuitBreakerOutcome {
   consecutiveFailures: number;
   /** true exact la al 2-lea eșec consecutiv (log de transparență). */
   warn: boolean;
+  /** true exact la prag, o singură dată — mesajul de deblocare (bucla continuă). */
+  hint: boolean;
   /** true când s-a atins pragul — apelantul oprește bucla agentică. */
   triggered: boolean;
 }
@@ -25,6 +37,8 @@ export interface CircuitBreakerOutcome {
 export class CircuitBreaker {
   private consecutiveFailures = 0;
   private lastFailedTool = '';
+  /** v2.5.55 (FIX 3): hint-ul de la prag a fost deja trimis (nu îl repetăm). */
+  private hinted = false;
 
   /** Înregistrează rezultatul unui tool call:
    *  succes ⇒ reset (chiar dacă e alt tool sau același);
@@ -34,18 +48,26 @@ export class CircuitBreaker {
     if (ok) {
       this.consecutiveFailures = 0;
       this.lastFailedTool = '';
-      return { consecutiveFailures: 0, warn: false, triggered: false };
+      this.hinted = false;
+      return { consecutiveFailures: 0, warn: false, hint: false, triggered: false };
     }
     if (toolName === this.lastFailedTool) {
       this.consecutiveFailures++;
     } else {
       this.consecutiveFailures = 1;
       this.lastFailedTool = toolName;
+      this.hinted = false;
     }
+    const hint =
+      this.consecutiveFailures === CIRCUIT_BREAKER_THRESHOLD && !this.hinted;
+    if (hint) this.hinted = true;
     return {
       consecutiveFailures: this.consecutiveFailures,
       warn: this.consecutiveFailures === 2,
-      triggered: this.consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD
+      hint,
+      // v2.5.55: pragul de oprire se atinge abia după perioada de grație
+      triggered:
+        this.consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD + CIRCUIT_BREAKER_GRACE
     };
   }
 }
@@ -260,6 +282,55 @@ export class EditLoopDetector {
   }
 }
 
+/**
+ * v2.5.55 (FIX 3): mesajul trimis MODELULUI (nu utilizatorului) la primul prag
+ * de eșecuri consecutive — în loc să oprim bucla, îi spunem ce anume a eșuat de
+ * 3 ori la rând și cum se scrie comanda corect pe Windows. Dacă nu se conformează
+ * în CIRCUIT_BREAKER_GRACE pași, bucla se oprește (buildCircuitBreakerMessage).
+ */
+export function buildCircuitBreakerHint(
+  toolName: string,
+  error: string | undefined,
+  failures: number,
+  command = ''
+): string {
+  const lastError = String(error ?? 'unknown error').slice(0, 500);
+  const parts: string[] = [
+    '⚠️ STOP — the SAME action (' + toolName + ') failed ' + failures +
+      ' times in a row. Do NOT repeat it: change the APPROACH.',
+    'Last error:\n```\n' + lastError + '\n```'
+  ];
+  // Când eșecul vine dintr-o comandă Unix (sau de la o comandă inexistentă),
+  // dăm tabelul de echivalențe Windows — cauza reală din raportul de bug.
+  const unixFound: string[] = [];
+  if (process.platform === 'win32' && toolName === 'run_command') {
+    for (const name of [
+      ...findUnixCommands(command),
+      ...findUnixCommands(lastError)
+    ]) {
+      if (unixFound.indexOf(name) < 0) unixFound.push(name);
+    }
+  }
+  if (unixFound.length || toolName === 'run_command') {
+    const list = unixFound.length
+      ? unixFound
+      : ['find', 'grep', 'ls', 'pwd', 'cat', 'rm'];
+    parts.push(
+      'This is a WINDOWS environment (win32). Unix commands (' +
+        list.join(', ') +
+        ') do NOT work in cmd/PowerShell. Use the Windows equivalents:\n' +
+        unixToWindowsLines(list) +
+        '\nOr use the built-in tools: search_files(pattern), list_files(dir), read_file(path).'
+    );
+  }
+  parts.push(
+    'You have ' + CIRCUIT_BREAKER_GRACE +
+      ' more attempts with this tool. After that the loop stops and you must reply with PLAIN TEXT.\n' +
+      'If the command does not exist on this machine, do NOT retry it — use the equivalent above.'
+  );
+  return parts.join('\n\n');
+}
+
 /** Mesajul clar afișat în chat când circuit breaker-ul se declanșează:
  *  numele tool-ului, ultima eroare (max 500 de caractere) și 3 sugestii. */
 export function buildCircuitBreakerMessage(
@@ -270,14 +341,20 @@ export function buildCircuitBreakerMessage(
   return (
     '⛔ **Stopped — the AI is stuck.**\n\n' +
     'The tool `' + toolName + '` failed **' +
+    (CIRCUIT_BREAKER_THRESHOLD + CIRCUIT_BREAKER_GRACE) +
+    ' times in a row** (the AI got a recovery hint after ' +
     CIRCUIT_BREAKER_THRESHOLD +
-    ' times in a row**.\n\n' +
+    ' and did not use it).\n\n' +
     '**Last error:**\n' +
     '```\n' + lastError + '\n```\n\n' +
     '**Try:**\n' +
     '- Break the task into smaller steps (one file at a time)\n' +
     '- Switch to a different provider (⋯ → model chip)\n' +
-    '- Check that the file paths exist and are writable'
+    '- Check that the file paths exist and are writable' +
+    (process.platform === 'win32' && /not recognized|nu este recunoscut/i.test(lastError)
+      ? '\n- The command does not exist on Windows — ask for the Windows equivalent ' +
+        '(find → dir /s /b, grep → findstr, ls → dir, pwd → cd, cat → type)'
+      : '')
   );
 }
 

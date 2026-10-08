@@ -84,8 +84,10 @@ import {
   parseToolCallText
 } from './toolCallParser';
 import {
+  buildCircuitBreakerHint,
   buildCircuitBreakerMessage,
   buildLoopCircuitBreakerMessage,
+  CIRCUIT_BREAKER_GRACE,
   CIRCUIT_BREAKER_THRESHOLD,
   CircuitBreaker,
   EDIT_TOOLS,
@@ -106,7 +108,14 @@ import {
 import { drainAliasLogs, stripTsAliasesInText, toAiPath } from './tsAlias';
 import { mcp } from './mcp/manager';
 import { Attachment, describePath, prepareAttachments } from './attachments';
-import { detectProject, formatProjectInfo } from './project';
+import {
+  WordPressSite,
+  detectProject,
+  detectWordPressSites,
+  formatProjectInfo,
+  looksLikeWordPressQuestion,
+  wordpressContextHint
+} from './project';
 import { initLogChannel, logLine } from './log';
 import {
   detectCaptcha,
@@ -412,22 +421,89 @@ interface StoredMessage {
 }
 
 /**
- * Generează un arbore de fișiere al proiectului (max `maxDepth` niveluri,
- * max 300 intrări). Trimis AI-ului ca context, ca să știe ce fișiere
- * există fără să le citească unul câte unul.
+ * v2.5.55 (FIX 1): TOATE rădăcinile din `vscode.workspace.workspaceFolders`, nu
+ * doar prima. Un workspace multi-root (proiect Astro local + site WordPress pe
+ * Z:\ prin RaiDrive) avea a doua rădăcină complet invizibilă pentru AI, deci
+ * „caută pluginul seo-orase-pro" nu putea fi rezolvat niciodată (raportul din
+ * 8 Oct 2026: 3 comenzi Unix eșuate ⇒ circuit breaker ⇒ task oprit).
  */
-async function getProjectStructure(
+export function structureRoots(primary?: string): string[] {
+  const roots: string[] = [];
+  const seen = new Set<string>();
+  const push = (p?: string) => {
+    const value = String(p ?? '').trim();
+    if (!value) return;
+    const normalized = path.normalize(value);
+    const key = normalized.replace(/[\\/]+$/, '').toLowerCase();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    roots.push(normalized);
+  };
+  push(primary);
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    if (folder.uri.scheme === 'file') push(folder.uri.fsPath);
+  }
+  return roots;
+}
+
+/** Eticheta unei rădăcini pentru PROJECT STRUCTURE (tip + `primary`). */
+async function rootLabel(
   root: string,
-  maxDepth = 3
+  primary: boolean,
+  wp?: WordPressSite
 ): Promise<string> {
+  const parts: string[] = [];
+  if (wp) {
+    parts.push('WordPress');
+  } else {
+    try {
+      const info = await detectProject(root);
+      if (info.frameworks.length) {
+        parts.push(info.frameworks.slice(0, 3).join(', '));
+      } else if (info.type !== 'unknown') {
+        parts.push(info.language === 'typescript' ? 'node (typescript)' : info.type);
+      }
+      if (info.git) parts.push('git');
+    } catch {
+      /* rădăcină inaccesibilă — rămâne fără etichetă */
+    }
+  }
+  if (/^\\\\/.test(root)) parts.push('network path');
+  if (primary) parts.push('primary');
+  return parts.join(', ');
+}
+
+/**
+ * v2.5.55 (FIX 1/5): pentru fiecare instalație WordPress găsită, `wp-content` +
+ * numele pluginurilor/temelor — răspunsul direct la „unde e pluginul X?".
+ */
+function wordpressLayoutLines(sites: WordPressSite[]): string[] {
+  if (!sites.length) return [];
+  const lines: string[] = ['WORDPRESS (wp-content found in this workspace):'];
+  for (const site of sites) {
+    lines.push('- ' + site.wpContent);
+    if (site.plugins.length) lines.push('  plugins/: ' + site.plugins.join(', '));
+    if (site.themes.length) lines.push('  themes/: ' + site.themes.join(', '));
+  }
+  return lines;
+}
+
+/**
+ * Generează arborele de fișiere (max `maxDepth` niveluri, buget de intrări) al
+ * unei rădăcini. Trimis AI-ului ca context, ca să știe ce fișiere există fără
+ * să le citească unul câte unul.
+ */
+async function renderChildren(
+  root: string,
+  maxDepth: number,
+  maxEntries: number,
+  indent: string
+): Promise<string[]> {
   const lines: string[] = [];
   let count = 0;
 
-  const rootName = path.basename(root) || root;
-  lines.push(rootName + '/');
-
   async function walk(dir: string, depth: number, prefix: string) {
-    if (depth > maxDepth || count >= STRUCTURE_MAX_ENTRIES) return;
+    if (depth > maxDepth || count >= maxEntries) return;
 
     let entries: [string, vscode.FileType][];
     try {
@@ -452,7 +528,7 @@ async function getProjectStructure(
       });
 
     for (let i = 0; i < visible.length; i++) {
-      if (count >= STRUCTURE_MAX_ENTRIES) break;
+      if (count >= maxEntries) break;
       const [name, type] = visible[i];
       const isDir = type === vscode.FileType.Directory;
       const isLast = i === visible.length - 1;
@@ -472,11 +548,65 @@ async function getProjectStructure(
     }
   }
 
-  await walk(root, 1, '');
+  await walk(root, 1, indent);
 
-  if (count >= STRUCTURE_MAX_ENTRIES) {
-    lines.push('... (truncated at ' + STRUCTURE_MAX_ENTRIES + ' entries)');
+  if (count >= maxEntries) {
+    lines.push(indent + '... (truncated at ' + maxEntries + ' entries)');
   }
+  return lines;
+}
+
+/**
+ * v2.5.55 (FIX 1): structura proiectului pentru TOATE rădăcinile workspace-ului.
+ * Cu o singură rădăcină, textul rămâne cel de dinainte (doar numele + arborele).
+ * Cu mai multe, listăm fiecare rădăcină cu eticheta ei (tip + `primary`):
+ * rădăcina primară completă, celelalte mai superficial — pot sta pe rețea
+ * (RaiDrive: ~6 ms/fișier), deci bugetul lor e mai mic.
+ * Exportată pentru verificare (vezi și testarea din build).
+ */
+export async function getProjectStructure(
+  roots: string[],
+  wpSites: WordPressSite[] = [],
+  maxDepth = 3
+): Promise<string> {
+  const list = roots.length ? roots : [''];
+  if (list.length <= 1) {
+    const root = list[0];
+    const lines: string[] = [(path.basename(root) || root) + '/'];
+    for (const line of await renderChildren(root, maxDepth, STRUCTURE_MAX_ENTRIES, '')) {
+      lines.push(line);
+    }
+    for (const line of wordpressLayoutLines(wpSites)) lines.push(line);
+    return lines.join('\n');
+  }
+
+  const budget = Math.max(60, Math.floor(STRUCTURE_MAX_ENTRIES / list.length));
+  const lines: string[] = ['PROJECT STRUCTURE (multi-root):'];
+  for (let i = 0; i < list.length; i++) {
+    const root = list[i];
+    const primary = i === 0;
+    const last = i === list.length - 1;
+    const wp = wpSites.find((s) => s.root === root);
+    const label = await rootLabel(root, primary, wp);
+    lines.push(
+      (last ? '└── ' : '├── ') + (path.basename(root) || root) + '/' +
+        (label ? ' (' + label + ')' : '')
+    );
+    const children = await renderChildren(
+      root,
+      primary ? maxDepth : 2,
+      primary ? budget : Math.min(budget, 80),
+      last ? '    ' : '│   '
+    );
+    for (const line of children) lines.push(line);
+  }
+  lines.push('');
+  lines.push(
+    'NOTE: relative paths and search_files cover the PRIMARY root only. For the ' +
+      'other folders always use their ABSOLUTE path — full paths: ' +
+      list.join(' ; ')
+  );
+  for (const line of wordpressLayoutLines(wpSites)) lines.push(line);
   return lines.join('\n');
 }
 
@@ -1836,9 +1966,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       let page: Page | undefined;
 
       // FAZA D: auto-context — structura proiectului, trimisă la fiecare mesaj
+      // v2.5.55 (FIX 1): TOATE rădăcinile workspace-ului (multi-root) sunt
+      // listate, nu doar cea primară; v2.5.55 (FIX 5): instalațiile WordPress
+      // sunt detectate o singură dată și folosite de structură + de hint-ul WP.
+      const roots = structureRoots(root);
+      let wpSites: WordPressSite[] = [];
+      try {
+        wpSites = await detectWordPressSites(roots);
+      } catch (e: any) {
+        log('[wordpress] detection failed: ' + (e?.message ?? String(e)));
+      }
       let structure = '';
       try {
-        structure = await getProjectStructure(root);
+        structure = await getProjectStructure(roots, wpSites);
+        log('project structure: ' + roots.length + ' roots');
         log('project structure: ' + structure.split('\n').length + ' lines');
       } catch (e: any) {
         log('project structure failed: ' + (e?.message ?? String(e)));
@@ -1883,8 +2024,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
        * `openOrResumeChat` când chatul salvat era al ALTUI provider.
        */
       let crossProviderHandoff = '';
+      /**
+       * v2.5.55 (FIX 5): utilizatorul vorbește despre WordPress / pluginuri /
+       * teme? Îi spunem unde stau pluginurile și temele (calea ABSOLUTĂ, deci
+       * merge și în a doua rădăcină a workspace-ului) — în raportul din 8 Oct
+       * pluginul „seo-orase-pro" exista în Z:\…\wp-content\plugins, dar AI-ul
+       * căuta în rădăcina primară cu `find` și s-a oprit după 3 eșecuri.
+       */
+      let wpBlock = '';
+      if (looksLikeWordPressQuestion(userText)) {
+        wpBlock = wordpressContextHint(wpSites, roots);
+        log(
+          'wordpress context: ' + wpSites.length +
+            ' wp-content folder(s) found in ' + roots.length + ' root(s)'
+        );
+      }
       const contextBlock = () =>
         (attachBlock ? '\n\n---\nATTACHMENTS:\n' + attachBlock : '') +
+        (wpBlock ? '\n\n---\n' + wpBlock : '') +
         (crossProviderHandoff
           ? '\n\n---\nTASK HANDOFF (provider switch):\n' + crossProviderHandoff
           : '') +
@@ -2565,14 +2722,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // v2.5.11 FIX (bug #33): circuit breaker — oprește bucla după 3 eșecuri
         // consecutive ale ACELUIAȘI tool (un succes, al oricărui tool, resetează
         // contorul), în loc să mergem până la 40/40 iterații cu un tool stricat.
+        // v2.5.55 (FIX 3): la primul prag NU oprim — trimitem modelului ultima
+        // eroare + echivalentele Windows (buildCircuitBreakerHint) și mai lăsăm
+        // CIRCUIT_BREAKER_GRACE pași; abia apoi se oprește bucla.
+        let circuitHint = '';
         const cb = circuitBreaker.record(toolCall.tool, result.ok);
         if (cb.warn) {
-          log('tool ' + toolCall.tool + ' failed twice — one more and we stop');
+          log(
+            'tool ' + toolCall.tool +
+              ' failed twice — one more and we send the recovery hint'
+          );
+        }
+        if (cb.hint) {
+          log(
+            'circuit breaker: ' + toolCall.tool + ' failed ' +
+              cb.consecutiveFailures + ' times — sending the recovery hint (' +
+              CIRCUIT_BREAKER_GRACE + ' more attempts before stopping)'
+          );
+          circuitHint = buildCircuitBreakerHint(
+            toolCall.tool,
+            result.error,
+            cb.consecutiveFailures,
+            String(toolCall.args?.command ?? '')
+          );
+          this.post(
+            'heal',
+            '⚠️ The same action failed ' + cb.consecutiveFailures +
+              ' times in a row. Sending the AI a recovery hint (Windows equivalents) ' +
+              'instead of stopping — it has ' + CIRCUIT_BREAKER_GRACE + ' more attempts.'
+          );
         }
         if (cb.triggered) {
           log(
             'circuit breaker: ' + toolCall.tool + ' failed ' +
-              CIRCUIT_BREAKER_THRESHOLD + ' times consecutively'
+              cb.consecutiveFailures + ' times consecutively — stopping the loop'
           );
           circuitBroken = true;
           const message = buildCircuitBreakerMessage(
@@ -2771,7 +2954,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             // v2.5.32 FIX (bug #78): rm/ls/cp/mv/cat/touch/mkdir -p nu există pe Windows
             // v2.5.38 (bug #89): doar dacă NU a fost tradusă automat (altfel eșecul
             // vine din altă cauză, iar hint-ul „comandă Unix" ar induce în eroare).
-            (result.commandRun?.translatedFrom
+            // v2.5.55 (FIX 2): nici când comanda a fost BLOCATĂ — eroarea de blocare
+            // conține deja tabelul de echivalențe.
+            ((result.commandRun?.translatedFrom ||
+              (result.error ?? '').startsWith('⛔ NOT EXECUTED'))
               ? ''
               : buildUnixCommandHint(toolCall.args.command));
           if (commandHints) {
@@ -2911,6 +3097,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             selfFix +
             // v2.5.29 (bug #67): nudge de loop detection + context de eroare
             (loopNudge ? '\n\n' + loopNudge : '') +
+            // v2.5.55 (FIX 3): hint de deblocare la 3 eșecuri consecutive
+            (circuitHint ? '\n\n' + circuitHint : '') +
             // v2.5.48: scriere prea mare → cere împărțirea în apeluri mici
             (splitHint ? '\n\n' + splitHint : '') +
             // v2.5.49 (FIX 2): continuarea scrierii în bucăți

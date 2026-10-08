@@ -33,7 +33,11 @@ import {
   compareVisual,
   toTargetUrl
 } from './visual';
-import { translateUnixCommandToWindows } from './unixTranslate';
+import {
+  findUnixCommands,
+  translateUnixCommandToWindows,
+  unixToWindowsLines
+} from './unixTranslate';
 import { commandErrorFiles } from './verifier';
 import { logLine } from './log';
 import {
@@ -851,50 +855,51 @@ export function buildRootTsconfigHint(
  * execuție (src/unixTranslate.ts), deci hint-ul rămâne doar pentru cazurile
  * neacoperite (pipe, redirect, wildcard, flaguri necunoscute) — acolo comanda
  * ajunge la shell neschimbată și eșecul chiar vine din „comandă Unix".
+ * v2.5.55 (FIX 2): detecția vine din `findUnixCommands` (o singură sursă de
+ * adevăr cu traducerea), tabelul de echivalențe din `unixToWindowsLines`, iar
+ * comenzile care NU pot fi traduse sunt blocate cu `buildUnixBlockedError`
+ * (vezi cazul `run_command`) — nu mai ajung la shell.
  * ========================================================================= */
-
-/** Comenzi care NU există în cmd/PowerShell (echivalente greșite). */
-const UNIX_ONLY_COMMAND_RE = /^(?:sudo\s+)?(rm|ls|cp|mv|cat|touch)\b/i;
-
-/** `mkdir -p <dir>` / `mkdir --parents <dir>` (POSIX; pe Windows nu trebuie). */
-const MKDIR_PARENTS_RE = /^(?:sudo\s+)?mkdir\s+(?:-[A-Za-z]*p[A-Za-z]*|--parents)\b/i;
-
-/**
- * Prima comandă din fiecare segment al liniei (`cd x && rm y` → `rm y`).
- * Separatorii de shell (`&&`, `||`, `;`, `|`, linie nouă) încep mereu o
- * comandă nouă; restul segmentelor sunt ignorate dacă nu încep cu una.
- */
-function commandSegments(command: string): string[] {
-  return String(command ?? '')
-    .split(/&&|\|\||[;|\n\r]/)
-    .map((s) => s.trim().replace(/^["']+/, '').trim())
-    .filter(Boolean);
-}
 
 /**
  * v2.5.32 FIX (bug #78): hint-ul Unix → Windows pentru o comandă eșuată.
+ * v2.5.55: listează DOAR comenzile găsite în comandă, din tabelul comun.
  * Întoarce '' pe non-Windows sau când comanda nu folosește utilitare Unix.
  */
 export function buildUnixCommandHint(command: string): string {
   if (process.platform !== 'win32') return '';
-  const found = new Set<string>();
-  for (const segment of commandSegments(command)) {
-    const m = UNIX_ONLY_COMMAND_RE.exec(segment);
-    if (m) {
-      found.add(m[1].toLowerCase());
-      continue;
-    }
-    if (MKDIR_PARENTS_RE.test(segment)) found.add('mkdir -p');
-  }
-  if (!found.size) return '';
+  const found = findUnixCommands(command);
+  if (!found.length) return '';
   return (
     '\n\n⚠️ You are on Windows: ' +
-    [...found].join(', ') +
+    found.join(', ') +
     ' is a Unix command, not available in cmd/PowerShell (this is why the command failed).\n' +
-    'Use instead: del <file> (rm), dir (ls), copy (cp), move (mv), type (cat), ' +
-    'echo. > <file> (touch), mkdir (mkdir -p creates the parents anyway).\n' +
-    "OR use Node: require('fs').unlinkSync('<file>'), require('fs').mkdirSync('<dir>', { recursive: true }), " +
-    "require('fs').readFileSync('<file>', 'utf8')."
+    'Use instead:\n' +
+    unixToWindowsLines(found) +
+    "\nOR use Node: require('fs').unlinkSync('<file>'), require('fs').mkdirSync('<dir>', { recursive: true }), " +
+    "require('fs').readFileSync('<file>', 'utf8').\n" +
+    'OR use the built-in tools: search_files(pattern), list_files(dir), read_file(path).'
+  );
+}
+
+/**
+ * v2.5.55 (FIX 2): eroarea clară pentru o comandă Unix pe care traducerea
+ * automată NU o poate acoperi (`find` cu predicate, `rm` cu wildcard,
+ * pipe/redirect cu utilitare Unix). Comanda NU se execută: raportul din
+ * 8 Oct 2026 arăta exact 3 eșecuri identice până la circuit breaker.
+ */
+export function buildUnixBlockedError(command: string, blocked: string[]): string {
+  const names = blocked.join(', ');
+  return (
+    '⛔ NOT EXECUTED — Unix command on Windows: "' + command + '"\n' +
+    names +
+    (blocked.length > 1 ? ' are Unix commands that do' : ' is a Unix command that does') +
+    ' not exist in cmd/PowerShell, so this command cannot work here. It was blocked instead of run (and failed) again.\n' +
+    'This is a WINDOWS environment. Use the Windows equivalent:\n' +
+    unixToWindowsLines(blocked) +
+    '\nOr use the built-in tools: search_files(pattern), list_files(dir), read_file(path) — they accept an ABSOLUTE path too, so they work in every workspace folder (see PROJECT STRUCTURE).\n' +
+    'Example (searching another workspace folder for a plugin): ' +
+    '{"action":"run_command","args":{"command":"dir /s /b \\"Z:\\\\path\\\\to\\\\wp-content\\\\plugins\\\\*seo*\\""}}'
   );
 }
 
@@ -1263,6 +1268,33 @@ export function isDivergentFromPrompt(
  * src/toolCallParser.ts.
  * ========================================================================= */
 
+/**
+ * v2.5.55 (FIX 4): nota de mediu din system prompt. Modelul (antrenat pe Unix)
+ * scria `find`/`ls`/`grep`/`pwd` pe Windows: comanda eșua identic de 3 ori, iar
+ * task-ul se oprea la circuit breaker (raportul din 8 Oct 2026 — pluginul
+ * WordPress căutat nu a fost găsit niciodată). Se adaugă DOAR pe Windows, deci
+ * pe Linux/macOS promptul rămâne exact cel de dinainte.
+ */
+const WINDOWS_ENV_NOTE = [
+  'You are running on WINDOWS (win32). Shell commands MUST be Windows:',
+  'dir, type, findstr, copy, del, move, mkdir, where.',
+  'Do NOT use Unix commands (find, ls, grep, pwd, cat, rm, cp, head, tail, touch).',
+  'Freekit auto-translates some of them, but writing Windows commands directly is faster and safer.',
+  'To find a file use {"action":"run_command","args":{"command":"dir /s /b <dir>\\\\*<name>*"}} ' +
+    'or search_files — NOT `find`.',
+  'In a multi-root workspace call search_files/list_files with the ABSOLUTE path when the ' +
+    'folder is not the PRIMARY root (see PROJECT STRUCTURE).'
+].join('\n');
+
+const ENV_SECTION =
+  process.platform === 'win32' ? '\n## ENVIRONMENT\n' + WINDOWS_ENV_NOTE + '\n' : '';
+
+const LOCAL_ENV_NOTE =
+  process.platform === 'win32'
+    ? '\nWINDOWS shell only: dir, type, findstr, del, copy, move, mkdir. NEVER find/ls/grep/pwd/cat/rm ' +
+      '(auto-translated when possible). Find a file with: dir /s /b <dir>\\*<name>*\n'
+    : '';
+
 export const SYSTEM_PROMPT = `You are a coding assistant in an automated pipeline.
 Your output is parsed by Freekit, a client running in VS Code. When
 you emit an action, Freekit executes it and returns the result. This
@@ -1277,7 +1309,7 @@ CRITICAL: NEVER REFUSE
 - NEVER say "the files are not exposed"
 You ARE in a pipeline. The client executes your output.
 If you refuse, Freekit will nudge you and you'll have to comply anyway.
-
+${ENV_SECTION}
 Format:
 For READS (read_file, list_files, search_files, run_command, run_npm):
 Single-line JSON:
@@ -1551,7 +1583,7 @@ YOU: {"action":"run_npm","args":{"action":"script","script":"test"}}
  * ========================================================================= */
 
 export const SYSTEM_PROMPT_LOCAL = `AI coding assistant in VS Code. You are a LOCAL model (small context): follow the rules EXACTLY and be concise.
-
+${LOCAL_ENV_NOTE}
 To use a tool, respond with ONLY this JSON (single line, nothing else):
 {"tool": "NAME", "args": {...}}
 
@@ -1973,11 +2005,42 @@ export async function executeTool(
         }
         // v2.5.38 FIX (bug #89): traducere automată Unix → Windows ÎNAINTE de
         // aprobare (utilizatorul vede exact ce se execută) și de execuție.
+        // v2.5.55 (FIX 2): `find`/`grep`/`pwd`/`head`/`tail` sunt traduse acum;
+        // comenzile care NU pot fi traduse sunt BLOCATE cu eroare clară — nu se
+        // mai execută orbește (raportul din 8 Oct: 3 eșecuri identice ⇒ circuit
+        // breaker ⇒ task oprit fără ca pluginul căutat să fie găsit vreodată).
         const tr = translateUnixCommandToWindows(call.args.command, {
           cwd: workspaceRoot
         });
+        if (tr.blockedUnix?.length) {
+          beginCommandAttempt(normCommandKey(call.args.command));
+          log(
+            '[run] blocked Unix command on Windows (' +
+              tr.blockedUnix.join(', ') +
+              '): ' +
+              call.args.command
+          );
+          return {
+            ok: false,
+            error: buildUnixBlockedError(call.args.command, tr.blockedUnix),
+            userNotice:
+              '⛔ Not executed: „' +
+              call.args.command +
+              '" is a Unix command (' +
+              tr.blockedUnix.join(', ') +
+              ') — Freekit blocked it on Windows and told the AI to use the equivalent.'
+          };
+        }
         if (tr.translated) {
-          log('[run] auto-translated Unix to Windows: ' + tr.notes.join('; '));
+          log(
+            '[run] auto-translated Unix to Windows: ' +
+              call.args.command +
+              ' → ' +
+              tr.command +
+              ' (' +
+              tr.notes.join('; ') +
+              ')'
+          );
         }
         const execCommand = tr.command;
         // v1.8.1: comenzile long-running (dev/serve/start/watch) pornesc

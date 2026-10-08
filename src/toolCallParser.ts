@@ -526,6 +526,122 @@ function repairUnescapedQuotes(json: string): string {
   return out;
 }
 
+/**
+ * v2.5.57 — repararea path-urilor Windows NESCAPATE din JSON.
+ *
+ * `JSON.parse` respinge `"z:\home\…"` cu „Bad escaped character" (Node nou) /
+ * „Invalid \escape" (Node vechi): tool call-ul părea malformat și modelul
+ * primea același retry de 3 ori (log 2026-10-08 16:37). O reparație naivă
+ * (doar escape-urile invalide) nu e destul: `\b` / `\t` / `\n` / `\u` dintr-o
+ * cale (`…\bitwanderer`, `…\test`, `…\users`) sunt escape-uri VALIDE sau
+ * aproape-valide, iar parse-ul „reparat" ar produce caractere de control în
+ * loc de `\` + literă. De aceea: pentru fiecare string care ARATĂ a cale
+ * Windows (literă de drive + `:\`, sau început UNC) facem PARI toate
+ * secvențele de backslash — fiecare `\` rămâne escape-uit, iar perechile
+ * deja corecte (`\\`) rămân neatinse.
+ * Ex.: `"z:\home\bitwanderer"` → `"z:\\home\\bitwanderer"`.
+ */
+const WINDOWS_PATH_STRING_RE = /(?:[A-Za-z]:\\|^\\\\)/;
+
+/** Face pară (even) fiecare secvență de `\` — `\h` → `\\h`, `\\` neschimbat. */
+function evenBackslashRuns(text: string): string {
+  return text.replace(/\\+/g, (run) =>
+    run.length % 2 === 1 ? run + '\\' : run
+  );
+}
+
+/** Evenări de backslash DOAR în string-urile care arată a cale Windows. */
+function repairWindowsPathEscapes(json: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  let raw = '';
+
+  for (let i = 0; i < json.length; i++) {
+    const ch = json[i];
+    if (!inString) {
+      out += ch;
+      if (ch === '"') {
+        inString = true;
+        raw = '';
+      }
+      continue;
+    }
+    if (escaped) {
+      raw += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      raw += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = false;
+      out += WINDOWS_PATH_STRING_RE.test(raw) ? evenBackslashRuns(raw) : raw;
+      out += ch;
+      continue;
+    }
+    raw += ch;
+  }
+  if (inString) out += raw; // string neîncheiat (JSON trunchiat) — rămâne așa
+  return out;
+}
+
+/**
+ * v2.5.57 — escape-urile INVALIDE din orice string (`\d`, `\w`, …): dublează
+ * backslash-ul care NU e urmat de `"` `\` `/` `b` `f` `n` `r` `t` `u`.
+ * Plasă de siguranță pentru cazurile care nu sunt path-uri (ex: pattern-uri
+ * regex), după reparația string-aware de mai sus.
+ */
+function repairInvalidEscapes(json: string): string {
+  return json.replace(/\\[^"\\\/bfnrtu]/g, '\\$&');
+}
+
+/** JSON.parse pe obiect (nu array) — `null` la orice eroare. */
+function parseObjectOrNull(text: string): any | null {
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * O singură încercare de parsare: JSON.parse normal, apoi — dacă JSON-ul chiar
+ * conține path-uri/caractere problemă, deci reparația schimbă ceva — varianta
+ * reparată. Dacă parsează după reparație, singura problemă era escape-ul;
+ * atunci logăm (FIX 5 v2.5.56: log-urile parserului ajung la `[chat]`).
+ */
+function parseJsonAttempt(attempt: string): any | null {
+  const parsed = parseObjectOrNull(attempt);
+  if (parsed) return parsed;
+
+  const pathFixed = repairWindowsPathEscapes(attempt);
+  if (pathFixed !== attempt) {
+    const reparsed = parseObjectOrNull(pathFixed);
+    if (reparsed) {
+      queueParserLog('auto-repaired Windows path in JSON', false);
+      return reparsed;
+    }
+  }
+
+  const escapeFixed = repairInvalidEscapes(attempt);
+  if (escapeFixed !== attempt) {
+    const reparsed = parseObjectOrNull(escapeFixed);
+    if (reparsed) {
+      queueParserLog('auto-repaired invalid escape in JSON', false);
+      return reparsed;
+    }
+  }
+
+  return null;
+}
+
 /** Obiectul JSON parsat din `raw`, cu reparații tolerante succesive. */
 function tryParseJsonObject(raw: string): any | null {
   const trimmed = raw.trim();
@@ -540,14 +656,8 @@ function tryParseJsonObject(raw: string): any | null {
   ];
 
   for (const attempt of attempts) {
-    try {
-      const parsed = JSON.parse(attempt);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed;
-      }
-    } catch {
-      // strategia următoare
-    }
+    const parsed = parseJsonAttempt(attempt);
+    if (parsed) return parsed;
   }
 
   return null;

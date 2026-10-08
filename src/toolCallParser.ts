@@ -527,21 +527,26 @@ function repairUnescapedQuotes(json: string): string {
 }
 
 /**
- * v2.5.57 — repararea path-urilor Windows NESCAPATE din JSON.
+ * v2.5.57/2.5.58 — repararea path-urilor Windows NESCAPATE din JSON.
  *
  * `JSON.parse` respinge `"z:\home\…"` cu „Bad escaped character" (Node nou) /
  * „Invalid \escape" (Node vechi): tool call-ul părea malformat și modelul
- * primea același retry de 3 ori (log 2026-10-08 16:37). O reparație naivă
- * (doar escape-urile invalide) nu e destul: `\b` / `\t` / `\n` / `\u` dintr-o
- * cale (`…\bitwanderer`, `…\test`, `…\users`) sunt escape-uri VALIDE sau
- * aproape-valide, iar parse-ul „reparat" ar produce caractere de control în
- * loc de `\` + literă. De aceea: pentru fiecare string care ARATĂ a cale
- * Windows (literă de drive + `:\`, sau început UNC) facem PARI toate
- * secvențele de backslash — fiecare `\` rămâne escape-uit, iar perechile
- * deja corecte (`\\`) rămân neatinse.
+ * primea același retry de 3 ori (log 2026-10-08 16:37). În plus, `\b` / `\f` /
+ * `\n` / `\r` / `\t` sunt escape-uri VALIDE, deci un path ca `D:\test\build`
+ * „parsează" cu tab/backspace în loc de `\` + literă (bug critic: `bitwanderer`
+ * → `itwanderer`, fiecare comandă pe Z:\ eșua în buclă). De aceea reparația se
+ * face ÎNAINTE de JSON.parse, pentru fiecare string care E o cale Windows
+ * (literă de drive + `:\`/`:/`, sau început UNC), fără newline-uri reale în el:
+ * facem PARI toate secvențele de backslash — `\h` → `\\h`, `\t` → `\\t`,
+ * `\b` → `\\b` — iar perechile deja corecte (`\\`) rămân neatinse.
  * Ex.: `"z:\home\bitwanderer"` → `"z:\\home\\bitwanderer"`.
  */
-const WINDOWS_PATH_STRING_RE = /(?:[A-Za-z]:\\|^\\\\)/;
+
+/** `raw` = conținutul brut (încă neparsat) al unui string JSON. */
+function looksLikeWindowsPath(raw: string): boolean {
+  if (raw.includes('\n') || raw.includes('\r')) return false;
+  return /^[A-Za-z]:[\\/]/.test(raw) || /^\\\\/.test(raw);
+}
 
 /** Face pară (even) fiecare secvență de `\` — `\h` → `\\h`, `\\` neschimbat. */
 function evenBackslashRuns(text: string): string {
@@ -550,7 +555,7 @@ function evenBackslashRuns(text: string): string {
   );
 }
 
-/** Evenări de backslash DOAR în string-urile care arată a cale Windows. */
+/** Evenări de backslash DOAR în string-urile care sunt căi Windows. */
 function repairWindowsPathEscapes(json: string): string {
   let out = '';
   let inString = false;
@@ -579,7 +584,7 @@ function repairWindowsPathEscapes(json: string): string {
     }
     if (ch === '"') {
       inString = false;
-      out += WINDOWS_PATH_STRING_RE.test(raw) ? evenBackslashRuns(raw) : raw;
+      out += looksLikeWindowsPath(raw) ? evenBackslashRuns(raw) : raw;
       out += ch;
       continue;
     }
@@ -590,13 +595,18 @@ function repairWindowsPathEscapes(json: string): string {
 }
 
 /**
- * v2.5.57 — escape-urile INVALIDE din orice string (`\d`, `\w`, …): dublează
- * backslash-ul care NU e urmat de `"` `\` `/` `b` `f` `n` `r` `t` `u`.
- * Plasă de siguranță pentru cazurile care nu sunt path-uri (ex: pattern-uri
- * regex), după reparația string-aware de mai sus.
+ * v2.5.57/2.5.58 — escape-urile INVALIDE din orice string (`\d`, `\w`, …): face
+ * pară secvența de backslash de dinaintea unui caracter care nu poate fi escape
+ * (`"` `\` `/` `b` `f` `n` `r` `t` `u`). Run-aware: `\\h` (pereche corectă
+ * urmată de literă) rămâne neatinsă. Plasă de siguranță pentru string-urile
+ * care nu sunt căi Windows (ex: pattern-uri regex `\d+`).
  */
 function repairInvalidEscapes(json: string): string {
-  return json.replace(/\\[^"\\\/bfnrtu]/g, '\\$&');
+  return json.replace(
+    /(\\+)([^"\\\/bfnrtu])/g,
+    (match, run: string, ch: string) =>
+      run.length % 2 === 1 ? run + '\\' + ch : match
+  );
 }
 
 /** JSON.parse pe obiect (nu array) — `null` la orice eroare. */
@@ -612,23 +622,36 @@ function parseObjectOrNull(text: string): any | null {
 }
 
 /**
- * O singură încercare de parsare: JSON.parse normal, apoi — dacă JSON-ul chiar
- * conține path-uri/caractere problemă, deci reparația schimbă ceva — varianta
- * reparată. Dacă parsează după reparație, singura problemă era escape-ul;
- * atunci logăm (FIX 5 v2.5.56: log-urile parserului ajung la `[chat]`).
+ * O singură încercare de parsare.
+ *
+ * v2.5.58: reparația de path-uri Windows se aplică ÎNAINTE de JSON.parse —
+ * altfel un path cu escape-uri VALIDE (`\b`, `\f`, `\n`, `\r`, `\t`) parsează
+ * „cu succes" cu tab/backspace în loc de `\` + literă (ex: `bitwanderer` →
+ * `itwanderer`) și niciun retry nu-l mai repară. Dacă varianta reparată
+ * parsează, o preferăm și logăm; altfel încercăm textul original, apoi
+ * escape-urile invalide rămase (string-urile ne-path). Log-urile parserului
+ * ajung la `[chat]` (FIX 5 v2.5.56).
  */
 function parseJsonAttempt(attempt: string): any | null {
-  const parsed = parseObjectOrNull(attempt);
-  if (parsed) return parsed;
-
   const pathFixed = repairWindowsPathEscapes(attempt);
   if (pathFixed !== attempt) {
     const reparsed = parseObjectOrNull(pathFixed);
     if (reparsed) {
-      queueParserLog('auto-repaired Windows path in JSON', false);
+      queueParserLog('auto-repaired Windows path (backslash-letter)', false);
       return reparsed;
     }
+    const escapesFixed = repairInvalidEscapes(pathFixed);
+    if (escapesFixed !== pathFixed) {
+      const reparsed2 = parseObjectOrNull(escapesFixed);
+      if (reparsed2) {
+        queueParserLog('auto-repaired Windows path (backslash-letter)', false);
+        return reparsed2;
+      }
+    }
   }
+
+  const parsed = parseObjectOrNull(attempt);
+  if (parsed) return parsed;
 
   const escapeFixed = repairInvalidEscapes(attempt);
   if (escapeFixed !== attempt) {

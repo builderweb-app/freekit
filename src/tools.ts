@@ -1995,7 +1995,7 @@ export async function executeTool(
       }
 
       case 'list_files':
-        return await listFiles(call.args.dir || '.', workspaceRoot);
+        return await listFiles(call.args.dir || '.', workspaceRoot, log);
 
       case 'run_command': {
         // v0.6.0: dacă limita de auto-reparare e atinsă, comanda nu mai rulează
@@ -2286,11 +2286,34 @@ function externalKeySet(): Set<string> {
   return new Set(externalRoots().map((p) => canonPath(p)));
 }
 
+/**
+ * v2.5.55 supliment (FIX C): litera de drive cu MAJUSCULĂ (`z:\` → `Z:\`).
+ * Windows e case-insensitive, dar volumele virtuale (RaiDrive) pot trata
+ * diferit `z:` și `Z:` — modelul scrie calea cu literă mică (log-ul arăta
+ * `z:\home\...\seo-orase-pro`), iar Node `fs` primea exact ce scria modelul.
+ */
+export function normalizeDriveLetter(p: string): string {
+  return String(p ?? '').replace(
+    /^([a-z]):[\\/]/i,
+    (_m, d: string) => d.toUpperCase() + ':\\'
+  );
+}
+
+/** Drive non-C sau cale UNC (RaiDrive, partajări de rețea, discuri virtuale). */
+export function isNonLocalPath(p: string): boolean {
+  const value = String(p ?? '');
+  return /^\\\\/.test(value) || (/^[a-z]:/i.test(value) && !/^c:/i.test(value));
+}
+
 function safePath(rel: string, root: string): string {
   const requested = String(rel ?? '').trim() || '.';
   const primary = path.normalize(root);
   const roots = allowedRoots(primary);
-  const normalized = path.normalize(path.resolve(primary, requested));
+  // v2.5.55 supliment (FIX C): toate operațiile FS primesc drive-ul normalizat
+  // (`z:\…` → `Z:\…`) — vezi normalizeDriveLetter.
+  const normalized = normalizeDriveLetter(
+    path.normalize(path.resolve(primary, requested))
+  );
 
   const owner = roots.find((r) => isInsideRoot(normalized, r));
   if (owner) {
@@ -2967,16 +2990,140 @@ async function deleteDirectoryTool(
 // poate trimite un listing uriaș către AI.
 const MAX_LIST_ENTRIES = 1000;
 
-async function listFiles(rel: string, root: string): Promise<ToolResult> {
+/** O intrare de director: numele + dacă e folder. */
+export interface DirEntry {
+  name: string;
+  isDir: boolean;
+}
+
+/** Rezultatul citirii unui director (robust, cu fallback pe discuri virtuale). */
+export interface DirectoryReadResult {
+  /** Intrările, când citirea a reușit (eventual prin fallback). */
+  entries?: DirEntry[];
+  /** Codul erorii originale (ex. `EIO`, `ENOENT`) — doar când NIMIC nu a mers. */
+  code?: string;
+  /** Mesajul erorii originale — doar când NIMIC nu a mers. */
+  error?: string;
+  /** true când lista a venit din fallback-ul `dir /b`. */
+  viaFallback?: boolean;
+  /** Mesajul lui `dir` (Windows) când fallback-ul a eșuat — context în plus. */
+  dirError?: string;
+}
+
+/** Numele din `dir /b /a:d` (foldere) sau `/a-d` (fișiere), plus eroarea `dir`. */
+async function dirNames(
+  abs: string,
+  attr: string,
+  tag: string,
+  log?: (msg: string) => void
+): Promise<{ names?: string[]; error?: string }> {
+  try {
+    const { stdout } = await execAsync('dir /b ' + attr + ' "' + abs + '"', {
+      timeout: 60000,
+      maxBuffer: 10 * 1024 * 1024,
+      windowsHide: true
+    });
+    return {
+      names: String(stdout ?? '')
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b))
+    };
+  } catch (err: any) {
+    const detail =
+      (err?.code ?? err?.name ?? 'error') + ' — ' + (err?.message ?? String(err));
+    log?.('[' + tag + '] fallback dir /b ' + attr + ' failed: ' + detail);
+    return { error: detail };
+  }
+}
+
+/**
+ * v2.5.55 supliment (FIX A + B): citirea unui folder cu EROAREA REALĂ în log și
+ * cu fallback `dir /b` prin cmd.exe pe discuri non-C / UNC.
+ *
+ * Premisa corectată (8 Oct 2026): scope-ul multi-root FUNCȚIONA (`[scope]
+ * allowed path outside primary root` apare în log), dar `fs.readDirectory` pe
+ * volumul RaiDrive întorcea `ok=false` fără ca eroarea să ajungă în log — deci
+ * nimeni nu știa DE CE. Acum: (1) eroarea completă (cod + mesaj + cale) se
+ * loghează; (2) pentru `Z:\`, `D:\`, `\\server\…` încercăm `cmd /c dir /b`, care
+ * citește discul virtual prin API-ul Windows (nu prin Node `fs`).
+ * `entries` lipsă ⇒ apelantul întoarce eroarea ORIGINALĂ (nu una de fallback).
+ */
+export async function readDirectoryEntries(
+  abs: string,
+  log?: (msg: string) => void,
+  tag = 'list_files'
+): Promise<DirectoryReadResult> {
+  const target = normalizeDriveLetter(abs);
+  try {
+    const entries = await vscode.workspace.fs.readDirectory(
+      vscode.Uri.file(target)
+    );
+    return {
+      entries: entries.map(([name, type]) => ({
+        name,
+        isDir: type === vscode.FileType.Directory
+      }))
+    };
+  } catch (err: any) {
+    const code = err?.code ?? err?.name ?? 'error';
+    const message = err?.message ?? String(err);
+    log?.('[' + tag + '] FAILED: ' + code + ' — ' + message + ' — path: ' + target);
+    if (!isNonLocalPath(target)) return { code, error: message };
+    const dirs = await dirNames(target, '/a:d', tag, log);
+    const files = await dirNames(target, '/a-d', tag, log);
+    if (!dirs.names && !files.names) {
+      return { code, error: message, dirError: dirs.error ?? files.error };
+    }
+    const entries: DirEntry[] = [
+      ...(dirs.names ?? []).map((name) => ({ name, isDir: true })),
+      ...(files.names ?? []).map((name) => ({ name, isDir: false }))
+    ];
+    log?.(
+      '[' + tag + '] fallback dir /b succeeded: ' + entries.length +
+        ' entries (' + target + ')'
+    );
+    return { entries, viaFallback: true };
+  }
+}
+
+async function listFiles(
+  rel: string,
+  root: string,
+  log?: (msg: string) => void
+): Promise<ToolResult> {
   const abs = safePath(rel, root);
-  const entries = await vscode.workspace.fs.readDirectory(
-    vscode.Uri.file(abs)
-  );
+  // v2.5.55 supliment (FIX A/B): eroarea reală în log + fallback `dir /b` pe Z:\
+  const read = await readDirectoryEntries(abs, log);
+  if (!read.entries) {
+    const detail =
+      (read.code ? read.code + ': ' : '') + (read.error ?? 'unknown error');
+    log?.('[list_files] FAILED: ' + detail + ' — path: ' + abs);
+    return {
+      ok: false,
+      error:
+        detail + '\n(path: ' + abs + ')\n' +
+        (read.dirError
+          ? 'The Windows fallback (dir /b) also failed: ' + read.dirError + '\n'
+          : '') +
+        'The folder could not be listed' +
+        (read.code === 'ENOENT' || read.dirError
+          ? ' — the path is probably WRONG or does not exist. Check it: list the PARENT ' +
+            'folder first (or look at PROJECT STRUCTURE) instead of guessing.'
+          : ' — the filesystem refused the read (see the Freekit log for the exact error).')
+    };
+  }
+  const entries = read.entries;
+  if (read.viaFallback) {
+    log?.(
+      'list_files: ' + entries.length +
+        ' entries via cmd dir /b fallback (' + abs + ')'
+    );
+  }
   const shown = entries.slice(0, MAX_LIST_ENTRIES);
   let out = shown
-    .map(([name, type]) =>
-      type === vscode.FileType.Directory ? name + '/' : name
-    )
+    .map((e) => (e.isDir ? e.name + '/' : e.name))
     .join('\n');
   if (entries.length > shown.length) {
     out +=

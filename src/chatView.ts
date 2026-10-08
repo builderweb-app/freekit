@@ -55,6 +55,7 @@ import {
   newApprovalId,
   resetWriteLimits,
   resetCommandLimits,
+  readDirectoryEntries,
   MAX_TEXT_RETRIES,
   TEXT_RETRY_NUDGE,
   MAX_REFUSAL_RETRIES,
@@ -505,32 +506,20 @@ async function renderChildren(
   async function walk(dir: string, depth: number, prefix: string) {
     if (depth > maxDepth || count >= maxEntries) return;
 
-    let entries: [string, vscode.FileType][];
-    try {
-      entries = await vscode.workspace.fs.readDirectory(
-        vscode.Uri.file(dir)
-      );
-    } catch {
-      return; // director inaccesibil — îl ignorăm
-    }
-
-    // directoarele primesc prioritate, apoi ordine alfabetică
-    const visible = entries
-      .filter(
-        ([name, type]) =>
-          !(type === vscode.FileType.Directory && STRUCTURE_EXCLUDE.has(name))
-      )
+    // v2.5.55 supliment (FIX B): arborele folosește citirea ROBUSTĂ (fallback
+    // `dir /b` prin cmd.exe pe discuri virtuale de tip RaiDrive) și loghează
+    // eroarea reală când folderul nu poate fi citit.
+    const read = await readDirectoryEntries(dir, log, 'structure');
+    const visible = (read.entries ?? [])
+      .filter((e) => !(e.isDir && STRUCTURE_EXCLUDE.has(e.name)))
       .sort((a, b) => {
-        const aDir = a[1] === vscode.FileType.Directory ? 0 : 1;
-        const bDir = b[1] === vscode.FileType.Directory ? 0 : 1;
-        if (aDir !== bDir) return aDir - bDir;
-        return a[0].localeCompare(b[0]);
+        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+        return a.name.localeCompare(b.name);
       });
 
     for (let i = 0; i < visible.length; i++) {
       if (count >= maxEntries) break;
-      const [name, type] = visible[i];
-      const isDir = type === vscode.FileType.Directory;
+      const { name, isDir } = visible[i];
       const isLast = i === visible.length - 1;
 
       lines.push(

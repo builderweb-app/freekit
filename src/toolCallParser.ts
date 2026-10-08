@@ -50,14 +50,47 @@ export function reconstructCommandTabs(command: string): string {
   return out;
 }
 
-/** Aplică reconstrucția TAB-urilor pe `args.command` (dacă există). */
+/**
+ * v2.5.59 — BS / FF rămase într-o comandă vin aproape sigur din `\b` / `\f`
+ * „parse-uite" ca escape-uri valide într-un path Windows (`\bitwanderer` →
+ * `home` + BS + `itwanderer`). Reconstruim `\b` / `\f` ca la TAB-uri.
+ */
+export function reconstructCommandBackspace(command: string): string {
+  const text = String(command ?? '');
+  if (!text.includes('\b') && !text.includes('\f')) return text;
+  const sep = process.platform === 'win32' ? '\\' : '/';
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch !== '\b' && ch !== '\f') {
+      out += ch;
+      continue;
+    }
+    const prev = i > 0 ? text[i - 1] : '';
+    out += prev && !/\s/.test(prev) ? sep + (ch === '\b' ? 'b' : 'f') : ch;
+  }
+  return out;
+}
+
+/** Aplică reconstrucțiile (TAB + BS/FF) pe `args.command` (dacă există). */
 function withCommandTabsFixed(call: ToolCall): ToolCall {
   const args = call.args as Record<string, any> | undefined;
   if (!args || typeof args.command !== 'string') return call;
-  const fixed = reconstructCommandTabs(args.command);
-  if (fixed === args.command) return call;
-  queueParserLog('parser: reconstructed tab in command: ' + fixed);
-  return { tool: call.tool, args: { ...args, command: fixed } };
+  let command = args.command;
+  const tabsFixed = reconstructCommandTabs(command);
+  if (tabsFixed !== command) {
+    queueParserLog('parser: reconstructed tab in command: ' + tabsFixed);
+    command = tabsFixed;
+  }
+  const escapesFixed = reconstructCommandBackspace(command);
+  if (escapesFixed !== command) {
+    queueParserLog(
+      'parser: reconstructed backspace/form-feed in command: ' + escapesFixed
+    );
+    command = escapesFixed;
+  }
+  if (command === args.command) return call;
+  return { tool: call.tool, args: { ...args, command } };
 }
 
 /* =========================================================================
@@ -555,21 +588,55 @@ function evenBackslashRuns(text: string): string {
   );
 }
 
-/** Evenări de backslash DOAR în string-urile care sunt căi Windows. */
-function repairWindowsPathEscapes(json: string): string {
+/**
+ * v2.5.59 — același tratament pentru COMENZI: face pară doar secvențele impare
+ * de `\` urmate de o LITERĂ (`\h`, `\b`, `\t`, `\w`, …), ca separatoarele de
+ * path din comandă să rămână literale. `\"` / `\/` / `\\` rămân neatinse —
+ * ghilimelele escape-uite din comenzi (`dir "z:\home\…"`) nu trebuie stricate.
+ */
+function doubleLetterBackslashRuns(text: string): string {
+  return text.replace(/(\\+)([A-Za-z])/g, (match, run: string, ch: string) =>
+    run.length % 2 === 1 ? run + '\\' + ch : match
+  );
+}
+
+/** Cheia imediat dinaintea string-ului curent este `command`? */
+const COMMAND_KEY_RE = /"command"\s*:\s*$/;
+
+interface JsonEscapeRepair {
+  text: string;
+  /** S-a reparat valoarea unei chei `command` (v2.5.59). */
+  commandRepaired: boolean;
+  /** S-a reparat un string care E o cale Windows (v2.5.57/2.5.58). */
+  pathRepaired: boolean;
+}
+
+/**
+ * v2.5.57/2.5.58/2.5.59 — reparații string-aware de backslash-uri, ÎNAINTE de
+ * JSON.parse: string-urile care SUNT căi Windows (drive / UNC) și valorile
+ * cheii `command` (comenzile conțin path-uri în interiorul lor) primesc
+ * backslash-uri pare; restul textului rămâne neatins.
+ */
+function repairJsonEscapes(json: string): JsonEscapeRepair {
   let out = '';
   let inString = false;
   let escaped = false;
   let raw = '';
+  let isCommandValue = false;
+  let commandRepaired = false;
+  let pathRepaired = false;
 
   for (let i = 0; i < json.length; i++) {
     const ch = json[i];
     if (!inString) {
-      out += ch;
       if (ch === '"') {
+        // verificăm `out` ÎNAINTE de a adăuga ghilimeaua de deschidere —
+        // altfel textul se termină cu `:"` și `/"command"\s*:$/` nu se potrivește
+        isCommandValue = COMMAND_KEY_RE.test(out.slice(-64));
         inString = true;
         raw = '';
       }
+      out += ch;
       continue;
     }
     if (escaped) {
@@ -584,14 +651,27 @@ function repairWindowsPathEscapes(json: string): string {
     }
     if (ch === '"') {
       inString = false;
-      out += looksLikeWindowsPath(raw) ? evenBackslashRuns(raw) : raw;
+      if (isCommandValue) {
+        const fixed = doubleLetterBackslashRuns(raw);
+        if (fixed !== raw) {
+          commandRepaired = true;
+          raw = fixed;
+        }
+      } else if (looksLikeWindowsPath(raw)) {
+        const fixed = evenBackslashRuns(raw);
+        if (fixed !== raw) {
+          pathRepaired = true;
+          raw = fixed;
+        }
+      }
+      out += raw;
       out += ch;
       continue;
     }
     raw += ch;
   }
   if (inString) out += raw; // string neîncheiat (JSON trunchiat) — rămâne așa
-  return out;
+  return { text: out, commandRepaired, pathRepaired };
 }
 
 /**
@@ -621,30 +701,40 @@ function parseObjectOrNull(text: string): any | null {
   }
 }
 
+/** Log-ul reparației de escape-uri (mesajul depinde de ce s-a reparat). */
+function logEscapeRepair(repair: JsonEscapeRepair): void {
+  queueParserLog(
+    repair.commandRepaired
+      ? 'auto-repaired Windows path in command'
+      : 'auto-repaired Windows path (backslash-letter)',
+    false
+  );
+}
+
 /**
  * O singură încercare de parsare.
  *
- * v2.5.58: reparația de path-uri Windows se aplică ÎNAINTE de JSON.parse —
- * altfel un path cu escape-uri VALIDE (`\b`, `\f`, `\n`, `\r`, `\t`) parsează
- * „cu succes" cu tab/backspace în loc de `\` + literă (ex: `bitwanderer` →
- * `itwanderer`) și niciun retry nu-l mai repară. Dacă varianta reparată
- * parsează, o preferăm și logăm; altfel încercăm textul original, apoi
- * escape-urile invalide rămase (string-urile ne-path). Log-urile parserului
- * ajung la `[chat]` (FIX 5 v2.5.56).
+ * v2.5.58/2.5.59: reparația de path-uri Windows (și de comenzi) se aplică
+ * ÎNAINTE de JSON.parse — altfel un path cu escape-uri VALIDE (`\b`, `\f`,
+ * `\n`, `\r`, `\t`) parsează „cu succes" cu tab/backspace în loc de `\` +
+ * literă (ex: `bitwanderer` → `itwanderer`) și niciun retry nu-l mai repară.
+ * Dacă varianta reparată parsează, o preferăm și logăm; altfel încercăm
+ * textul original, apoi escape-urile invalide rămase (string-urile ne-path).
+ * Log-urile parserului ajung la `[chat]` (FIX 5 v2.5.56).
  */
 function parseJsonAttempt(attempt: string): any | null {
-  const pathFixed = repairWindowsPathEscapes(attempt);
-  if (pathFixed !== attempt) {
-    const reparsed = parseObjectOrNull(pathFixed);
+  const repair = repairJsonEscapes(attempt);
+  if (repair.text !== attempt) {
+    const reparsed = parseObjectOrNull(repair.text);
     if (reparsed) {
-      queueParserLog('auto-repaired Windows path (backslash-letter)', false);
+      logEscapeRepair(repair);
       return reparsed;
     }
-    const escapesFixed = repairInvalidEscapes(pathFixed);
-    if (escapesFixed !== pathFixed) {
+    const escapesFixed = repairInvalidEscapes(repair.text);
+    if (escapesFixed !== repair.text) {
       const reparsed2 = parseObjectOrNull(escapesFixed);
       if (reparsed2) {
-        queueParserLog('auto-repaired Windows path (backslash-letter)', false);
+        logEscapeRepair(repair);
         return reparsed2;
       }
     }

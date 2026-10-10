@@ -15,6 +15,11 @@ export interface AIFinderStatus {
   maxAttempts?: number;
   selectors?: string[];
   message?: string;
+  /**
+   * v2.5.61 (FIX 6): reparația automată nu are voie să apară în chat — statusul
+   * se scrie DOAR în Output → Freekit (chatView ignoră evenimentele `silent`).
+   */
+  silent?: boolean;
 }
 
 type StatusListener = (status: AIFinderStatus) => void;

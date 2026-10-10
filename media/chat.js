@@ -663,6 +663,9 @@ function addProviderErrorCard(msg) {
   const card = document.createElement('div');
   card.className = 'provider-error-card';
 
+  // v2.5.61 (FIX 7): tier-ul 7 al reparației de selectori — toate încercările
+  // automate au eșuat. Card MINIMAL, cu Retry / Switch provider.
+  const isSelectors = msg.kind === 'selectors';
   // v2.5.11 (bug #24/#25): model Ollama neinstalat → card dedicat, cu buton
   // de descărcare, în locul textului brut „Ollama error: 404 …".
   const isModelMissing = msg.kind === 'model_missing';
@@ -679,21 +682,25 @@ function addProviderErrorCard(msg) {
   const title = document.createElement('b');
   setRichText(
     title,
-    isModelMissing
-      ? '$(warning) Ollama — model not installed'
-      : isDown
-        ? '$(warning) ' + providerName + ' stopped responding'
-        : isPlanLimit
-          ? '$(warning) ' + providerName + ' — free plan / limit reached'
-          : '$(warning) ' + providerName + ' unavailable'
+    isSelectors
+      ? '⚠️ I can not continue'
+      : isModelMissing
+        ? '$(warning) Ollama — model not installed'
+        : isDown
+          ? '$(warning) ' + providerName + ' stopped responding'
+          : isPlanLimit
+            ? '$(warning) ' + providerName + ' — free plan / limit reached'
+            : '$(warning) ' + providerName + ' unavailable'
   );
 
   const text = document.createElement('div');
   text.className = 'pe-msg';
-  text.textContent = isModelMissing
-    ? (modelId ? 'Model "' + modelId + '" is not installed.' : 'The selected model is not installed.') +
-      (available.length ? ' Available: ' + available.join(', ') + '.' : '')
-    : msg.message || '';
+  text.textContent = isSelectors
+    ? 'Check that you are logged in to Chrome.'
+    : isModelMissing
+      ? (modelId ? 'Model "' + modelId + '" is not installed.' : 'The selected model is not installed.') +
+        (available.length ? ' Available: ' + available.join(', ') + '.' : '')
+      : msg.message || '';
 
   const actions = document.createElement('div');
   actions.className = 'pe-actions';
@@ -709,7 +716,11 @@ function addProviderErrorCard(msg) {
     return b;
   };
 
-  if (isModelMissing) {
+  if (isSelectors) {
+    // v2.5.61 (FIX 7): exact cele două ieșiri cerute de spec
+    actions.appendChild(makeBtn('Retry', 'retry_message'));
+    actions.appendChild(makeBtn('Switch provider', 'open_model_menu'));
+  } else if (isModelMissing) {
     // v2.5.11 (bug #24): descarcă exact modelul care lipsește (fluxul existent)
     if (modelId) {
       actions.appendChild(

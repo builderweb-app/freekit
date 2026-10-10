@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.5.59",
+  "version": "2.5.61",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -197,26 +197,38 @@
         "freekit.aiSelectorFinder": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "When enabled, sends a DOM snapshot to local Ollama to discover selectors when the fingerprint healer fails. Turn ON only if a provider's selectors break; analysis is capped at 60 seconds. The manual `Freekit: Repair Selectors` command can run discovery regardless of this setting."
+          "deprecationMessage": "Deprecated — use `freekit.aiSelectorFinder.mode` instead.",
+          "markdownDescription": "**Deprecated** — use `freekit.aiSelectorFinder.mode`. Kept only so older settings files keep working; the mode setting is what the AI selector finder actually reads."
+        },
+        "freekit.aiSelectorFinder.mode": {
+          "type": "string",
+          "enum": ["off", "ollama", "browser"],
+          "enumDescriptions": [
+            "Disabled — the automatic selector repair stops after the fingerprint healer.",
+            "Local Ollama model (3–5 min per analysis, needs a chat model installed).",
+            "A new Chrome tab asking ChatGPT (15–30s). No API key, no install."
+          ],
+          "default": "browser",
+          "markdownDescription": "How Freekit repairs a broken selector automatically: `off` = disabled, `ollama` = local Ollama (3–5 min), `browser` = ChatGPT/Claude/Gemini web chat in a new Chrome tab (15–30s, **no API key needed**). Repair is fully automatic: no cards, no questions — details go to **Output → Freekit**. The manual `Freekit: Repair Selectors` command uses the same mode."
         },
         "freekit.aiFinderModel": {
           "type": "string",
           "default": "auto",
-          "markdownDescription": "Ollama model used by the **AI selector finder** (independent of `freekit.ollamaModel`). `auto` = the best installed chat model: `gemma3:12b` when available, otherwise the first match by preference (`qwen2.5-coder` → `qwen-coder` → `qwen` → `llama` → `mistral` → any other). Embeddings models (`nomic-embed-*`, `bge-*`, …) are never used. Set a specific name (e.g. `qwen2.5-coder:7b`) to force one; when it is not installed the analysis is skipped with a warning in the log."
+          "markdownDescription": "Ollama model used by the **AI selector finder** when `freekit.aiSelectorFinder.mode` is `ollama` (independent of `freekit.ollamaModel`). `auto` = the best installed chat model: `gemma3:12b` when available, otherwise the first match by preference (`qwen2.5-coder` → `qwen-coder` → `qwen` → `llama` → `mistral` → any other). Embeddings models (`nomic-embed-*`, `bge-*`, …) are never used. Set a specific name (e.g. `qwen2.5-coder:7b`) to force one; when it is not installed the analysis is skipped with a warning in the log."
         },
         "freekit.aiFinderTimeoutSeconds": {
           "type": "number",
           "default": 30,
           "minimum": 5,
           "maximum": 30,
-          "markdownDescription": "Timeout per AI selector-analysis attempt (maximum 30s). The complete finder has a hard 60s timeout and at most two attempts."
+          "markdownDescription": "Timeout per AI selector-analysis attempt in `ollama` mode (maximum 30s). The complete finder has a hard 60s timeout and at most two attempts. `browser` mode uses its own 45s budget for the new Chrome tab."
         },
-        "freekit.responseTimeoutMs": {
+        "freekit.providerTimeout": {
           "type": "number",
-          "default": 300000,
-          "minimum": 10000,
-          "maximum": 1800000,
-          "markdownDescription": "How long (milliseconds, 10000–1800000) to wait for one response from the web chat (ChatGPT/Claude/Gemini/DeepSeek/Mistral). Long answers that contain a whole file (e.g. a `test.ts`) can take several minutes, so the default is 300000 (5 minutes). At expiry Freekit still makes a last-chance read of the assistant bubble and returns it when it looks like a real answer; only when nothing usable is found does the `Timeout: no stable response … after Ns.` error appear."
+          "default": 90,
+          "minimum": 10,
+          "maximum": 1800,
+          "markdownDescription": "How long (seconds, 10–1800) to wait for one response from the web chat (ChatGPT/Claude/Gemini/DeepSeek/Mistral/Qwen). Default **90** (replaces the old `freekit.responseTimeoutMs`, which waited 300s; there is no backwards compatibility). While the provider shows it is working (Stop button, thinking/generating/reasoning/stop generating text, a new/growing answer, or a changed URL) the wait continues up to this budget; at 60s with **no sign of activity at all** Freekit stops early with `[<provider>] no response after 60s — provider stuck, try again or switch.` At expiry it still makes a last-chance read of the assistant bubble and returns it when it looks like a real answer; long answers that contain a whole file can take minutes — raise this only if you see such timeouts."
         },
         "freekit.cdpPort": {
           "type": "number",

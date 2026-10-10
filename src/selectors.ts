@@ -458,8 +458,16 @@ function isFragileSelector(sel: string): boolean {
   return sel.indexOf(' > ') >= 0 && !/[#.\[]/.test(sel);
 }
 
+/** v2.5.61 (FIX 4): câte eșecuri consecutive expiră un selector salvat. */
+const FAILURE_EXPIRY_COUNT = 2;
+
+/** v2.5.61 (FIX 1): câți candidați de healer trec prin testul funcțional. */
+const HEALER_MAX_FUNCTIONAL_TRIES = 3;
+
 export class SelectorStore {
   private overrides = new Map<string, LearnedSelector>();
+  /** v2.5.61 (FIX 4): eșecuri consecutive per slot (doar în sesiunea curentă). */
+  private failures = new Map<string, number>();
   private memento?: vscode.Memento;
   private notifier?: (info: LearnedSelector) => void;
   /** v0.7.0: configul activ (bundled sau remote din cache). */
@@ -647,6 +655,8 @@ export class SelectorStore {
    * fingerprint) îl salvăm pentru sesiunile viitoare.
    */
   note(providerId: string, slot: SlotName, selector: string) {
+    // v2.5.61 (FIX 4): selectorul chiar a funcționat în pagină
+    this.recordSuccess(providerId, slot);
     if (this.staticCandidates(providerId, slot).includes(selector)) return;
     this.learn(providerId, slot, selector, 'fingerprint');
   }
@@ -705,6 +715,8 @@ export class SelectorStore {
     if (meta?.confidence !== undefined) entry.confidence = meta.confidence;
     if (meta?.reasoning) entry.reasoning = meta.reasoning;
     this.overrides.set(key, entry);
+    // v2.5.61 (FIX 4): un selector nou șters din eșecuri începe cu contorul la 0
+    this.failures.delete(key);
     log('selector repaired: ' + key + ' -> ' + selector + ' (' + how + ')');
     void this.persist();
     try {
@@ -733,12 +745,57 @@ export class SelectorStore {
     return true;
   }
 
+  /* ---------------- v2.5.61 (FIX 4): expirarea selectorilor greșiți ----------------
+   *
+   * Un selector salvat (în selectors-user.json) care nu mai găsește elementul de
+   * DOUĂ ori la rând e șters automat — altfel rămâne „lipit" peste slot și
+   * fiecare task următor eșuează la fel. Se resetează la prima folosire reușită.
+   * Selecțiile scrise MANUAL (locked, bug #101) nu se șterg niciodată automat.
+   * ------------------------------------------------------------------------------ */
+
+  /** Eșecul unui selector salvat; la al doilea consecutiv îl șterge. */
+  recordFailure(providerId: string, slot: SlotName): number {
+    const key = this.key(providerId, slot);
+    const existing = this.overrides.get(key);
+    // fără override salvat nu avem ce expira (bundled-ul nu se atinge de aici)
+    if (!existing) return 0;
+    const count = (this.failures.get(key) ?? 0) + 1;
+    if (count >= FAILURE_EXPIRY_COUNT) {
+      this.failures.delete(key);
+      if (existing.locked) {
+        healLog(
+          'keeping user-locked ' + key + ' after ' + count + ' failures (manual choice)'
+        );
+        return count;
+      }
+      this.overrides.delete(key);
+      log('removed failing ' + key + ' (' + FAILURE_EXPIRY_COUNT + ' failures)');
+      void this.persist();
+      return count;
+    }
+    this.failures.set(key, count);
+    log('selector failed ' + count + '/' + FAILURE_EXPIRY_COUNT + ': ' + key);
+    return count;
+  }
+
+  /** Un selector a funcționat — contorul de eșecuri consecutive se resetează. */
+  recordSuccess(providerId: string, slot: SlotName) {
+    this.failures.delete(this.key(providerId, slot));
+  }
+
+  /** Pentru teste/diagnostics: câte eșecuri consecutive are slotul dat. */
+  failureCount(providerId: string, slot: SlotName): number {
+    return this.failures.get(this.key(providerId, slot)) ?? 0;
+  }
+
   /** Șterge override-urile (toate, sau doar pentru un provider). */
   reset(providerId?: string): number {
+    if (!providerId) this.failures.clear();
     let removed = 0;
     let kept = 0;
     for (const [key, entry] of Array.from(this.overrides.entries())) {
       if (providerId && entry.provider !== providerId) continue;
+      if (providerId) this.failures.delete(key);
       // v2.5.44 (bug #101): reselecțiile manuale ale utilizatorului rămân —
       // altfel „uită selectorii învățați" ar șterge exact reparația lui.
       if (entry.locked) {
@@ -1336,6 +1393,48 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
       why.push('icon');
     }
 
+    /* v2.5.61 (FIX 5) — penalizări/bonusuri pe textul de semnal.
+     * Healer-ul alegea `button[user-message-retry]` pentru `newChat` la Claude:
+     * există, e vizibil, dar e butonul de „retry" al unui mesaj. Acțiunile din
+     * interiorul mesajelor și butoanele de retry/regenerate/edit/delete sunt
+     * penalizate; „new"/„chat" + zona de header/sidebar + iconița plus/creion
+     * (exact ce are un buton de chat nou) primesc bonus. */
+    {
+      const labelHay = own.toLowerCase();
+      for (const bad of ['retry', 'regenerate', 'edit', 'delete', 'remove']) {
+        if (labelHay.indexOf(bad) >= 0) {
+          s -= 6;
+          why.push('penal:' + bad);
+        }
+      }
+      // „user-message-*" = acțiunile mesajelor utilizatorului, nu chrome-ul paginii
+      if (/(^|[\s_\-."'])user[-_]?(message|query|prompt)/i.test(labelHay)) {
+        s -= 8;
+        why.push('penal:user-message');
+      }
+      if (slot === 'newChat') {
+        for (const good of ['new', 'chat', 'nou']) {
+          if (labelHay.indexOf(good) >= 0) {
+            s += 4;
+            why.push('bonus:' + good);
+          }
+        }
+        try {
+          if (el.closest('header, [role="banner"], aside, nav, [class*="sidebar" i]')) {
+            s += 3;
+            why.push('bonus:header/sidebar');
+          }
+          const icon = el.querySelector('svg, img');
+          if (icon && /plus|add|compose|pen|pencil|new[-_]?chat/i.test(icon.outerHTML || '')) {
+            s += 2;
+            why.push('bonus:icon');
+          }
+        } catch {
+          /* closest/outerHTML pot arunca pe noduri detașate — ignorăm */
+        }
+      }
+    }
+
     if (s <= 0) return null;
     return { score: s, why };
   };
@@ -1697,6 +1796,30 @@ export function setAIFinder(fn: AIFinderFn | null) {
 }
 
 /* -------------------------------------------------------------------------
+ * v2.5.61 (FIX 1) — VALIDARE FUNCȚIONALĂ (hook)
+ *
+ * Healer-ul nu mai salvează un candidat doar pentru că are scorul cel mai bun:
+ * îl testează în pagină (click/type/read) înainte de `learn()`. Implementarea
+ * stă în ai-selector-finder.ts (are deja validatoarele stricte) și se
+ * înregistrează din initAISelectorFinder() — importul direct ar închide un ciclu
+ * de module (ai-selector-finder importă selectors).
+ * ------------------------------------------------------------------------- */
+
+export type SlotFunctionalValidatorFn = (
+  page: Page,
+  providerId: string,
+  slot: SlotName,
+  selector: string
+) => Promise<boolean>;
+
+let functionalValidatorFn: SlotFunctionalValidatorFn | null = null;
+
+/** Înregistrează testul funcțional al candidaților (null = dezactivat). */
+export function setFunctionalValidator(fn: SlotFunctionalValidatorFn | null) {
+  functionalValidatorFn = fn;
+}
+
+/* -------------------------------------------------------------------------
  * v2.5.45 (bug #102) — DESCOPERIRE PROACTIVĂ + REPARAREA INPUTULUI (hook-uri)
  *
  * Aceleași două funcții sunt implementate în ai-selector-finder.ts și
@@ -1788,75 +1911,116 @@ export async function healSlot(
   slot: SlotName,
   echoText?: string
 ): Promise<string | null> {
+  const slotKey = providerId + '.' + slot;
   // v2.5.44 (bug #101): slot cu selector scris manual → healer-ul nu se atinge
   // de el (nici scanare de fingerprint, nici AI finder).
   if (selectors.isLocked(providerId, slot)) {
     healLog('skip ' + providerId + ':' + slot + ' — user-locked');
+    log('tier 2 (user) locked for ' + slotKey + ' — keeping the user selector');
     return null;
   }
+
+  // v2.5.61 (FIX 3): reparația pornește la PRIMUL eșec — nu așteptăm trei.
+  log('immediate repair triggered for ' + slotKey);
+  // v2.5.61 (FIX 7): selectorii bundled au fost deja încercați (resolveSlot) iar
+  // unul salvat (dacă exista) tocmai a picat. FIX 4: al doilea eșec consecutiv
+  // al unui selector salvat îl șterge automat.
+  log('tier 1 (bundled) failed for ' + slotKey);
+  const learned = selectors.learned(providerId, slot);
+  if (learned) {
+    log('tier 2 (user) failed for ' + slotKey);
+    selectors.recordFailure(providerId, slot);
+  }
+
   const fp = selectors.fingerprint(providerId, slot);
   if (!fp) {
-    log('heal: ' + providerId + '.' + slot + ' has no fingerprint defined');
-    return null;
-  }
-  // v0.9.0: preferredKeywords (dacă sunt definite) întăresc scorul candidaților
-  const keywords = selectors.slotConfig(providerId, slot)?.preferredKeywords ?? [];
-  let found: ScanResult[] = [];
-  try {
-    found = await page.evaluate<ScanResult[], ScanArgs>(scanCandidates, {
-      fp,
-      slot,
-      blacklist: BLACKLIST_KEYWORDS,
-      promoText: PROMO_TEXT_PHRASES,
-      echoText,
-      keywords,
-      navSels: NAV_SELECTORS
-    });
-  } catch (e: any) {
-    log('heal evaluate failed (' + providerId + '.' + slot + '): ' + (e?.message ?? String(e)));
-    return null;
-  }
-
-  const usable = (found || []).filter(
-    (c) => isUsableSelector(c.selector) && !isPersistBlocked(slot, c.selector)
-  );
-  // FIX v2: preferăm selectorii stabili; nth-of-type doar ca ultimă variantă.
-  const best = usable.find((c) => !isFragileSelector(c.selector)) ?? usable[0];
-  if (!best) {
-    // v0.9.5: fallback AI — healer-ul clasic a eșuat complet
-    if (aiFinderFn) {
-      try {
-        log('heal: no candidate for ' + providerId + '.' + slot + ' — trying AI finder');
-        const aiSel = await aiFinderFn(page, providerId, slot, echoText);
-        if (aiSel) {
-          log('heal ' + providerId + '.' + slot + ' -> ' + aiSel + ' (AI)');
-          return aiSel;
-        }
-        log('AI finder: no usable selector for ' + providerId + '.' + slot);
-      } catch (e: any) {
-        log('AI finder failed for ' + providerId + '.' + slot + ': ' + (e?.message ?? String(e)));
-      }
-    } else {
-      log('heal: no candidate for ' + providerId + '.' + slot);
+    log('heal: ' + slotKey + ' has no fingerprint defined');
+  } else {
+    // v0.9.0: preferredKeywords (dacă sunt definite) întăresc scorul candidaților
+    const keywords = selectors.slotConfig(providerId, slot)?.preferredKeywords ?? [];
+    let found: ScanResult[] = [];
+    try {
+      found = await page.evaluate<ScanResult[], ScanArgs>(scanCandidates, {
+        fp,
+        slot,
+        blacklist: BLACKLIST_KEYWORDS,
+        promoText: PROMO_TEXT_PHRASES,
+        echoText,
+        keywords,
+        navSels: NAV_SELECTORS
+      });
+    } catch (e: any) {
+      log('heal evaluate failed (' + slotKey + '): ' + (e?.message ?? String(e)));
+      found = [];
     }
-    return null;
+
+    const usable = (found || []).filter(
+      (c) => isUsableSelector(c.selector) && !isPersistBlocked(slot, c.selector)
+    );
+    // FIX v2: preferăm selectorii stabili; nth-of-type doar ca ultimă variantă.
+    const stable = usable.filter((c) => !isFragileSelector(c.selector));
+    const ordered = [...stable, ...usable.filter((c) => isFragileSelector(c.selector))];
+    log('tier 3 (healer) trying for ' + slotKey + ' (' + ordered.length + ' candidate(s))');
+
+    // v2.5.61 (FIX 1): candidatul se TESTEAZĂ funcțional înainte de `learn()`.
+    for (const candidate of ordered.slice(0, HEALER_MAX_FUNCTIONAL_TRIES)) {
+      if (functionalValidatorFn) {
+        let ok = false;
+        try {
+          ok = await functionalValidatorFn(page, providerId, slot, candidate.selector);
+        } catch (e: any) {
+          log(
+            'functional test errored for ' + slotKey + ' (' + candidate.selector + '): ' +
+              (e?.message ?? String(e))
+          );
+          ok = false;
+        }
+        if (!ok) {
+          healLog('candidate rejected: ' + candidate.selector + ' (functional test failed)');
+          continue;
+        }
+      }
+      log(
+        'heal ' +
+          slotKey +
+          ' -> ' +
+          candidate.selector +
+          ' (scor ' +
+          candidate.score +
+          ' | ' +
+          candidate.why.join(', ') +
+          ')'
+      );
+      selectors.learn(providerId, slot, candidate.selector, 'fingerprint');
+      return candidate.selector;
+    }
+    if (ordered.length) {
+      log('tier 3 (healer) found no candidate that passed the functional test for ' + slotKey);
+    } else {
+      log('tier 3 (healer) found no candidate for ' + slotKey);
+    }
   }
 
-  log(
-    'heal ' +
-      providerId +
-      '.' +
-      slot +
-      ' -> ' +
-      best.selector +
-      ' (scor ' +
-      best.score +
-      ' | ' +
-      best.why.join(', ') +
-      ')'
-  );
-  selectors.learn(providerId, slot, best.selector, 'fingerprint');
-  return best.selector;
+  // Tier 4 (AI Finder: browser/ollama) + tier 5 (backup) — implementate în
+  // ai-selector-finder.ts și înregistrate prin setAIFinder().
+  if (aiFinderFn) {
+    try {
+      log('tier 4 (AI Finder) for ' + slotKey + '...');
+      const aiSel = await aiFinderFn(page, providerId, slot, echoText);
+      if (aiSel) {
+        log('heal ' + slotKey + ' -> ' + aiSel + ' (AI)');
+        return aiSel;
+      }
+      log('tier 4/5: no usable selector for ' + slotKey);
+    } catch (e: any) {
+      log('AI finder failed for ' + slotKey + ': ' + (e?.message ?? String(e)));
+    }
+  } else {
+    log('tier 4 (AI Finder) unavailable for ' + slotKey + ' — hook not registered');
+  }
+
+  log('tier 6/7: no automatic repair for ' + slotKey);
+  return null;
 }
 
 /**
@@ -1879,6 +2043,8 @@ export async function resolveSlot(
       const loc = page.locator(sel).first();
       try {
         if ((await loc.count()) > 0 && (await loc.isVisible())) {
+          // v2.5.61 (FIX 4): slotul a funcționat — eșecurile consecutive se resetează
+          selectors.recordSuccess(providerId, slot);
           selectors.note(providerId, slot, sel);
           return { locator: loc, selector: sel };
         }
@@ -1895,6 +2061,7 @@ export async function resolveSlot(
         const loc = page.locator(sel).first();
         try {
           if ((await loc.count()) > 0 && (await loc.isVisible())) {
+            selectors.recordSuccess(providerId, slot);
             return { locator: loc, selector: sel };
           }
         } catch {

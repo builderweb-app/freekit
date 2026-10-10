@@ -25,6 +25,13 @@ export interface ProviderError {
     | 'memory_full'
     /** v2.5.31 (bug #73): providerul (local) a căzut în timpul sesiunii. */
     | 'provider_down'
+    /**
+     * v2.5.60: providerul e BLOCAT — la 60s de la trimitere nu există niciun
+     * semn de activitate (fără thinking/generating/spinner, fără răspuns nou,
+     * fără schimbare de URL). Detecția adaptivă din `sendAndWait` abandonează
+     * devreme, în loc să aștepte tot bugetul (era 300s).
+     */
+    | 'no_response'
     | 'unknown';
   message: string;
   resetTime?: string;
@@ -310,6 +317,11 @@ export function providerErrorMessage(
     case 'provider_down':
       return (
         e.message + ' Restart ' + name + ' (or switch provider), then retry.'
+      );
+    case 'no_response':
+      // v2.5.60: mesajul cerut de spec — diagnostice clare, nu un timeout sec.
+      return (
+        '[' + name + '] no response after 60s — provider stuck, try again or switch.'
       );
     case 'model_missing':
       return (

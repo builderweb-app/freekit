@@ -38,33 +38,68 @@ const log = (msg: string) => console.log('[Freekit]', msg);
 const HEAL_CHECKPOINTS = [4000, 9000, 20000, 40000];
 
 /** v0.8.0: bugetul total de așteptare + pragul de stabilitate a textului. */
-/** v2.5.35 (bug #86): 150s era prea scurt pentru răspunsuri lungi (Gemini). */
-const DEFAULT_RESPONSE_TIMEOUT_MS = 300_000;
-const MIN_RESPONSE_TIMEOUT_MS = 10_000;
-const MAX_RESPONSE_TIMEOUT_MS = 1_800_000;
+/**
+ * v2.5.35 (bug #86): 150s era prea scurt pentru răspunsuri lungi (Gemini).
+ * v2.5.60: 300s era prea LUNG când providerul e blocat — testul din 8 Oct 2026
+ * a pierdut 5 minute pe un DeepSeek care nu răspundea deloc (18:38:41 → 18:43:42).
+ * Implicitul scade la 90s, iar detecția adaptivă (STUCK_CHECKPOINTS) oprește
+ * la 60s când pagina nu dă NICIUN semn de activitate.
+ */
+const DEFAULT_PROVIDER_TIMEOUT_S = 90;
+const MIN_PROVIDER_TIMEOUT_S = 10;
+const MAX_PROVIDER_TIMEOUT_S = 1800;
 const STABLE_MS = 2000;
 
 /**
- * v2.5.35 (bug #86): bugetul de așteptare a unui răspuns, din setarea
- * `freekit.responseTimeoutMs` (implicit 300s). Citit o dată per mesaj.
+ * v2.5.60: bugetul de așteptare a unui răspuns, din setarea
+ * `freekit.providerTimeout` (secunde, implicit 90; înlocuiește vechea
+ * `freekit.responseTimeoutMs`, în ms). Citit o dată per mesaj.
  */
-export function responseTimeoutMs(): number {
+export function providerTimeoutMs(): number {
   try {
     // require lazy — în teste Node modulul 'vscode' poate lipsi
     const v = require('vscode') as typeof import('vscode');
     const raw = Number(
       v.workspace
         .getConfiguration('freekit')
-        .get<number>('responseTimeoutMs', DEFAULT_RESPONSE_TIMEOUT_MS)
+        .get<number>('providerTimeout', DEFAULT_PROVIDER_TIMEOUT_S)
     );
-    if (!Number.isFinite(raw)) return DEFAULT_RESPONSE_TIMEOUT_MS;
-    return Math.min(
-      MAX_RESPONSE_TIMEOUT_MS,
-      Math.max(MIN_RESPONSE_TIMEOUT_MS, Math.floor(raw))
+    const seconds = Number.isFinite(raw)
+      ? Math.floor(raw)
+      : DEFAULT_PROVIDER_TIMEOUT_S;
+    return (
+      Math.min(
+        MAX_PROVIDER_TIMEOUT_S,
+        Math.max(MIN_PROVIDER_TIMEOUT_S, seconds)
+      ) * 1000
     );
   } catch {
-    return DEFAULT_RESPONSE_TIMEOUT_MS;
+    return DEFAULT_PROVIDER_TIMEOUT_S * 1000;
   }
+}
+
+/**
+ * v2.5.60 — DETECȚIE ADAPTIVĂ („providerul lucrează sau e blocat?").
+ * La 15s/30s/60s de la trimitere (`STUCK_CHECKPOINTS`): butonul de Stop vizibil
+ * (= generează), text de stare thinking/generating/reasoning/stop generating,
+ * răspuns nou, URL schimbat (chat nou) — plus scanul de erori de pagină
+ * (rate limit / limit reached). La 60s (`STUCK_ABORT_MS`), fără NICIUN semn de
+ * viață, abandonăm cu eroare clară — nu se mai așteaptă bugetul întreg (era 300s).
+ */
+const STUCK_CHECKPOINTS = [15_000, 30_000, 60_000];
+/** v2.5.60: pragul de la care „zero activitate" = provider blocat. */
+const STUCK_ABORT_MS = 60_000;
+
+/**
+ * v2.5.60: la 60s, fără buton de Stop / text de stare / răspuns nou și fără
+ * URL schimbat → providerul e blocat.
+ */
+export function isProviderStuck(
+  working: boolean,
+  sawResponse: boolean,
+  urlChanged: boolean
+): boolean {
+  return !working && !sawResponse && !urlChanged;
 }
 
 /** v2.5.15 (bug #41): câte continuări „new chat" acceptăm per mesaj. */
@@ -197,13 +232,16 @@ export async function findInput(
   // v2.5.45 (bug #102): CAPTCHA / chat gol = tot „nu e gata", nu „selector stricat".
   if (await detectCaptcha(page)) notifyNotReady(providerId, 'CAPTCHA challenge');
   notifyNotReady(providerId, 'no chat input in the DOM');
-  throw new Error(
-    'I could not find the input box for ' +
-      label +
-      ' (selectors tried: ' +
-      selectors.candidates(providerId, 'input').join(', ') +
-      '). Are you logged in to Chrome with the Freekit profile? ' +
-      'If the selector is broken, run "Freekit: Repair Selectors".'
+  // v2.5.61 (FIX 7): toate tier-urile au fost încercate înainte de a ajunge aici
+  // (bundled → user → healer → AI Finder → backup); abia acum cerem ceva
+  // utilizatorului, printr-un card minimal cu Retry / Switch provider.
+  logLine(
+    'selectors',
+    'tier 6/7: every repair tier failed for ' + providerId + '.input — asking the user'
+  );
+  throw new SelectorsBrokenError(
+    providerId,
+    'input not found (tried: ' + selectors.candidates(providerId, 'input').join(', ') + ')'
   );
 }
 
@@ -289,6 +327,31 @@ export function isLoginRequiredError(e: any): boolean {
 
 const loginError = (providerId: string, url: string) =>
   new LoginRequiredError(providerId, url);
+
+/* =========================================================================
+ * v2.5.61 (FIX 7) — „SELECTORII NU SE MAI POT REPARA"
+ *
+ * Tier 7 din cascadă: bundled → user-locked → healer → AI Finder (browser) →
+ * backup → alt provider au fost toate încercate și niciun selector nu a
+ * funcționat. Abia ACUM cerem ceva utilizatorului, cu un card minimal în chat
+ * (providers/base.ts nu mai aruncă o eroare seacă plină de selectori încercați).
+ * ========================================================================= */
+
+/** Codul purtat de eroarea de selectori stricați (cardul minimal din chat). */
+export const SELECTORS_BROKEN_CODE = 'FREEKIT_SELECTORS_BROKEN';
+
+export class SelectorsBrokenError extends Error {
+  readonly code = SELECTORS_BROKEN_CODE;
+  constructor(readonly providerId: string, readonly detail?: string) {
+    super('I can not continue. Check that you are logged in to Chrome.');
+    this.name = 'SelectorsBrokenError';
+  }
+}
+
+/** true dacă toate tier-urile de reparare au eșuat pentru acest provider. */
+export function isSelectorsBrokenError(e: any): boolean {
+  return !!e && (e.code === SELECTORS_BROKEN_CODE || e instanceof SelectorsBrokenError);
+}
 
 /**
  * v2.0.4: rulează ÎN PAGINĂ — true dacă DOM-ul arată ca o pagină de login: un
@@ -844,8 +907,7 @@ export function isInputSuspect(providerId: string): boolean {
 async function repairInput(
   page: Page,
   providerId: string,
-  label: string,
-  onNotice?: (text: string) => void
+  label: string
 ): Promise<string | null> {
   const repair = inputRepair();
   if (!repair) return null;
@@ -856,10 +918,11 @@ async function repairInput(
       return r.selector;
     }
     log(label + ': input repair found nothing — ' + r.reason);
+    // v2.5.61 (FIX 6): reparația selectorilor e complet automată — nu arătăm
+    // niciun card pe drum. Dacă mesajul tot nu poate fi trimis, tier-ul 7 ridică
+    // un singur card minimal (SelectorsBrokenError), cu Retry / Switch provider.
     if (r.gaveUp) {
-      onNotice?.(
-        '⚠️ ' + label + ': nu pot găsi input-ul de chat. Show Browser → DevTools → fix manual.'
-      );
+      logLine('selectors', 'input repair gave up for ' + providerId + ' — tier 7 will report');
     }
     return null;
   } catch (e: any) {
@@ -915,7 +978,7 @@ export async function ensureComposerHasMessage(
       (after === null ? 'unreadable' : after.length + '/' + message.length) + ')'
   );
   suspectInput.add(providerId);
-  const repaired = await repairInput(page, providerId, label, onNotice);
+  const repaired = await repairInput(page, providerId, label);
   if (!repaired) return input;
 
   const replacement = page.locator(repaired).first();
@@ -972,6 +1035,86 @@ const THINKING_SELECTORS: Record<string, string[]> = {
 
 /** Selectori generici, încercați după cei specifici providerului. */
 const GENERIC_THINKING_SELECTORS = ['[class*="think"]', '[class*="reason"]'];
+
+/**
+ * v2.5.60: rulează ÎN PAGINĂ (serializat — fără closure-uri!) — providerul dă
+ * semne de viață ACUM?
+ *   1) butonul de Stop (`selectors.json` → `stopButton`) — apare doar cât timp
+ *      providerul generează; e semnalul principal, deci e verificat primul;
+ *   2) text de stare vizibil: /thinking|generating|reasoning|stop generating/i;
+ *   3) (în buclă) schimbarea de URL.
+ * Elementele ascunse (getClientRects gol / visibility:hidden) sunt ignorate.
+ */
+export const scanProviderWorking = (args: {
+  thinkingSels: string[];
+  stopSels: string[];
+}): boolean => {
+  const isVisible = (el: Element): boolean => {
+    const he = el as HTMLElement;
+    if (!he.getClientRects().length) return false;
+    const st = window.getComputedStyle(he);
+    return st.visibility !== 'hidden' && st.display !== 'none';
+  };
+  const visibleAny = (sels: string[]): boolean => {
+    for (const sel of sels) {
+      let els: Element[] = [];
+      try {
+        els = Array.prototype.slice.call(document.querySelectorAll(sel));
+      } catch {
+        continue;
+      }
+      for (const el of els) {
+        if (isVisible(el)) return true;
+      }
+    }
+    return false;
+  };
+
+  // 1) butonul de Stop — apare doar cât timp providerul generează
+  if (visibleAny(args.stopSels)) return true;
+
+  // 2) text de stare („Thinking…", „Generating…", „Stop generating")
+  const re = /thinking|generating|reasoning|stop generating/i;
+  for (const sel of args.thinkingSels) {
+    let els: Element[] = [];
+    try {
+      els = Array.prototype.slice.call(document.querySelectorAll(sel));
+    } catch {
+      continue;
+    }
+    for (const el of els) {
+      if (!isVisible(el)) continue;
+      if (re.test(String((el as HTMLElement).innerText || ''))) return true;
+    }
+  }
+  const body = document.body as HTMLElement | null;
+  return !!body && re.test(String(body.innerText || ''));
+};
+
+/**
+ * v2.5.60: „lucrează acum?" — un singur scan în pagină, cu timeout de
+ * siguranță (o pagină înghețată nu are voie să blocheze verificarea).
+ */
+async function providerWorking(page: Page, providerId: string): Promise<boolean> {
+  try {
+    const probe = page
+      .evaluate<boolean, { thinkingSels: string[]; stopSels: string[] }>(
+        scanProviderWorking,
+        {
+          thinkingSels: [
+            ...(THINKING_SELECTORS[providerId] || []),
+            ...GENERIC_THINKING_SELECTORS
+          ],
+          stopSels: selectors.candidates(providerId, 'stopButton')
+        }
+      )
+      .catch(() => false);
+    return (await Promise.race([probe, sleep(4000).then(() => false)])) === true;
+  } catch (e: any) {
+    log('activity probe failed: ' + (e?.message ?? String(e)));
+    return false;
+  }
+}
 
 /**
  * Rulează ÎN PAGINĂ: întoarce textul ultimului bloc de raționament vizibil
@@ -1214,6 +1357,16 @@ export async function sendAndWait(
     const decision = await cfg.onLoggedOut(providerId);
     if (decision !== 'continue') throw new Error('__ABORTED__');
   }
+  /**
+   * v2.5.60 — DETECȚIE ADAPTIVĂ („providerul lucrează sau e blocat?"):
+   * `stuckIndex` = următorul checkpoint (15s/30s/60s); `lastUrlSeen` = URL-ul
+   * dinainte de Enter, actualizat la fiecare verificare (o schimbare între
+   * verificări = chat/răspuns nou); `sawResponseText` = am citit deja text REAL
+   * de răspuns (post-ecou). La 60s, fără niciunul dintre semnale → eroare clară.
+   */
+  let stuckIndex = 0;
+  let lastUrlSeen = page.url();
+  let sawResponseText = false;
   input = await composeAndSend(message);
   log(label + ': message sent, waiting for the response...');
 
@@ -1231,9 +1384,10 @@ export async function sendAndWait(
   // v2.5.12 FIX (bug #36): true după ce am văzut un răspuns NOU (count crescut
   // sau text schimbat) — folosit de „rescue" ca să accepte și un răspuns identic.
   let sawNewResponse = false;
-  // v2.5.35 (bug #86): bugetul de așteptare din setări (implicit 300s), citit
-  // o dată per mesaj.
-  const hardTimeoutMs = responseTimeoutMs();
+  // v2.5.35 (bug #86): bugetul de așteptare din setări, citit o dată per mesaj.
+  // v2.5.60: `freekit.providerTimeout` (secunde, implicit 90) — iar detecția
+  // adaptivă de mai jos oprește la 60s un provider fără niciun semn de viață.
+  const hardTimeoutMs = providerTimeoutMs();
   let started = Date.now();
   // v2.5.15 (bug #41): textul trimis efectiv în chat (poate include prefixul de
   // handoff după o continuare) — gardele de ecou se raportează la el.
@@ -1266,6 +1420,10 @@ export async function sendAndWait(
     );
     await newChatVia(page, providerId, label);
     sentText = prefix ? prefix + '\n\n' + message : message;
+    // v2.5.60: baseline nou pentru detecția adaptivă (chat nou, buclă nouă)
+    lastUrlSeen = page.url();
+    stuckIndex = 0;
+    sawResponseText = false;
     input = await composeAndSend(sentText);
     // chat nou → sentinelele repornesc (alt DOM, altă numărătoare de răspunsuri)
     beforeText = await readResponse(responseSelectors);
@@ -1281,42 +1439,58 @@ export async function sendAndWait(
     log(label + ': message sent in the new chat, waiting for the response...');
   };
 
+  /**
+   * v2.5.60: RESCUE — ultima șansă înainte de timeout/abort: extragere
+   * generică (fallback) a ultimului răspuns; întoarce textul doar dacă arată
+   * ca un răspuns real (nu ecou, suficient de lung, diferit de starea dinainte
+   * de trimitere). Poate RELUA într-un chat nou (memory full) — de aceea
+   * rezultatul e un marcaj, nu direct textul.
+   */
+  const rescueRead = async (): Promise<
+    { kind: 'restart' } | { kind: 'reply'; text: string } | { kind: 'none' }
+  > => {
+    const rescuedRaw = await readResponse(
+      selectors.candidates(providerId, 'response'),
+      true
+    );
+    const rescued = stripEchoedUserMessage(rescuedRaw, sentText);
+    if (rescued !== rescuedRaw) {
+      log(label + ': stripped echoed user message from AI reply (rescue)');
+    }
+    if (
+      !rescued ||
+      rescued.length < 20 ||
+      (!sawNewResponse && rescued === beforeText) ||
+      isEchoOf(rescued, sentText)
+    ) {
+      return { kind: 'none' };
+    }
+    log(label + ': RESCUE generic, ' + rescued.length + ' chars');
+    // v2.5.1: și textul de la „rescue” poate fi un mesaj de eroare al site-ului
+    const detected = detectProviderError(
+      rescued,
+      providerId,
+      await upgradeLink()
+    );
+    if (detected?.kind === 'memory_full') {
+      await restartInNewChat();
+      return { kind: 'restart' };
+    }
+    if (detected) throwProviderError(providerId, detected, page);
+    // v1.7.1: thinking-ul modelului (best-effort, înainte de return)
+    await emitThinking(page, providerId, sentText, cfg, label);
+    return { kind: 'reply', text: rescued };
+  };
+
   for (;;) {
     // v2.5.15 (bug #41): bugetul de așteptare s-a consumat → RESCUE + scanul
     // final de erori. O continuare într-un chat nou (memory full) resetează
     // `started` și reia bucla.
     if (Date.now() - started >= hardTimeoutMs) {
       // RESCUE: ultima șansă — extragere generică, ca să nu blocăm utilizatorul
-      const rescuedRaw = await readResponse(
-        selectors.candidates(providerId, 'response'),
-        true
-      );
-      const rescued = stripEchoedUserMessage(rescuedRaw, sentText);
-      if (rescued !== rescuedRaw) {
-        log(label + ': stripped echoed user message from AI reply (rescue)');
-      }
-      if (
-        rescued &&
-        rescued.length >= 20 &&
-        (sawNewResponse || rescued !== beforeText) &&
-        !isEchoOf(rescued, sentText)
-      ) {
-        log(label + ': RESCUE generic, ' + rescued.length + ' chars');
-        // v2.5.1: și textul de la „rescue” poate fi un mesaj de eroare al site-ului
-        const detected = detectProviderError(
-          rescued,
-          providerId,
-          await upgradeLink()
-        );
-        if (detected?.kind === 'memory_full') {
-          await restartInNewChat();
-          continue;
-        }
-        if (detected) throwProviderError(providerId, detected, page);
-        // v1.7.1: thinking-ul modelului (best-effort, înainte de return)
-        await emitThinking(page, providerId, sentText, cfg, label);
-        return rescued;
-      }
+      const rescued = await rescueRead();
+      if (rescued.kind === 'restart') continue;
+      if (rescued.kind === 'reply') return rescued.text;
 
       // v2.5.1: înainte de timeout-ul sec, verificăm dacă pagina afișează o eroare
       // cunoscută (banner care nu intră în selectorii de răspuns) — ex: limita de
@@ -1347,6 +1521,61 @@ export async function sendAndWait(
     }
 
     const elapsed = Date.now() - started;
+
+    // v2.5.60 — DETECȚIE ADAPTIVĂ: la 15s/30s/60s verificăm dacă providerul dă
+    // vreun semn de viață (buton de Stop vizibil, text de stare
+    // thinking/generating/reasoning/stop generating, răspuns nou sau URL
+    // schimbat) ori afișează un banner de „rate limit”/„limit reached”. La 60s
+    // fără NIMIC: rescue (poate răspunsul există dar nu e selectat) și apoi
+    // eroare clară de „provider stuck” — nu mai așteptăm bugetul întreg (era
+    // 300s; testul din 8 Oct: 5 minute pierdute).
+    if (
+      stuckIndex < STUCK_CHECKPOINTS.length &&
+      elapsed >= STUCK_CHECKPOINTS[stuckIndex]
+    ) {
+      const checkpoint = STUCK_CHECKPOINTS[stuckIndex];
+      stuckIndex++;
+
+      // „rate limit” / „limit reached” / CAPTCHA / memory full în pagină →
+      // card clar imediat (același scan ca la checkpoint-urile de reparare).
+      const pageError = await detectProviderErrorOnPage(page, providerId, sentText);
+      if (pageError?.kind === 'memory_full') {
+        await restartInNewChat();
+        continue;
+      }
+      if (pageError) throwProviderError(providerId, pageError, page);
+
+      // v2.5.60: buton de Stop vizibil (= generează) SAU text de stare
+      // /thinking|generating|reasoning|stop generating/i SAU răspuns nou SAU
+      // URL schimbat → providerul lucrează; altfel, la 60s e BLOCAT.
+      const generating = await providerWorking(page, providerId);
+      const currentUrl = page.url();
+      const urlChanged = currentUrl !== lastUrlSeen;
+      lastUrlSeen = currentUrl;
+      const seconds = Math.round(checkpoint / 1000);
+      log(
+        '[stuck-check] ' + label + ' @' + seconds + 's: generating=' + generating +
+          ', response=' + sawResponseText + ', urlChanged=' + urlChanged
+      );
+
+      if (
+        checkpoint >= STUCK_ABORT_MS &&
+        isProviderStuck(generating, sawResponseText, urlChanged)
+      ) {
+        log(
+          label + ': provider stuck — no activity at ' + seconds +
+            's — aborting early (was waiting the whole budget)'
+        );
+        const rescued = await rescueRead();
+        if (rescued.kind === 'restart') continue;
+        if (rescued.kind === 'reply') return rescued.text;
+        throwProviderError(
+          providerId,
+          { kind: 'no_response', message: 'no response after 60s' },
+          page
+        );
+      }
+    }
 
     // 1) dacă selectoarele de răspuns nu prind nimic, repară-le (checkpoint-uri)
     if (healIndex < HEAL_CHECKPOINTS.length && elapsed > HEAL_CHECKPOINTS[healIndex]) {
@@ -1455,6 +1684,10 @@ export async function sendAndWait(
     // v0.8.0: ecoul propriului mesaj nu e răspuns — nu îl declarăm "stabil".
     // v0.9.3: extins cu sufixele de acțiuni (Kimi „Edit/Copy/Share”) — vezi isEchoOf.
     if (isEchoOf(visible, sentText)) continue;
+
+    // v2.5.60: avem text REAL de răspuns — sentința detecției adaptive
+    // („la 60s fără thinking ȘI fără răspuns → provider blocat”).
+    sawResponseText = true;
 
     // FAZA III (E): progres vizibil — trimitem și textul parțial (throttled).
     if (

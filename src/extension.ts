@@ -7,6 +7,7 @@ import { initLogChannel, logLine } from './log';
 import { runDiagnostics } from './diagnostics';
 import { checkAndApplyRemote, shouldAutoCheck } from './remoteSelectors';
 import { initAISelectorFinder, rediscoverSelectors } from './ai-selector-finder';
+import { setBrowserAiPageFactory } from './browserAi';
 import { mcp } from './mcp/manager';
 import { setupWhisperAssets } from './stt';
 import { stopDevServers } from './devServers';
@@ -99,6 +100,9 @@ export async function activate(ctx: vscode.ExtensionContext) {
   selectors.init(ctx.globalState);
   // v0.9.5: AI selector discovery (fallback pe Ollama) + selectors-user.json
   initAISelectorFinder(ctx.globalStorageUri.fsPath);
+  // v2.5.61 (FIX 2): modul `browser` al AI Finder-ului are nevoie de un TAB NOU
+  // în Chrome (chat-ul aflat în lucru nu se atinge); fereastra rămâne în fundal.
+  setBrowserAiPageFactory(() => browser.newPage());
   const cfg = configInfo();
   logLine(
     'extension',

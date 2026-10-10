@@ -131,6 +131,7 @@ import {
   isLoginRequiredError,
   isLoginUrl,
   isProviderRootUrl,
+  isSelectorsBrokenError,
   isSessionReady,
   resumeConversation,
   sleep
@@ -844,6 +845,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // v1.9.0: magazinul de conversații (listă + conversația activă, în globalState)
     this.conversations = new ConversationStore(state);
     setAIFinderStatusListener((status) => {
+      // v2.5.61 (FIX 6): reparația automată a selectorilor e invizibilă pentru
+      // utilizator — statusul rămâne DOAR în Output → Freekit (fără card în chat).
+      if (status.silent) {
+        logLine('ai-finder', 'silent status (no card): ' + status.phase);
+        return;
+      }
       this.aiFinderStatuses.set(status.id, status);
       if (this.aiFinderStatuses.size > 8) {
         const oldest = this.aiFinderStatuses.keys().next().value;
@@ -3291,6 +3298,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           availableModels: e.details.availableModels
         });
         return;
+      } else if (isSelectorsBrokenError(e)) {
+        // v2.5.61 (FIX 7) — tier 7: toate tier-urile de reparare automată
+        // (bundled → user → healer → AI Finder browser → backup) au eșuat.
+        // ABIA ACUM apare un card minimal, cu Retry / Switch provider.
+        log('selectors broken: ' + (e?.message ?? String(e)));
+        logLine('selectors', 'tier 7 card shown for ' + (e?.providerId ?? 'provider'));
+        this.post('provider_error', {
+          kind: 'selectors',
+          providerId: e?.providerId ?? '',
+          message: e?.message ?? 'I can not continue. Check that you are logged in to Chrome.'
+        });
       } else if (isLoginRequiredError(e)) {
         // v2.0.4: login UX — în loc de o eroare seacă, aducem Chrome în față
         // (ca utilizatorul să se poată autentifica) și oferim în chat cardul

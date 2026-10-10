@@ -13,6 +13,7 @@ import {
 } from './ai-finder-events';
 import {
   configInfo,
+  countAssistantResponses,
   DiscoveryOutcome,
   getLastResponseText,
   inputAvailable,
@@ -22,16 +23,26 @@ import {
   promoPhraseHit,
   selectors,
   setAIFinder,
+  setFunctionalValidator,
   setInputRepair,
   setNotReadyNotifier,
   setProactiveDiscovery,
   SLOTS,
   SlotName
 } from './selectors';
+import {
+  askBrowserAi,
+  BROWSER_AI_PROVIDER,
+  BROWSER_AI_TIMEOUT_MS,
+  browserAiAvailable
+} from './browserAi';
 
 const log = (msg: string) => logLine('ai-finder', msg);
 /** v2.5.44 (bug #101): același tag ca healer-ul din selectors.ts. */
 const healLog = (msg: string) => logLine('healer', msg);
+/** v2.5.61: tag pentru cascada de reparare (FIX 7), ca să fie ușor de filtrat. */
+const tierLog = (msg: string) => logLine('selectors', msg);
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /* =========================================================================
  * v0.9.5 — AI-POWERED SELECTOR DISCOVERY
@@ -87,6 +98,11 @@ export const DOM_MAX_CHARS = 18000;
 export const AI_FINDER_MAX_ATTEMPTS = 2;
 const AI_FINDER_ATTEMPT_TIMEOUT_MS = 30_000;
 const AI_FINDER_GLOBAL_TIMEOUT_MS = 60_000;
+/**
+ * v2.5.61 (FIX 2): modul browser e single-shot (45s pentru răspuns + validarea
+ * în pagină a selectorilor propuși), deci plafonul global e mai mare.
+ */
+const AI_FINDER_BROWSER_GLOBAL_TIMEOUT_MS = 75_000;
 
 /**
  * v2.5.41 (bug #96): ce ajunge în snapshot. HTML-ul complet al unui chat
@@ -150,26 +166,63 @@ const inputRepairFailures = new Map<string, number>();
 /** Fix 3: cardul „fix manual" se afișează o singură dată per sesiune. */
 const inputRepairGaveUp = new Set<string>();
 
+/**
+ * v2.5.61 (FIX 2): modul AI finder-ului.
+ *   - `off`     = dezactivat;
+ *   - `ollama`  = model local (3–5 min);
+ *   - `browser` = web chat într-un tab nou de Chrome (15–30s, fără API key).
+ * Implicit `browser`: reparația selectorilor funcționează fără nicio instalare.
+ */
+export type AiFinderMode = 'off' | 'ollama' | 'browser';
+
+const AI_FINDER_MODES: readonly AiFinderMode[] = ['off', 'ollama', 'browser'];
+export const AI_FINDER_DEFAULT_MODE: AiFinderMode = 'browser';
+
 interface FinderSettings {
+  mode: AiFinderMode;
   enabled: boolean;
   timeoutMs: number;
 }
 
-function finderSettings(): FinderSettings {
+/** v2.5.61 (FIX 2): citește `freekit.aiSelectorFinder.mode`. */
+function aiFinderMode(): AiFinderMode {
   try {
     // require lazy — în teste Node modulul 'vscode' poate lipsi
     const v = require('vscode') as typeof import('vscode');
-    const cfg = v.workspace.getConfiguration('freekit');
-    const enabled = cfg.get<boolean>('aiSelectorFinder', false);
+    const raw = String(
+      v.workspace
+        .getConfiguration('freekit')
+        .get<string>('aiSelectorFinder.mode', AI_FINDER_DEFAULT_MODE) ?? ''
+    )
+      .trim()
+      .toLowerCase();
+    return (AI_FINDER_MODES as readonly string[]).includes(raw)
+      ? (raw as AiFinderMode)
+      : AI_FINDER_DEFAULT_MODE;
+  } catch {
+    return AI_FINDER_DEFAULT_MODE;
+  }
+}
+
+function finderSettings(): FinderSettings {
+  const mode = aiFinderMode();
+  try {
+    const v = require('vscode') as typeof import('vscode');
     const secs = Number(
-      cfg.get<number>('aiFinderTimeoutSeconds', DEFAULT_AI_FINDER_TIMEOUT_SECONDS)
+      v.workspace
+        .getConfiguration('freekit')
+        .get<number>('aiFinderTimeoutSeconds', DEFAULT_AI_FINDER_TIMEOUT_SECONDS)
     );
     const safe = Number.isFinite(secs)
       ? Math.min(30, Math.max(5, secs))
       : DEFAULT_AI_FINDER_TIMEOUT_SECONDS;
-    return { enabled, timeoutMs: safe * 1000 };
+    return { mode, enabled: mode !== 'off', timeoutMs: safe * 1000 };
   } catch {
-    return { enabled: false, timeoutMs: DEFAULT_AI_FINDER_TIMEOUT_SECONDS * 1000 };
+    return {
+      mode,
+      enabled: mode !== 'off',
+      timeoutMs: DEFAULT_AI_FINDER_TIMEOUT_SECONDS * 1000
+    };
   }
 }
 
@@ -1004,6 +1057,8 @@ export async function findSelectorsWithAI(
     statusId?: string;
     /** Apelantul a verificat deja că în DOM există un răspuns de măsurat. */
     replyPresent?: boolean;
+    /** v2.5.61 (FIX 6): reparație automată — fără carduri în chat, doar log. */
+    silent?: boolean;
   } = {}
 ): Promise<DiscoveredSelectors | null> {
   if (await isLoginOrCaptchaPage(page)) {
@@ -1025,12 +1080,19 @@ export async function findSelectorsWithAI(
     status: statusBase
   };
   activeFinders.set(id, active);
+  const silent = opts.silent === true;
+  const mode = finderSettings().mode;
+  const maxAttempts = mode === 'browser' ? 1 : AI_FINDER_MAX_ATTEMPTS;
+  const globalTimeoutMs =
+    mode === 'browser' ? AI_FINDER_BROWSER_GLOBAL_TIMEOUT_MS : AI_FINDER_GLOBAL_TIMEOUT_MS;
+  const globalTimeoutSeconds = Math.round(globalTimeoutMs / 1000);
   publishAIFinderStatus({
     ...statusBase,
     phase: 'running',
     attempt: 1,
-    maxAttempts: AI_FINDER_MAX_ATTEMPTS,
-    message: 'Preparing the page for selector analysis…'
+    maxAttempts,
+    message: 'Preparing the page for selector analysis…',
+    silent
   });
 
   let timedOut = false;
@@ -1050,15 +1112,18 @@ export async function findSelectorsWithAI(
   const globalTimeout = new Promise<null>((resolve) => {
     timeout = setTimeout(() => {
       timedOut = true;
-      log('global timeout (60s) — aborting');
+      log('global timeout (' + globalTimeoutSeconds + 's, mode=' + mode + ') — aborting');
       publishAIFinderStatus({
         ...statusBase,
         phase: 'timeout',
-        message: 'AI finder timed out after 60s. Bundled selectors are not working.'
+        message:
+          'AI finder timed out after ' + globalTimeoutSeconds +
+          's. Bundled selectors are not working.',
+        silent
       });
       active.controller.abort();
       resolve(null);
-    }, AI_FINDER_GLOBAL_TIMEOUT_MS);
+    }, globalTimeoutMs);
   });
 
   try {
@@ -1076,13 +1141,15 @@ export async function findSelectorsWithAI(
         ...statusBase,
         phase: 'success',
         selectors: accepted,
-        message: 'Selectors repaired: ' + (accepted.join(', ') || 'validated')
+        message: 'Selectors repaired: ' + (accepted.join(', ') || 'validated'),
+        silent
       });
     } else {
       publishAIFinderStatus({
         ...statusBase,
         phase: 'failed',
-        message: 'Repair failed. Manual intervention required.'
+        message: 'Repair failed. Manual intervention required.',
+        silent
       });
     }
     return result;
@@ -1092,7 +1159,8 @@ export async function findSelectorsWithAI(
       publishAIFinderStatus({
         ...statusBase,
         phase: 'failed',
-        message: 'Repair failed. Manual intervention required.'
+        message: 'Repair failed. Manual intervention required.',
+        silent
       });
     }
     return null;
@@ -1133,6 +1201,8 @@ async function runFindSelectorsWithAI(
     echoText?: string;
     /** Apelantul a verificat deja că în DOM există un răspuns de măsurat. */
     replyPresent?: boolean;
+    /** v2.5.61 (FIX 6): reparație automată — fără carduri în chat, doar log. */
+    silent?: boolean;
     signal?: AbortSignal;
     statusId?: string;
   } = {}
@@ -1162,11 +1232,24 @@ async function runFindSelectorsWithAI(
   }
   const wantedRequired = required.filter((s) => wanted.indexOf(s) >= 0);
 
-  // v2.5.40 (bug #93): modelul se rezolvă ÎNAINTE de capturarea DOM-ului — cu
-  // doar embeddings instalate nu mai plătim snapshot-ul degeaba.
-  const model = await resolveAiFinderModel();
-  if (opts.signal?.aborted) return null;
-  if (!model) return null;
+  // v2.5.61 (FIX 2): modul decide CINE analizează DOM-ul (tab nou de Chrome sau
+  // Ollama local). `off` nu ajunge aici (apelanții verifică `enabled`).
+  const mode = finderSettings().mode;
+  if (mode === 'off') {
+    log('AI finder disabled (freekit.aiSelectorFinder.mode=off)');
+    return null;
+  }
+  let model: string | null = null;
+  if (mode === 'ollama') {
+    // v2.5.40 (bug #93): modelul se rezolvă ÎNAINTE de capturarea DOM-ului — cu
+    // doar embeddings instalate nu mai plătim snapshot-ul degeaba.
+    model = await resolveAiFinderModel();
+    if (opts.signal?.aborted) return null;
+    if (!model) return null;
+  } else if (!browserAiAvailable()) {
+    log('mode=browser needs a Chrome page factory — none registered, skipping');
+    return null;
+  }
 
   let url = '';
   try {
@@ -1189,11 +1272,21 @@ async function runFindSelectorsWithAI(
 
   const settings = finderSettings();
   const attemptTimeoutMs = Math.min(settings.timeoutMs, AI_FINDER_ATTEMPT_TIMEOUT_MS);
-  const ollama = new OllamaProvider({ model });
+  // browser: o singură trecere (45s); ollama: până la două încercări de 30s
+  const maxAttempts = mode === 'browser' ? 1 : AI_FINDER_MAX_ATTEMPTS;
+  const ollama = mode === 'ollama' ? new OllamaProvider({ model: model as string }) : null;
+  if (mode === 'browser') {
+    log(
+      'mode=browser, provider=' + BROWSER_AI_PROVIDER + ', analyzing DOM (' +
+        dom.length + ' chars)'
+    );
+  } else {
+    log('mode=ollama, provider=' + model + ', analyzing DOM (' + dom.length + ' chars)');
+  }
   let failureReason: string | undefined;
   let rejectedSelector: string | undefined;
 
-  for (let attempt = 1; attempt <= AI_FINDER_MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (opts.signal?.aborted) return null;
     if (opts.statusId) {
       publishAIFinderStatus({
@@ -1202,45 +1295,56 @@ async function runFindSelectorsWithAI(
         providerName,
         phase: 'attempt',
         attempt,
-        maxAttempts: AI_FINDER_MAX_ATTEMPTS,
+        maxAttempts,
         message:
-          attempt === 1
-            ? 'Analyzing DOM (attempt 1/2) — up to 30s per attempt, 60s max.'
-            : 'Attempt 2/2 — retrying with a more specific prompt…'
+          mode === 'browser'
+            ? 'Analyzing the DOM in a new Chrome tab (up to 45s)…'
+            : attempt === 1
+              ? 'Analyzing DOM (attempt 1/2) — up to 30s per attempt, 60s max.'
+              : 'Attempt 2/2 — retrying with a more specific prompt…',
+        silent: opts.silent === true
       });
     }
+    const prompt = buildPrompt({
+      providerName,
+      url,
+      missingSlots: wanted,
+      dom,
+      attempt,
+      failureReason,
+      rejectedSelector,
+      inputOnly: opts.inputOnly,
+      onboarding: opts.onboarding
+    });
     let reply = '';
     try {
-      // fără istoric între încercări: promptul conține deja tot ce trebuie
-      // (altfel cele 18k caractere de snapshot s-ar aduna peste num_ctx 8192)
-      await ollama.newChat();
-      if (opts.signal?.aborted) return null;
-      reply = await askOllama(
-        ollama,
-        buildPrompt({
-          providerName,
-          url,
-          missingSlots: wanted,
-          dom,
-          attempt,
-          failureReason,
-          rejectedSelector,
-          inputOnly: opts.inputOnly,
-          onboarding: opts.onboarding
-        }),
-        attemptTimeoutMs,
-        opts.signal
-      );
+      if (mode === 'browser') {
+        const answer = await askBrowserAi(prompt, {
+          timeoutMs: BROWSER_AI_TIMEOUT_MS,
+          signal: opts.signal
+        });
+        if (!answer) {
+          log('mode=browser: nothing usable came back — no retry in browser mode');
+          return null;
+        }
+        reply = answer;
+      } else {
+        // fără istoric între încercări: promptul conține deja tot ce trebuie
+        // (altfel cele 18k caractere de snapshot s-ar aduna peste num_ctx 8192)
+        await ollama!.newChat();
+        if (opts.signal?.aborted) return null;
+        reply = await askOllama(ollama!, prompt, attemptTimeoutMs, opts.signal);
+      }
     } catch (e: any) {
       if (opts.signal?.aborted) return null;
       const reason = e?.message ?? String(e);
       if (/timeout after \d+s/i.test(reason)) {
         log(
-          attempt < AI_FINDER_MAX_ATTEMPTS
+          attempt < maxAttempts
             ? 'attempt timeout (' + Math.ceil(attemptTimeoutMs / 1000) + 's) — retrying'
             : 'attempt timeout (' + Math.ceil(attemptTimeoutMs / 1000) + 's) — maximum attempts reached'
         );
-        if (attempt >= AI_FINDER_MAX_ATTEMPTS) return null;
+        if (attempt >= maxAttempts) return null;
         failureReason =
           'the previous analysis timed out; keep the answer concise and return only the required JSON selectors';
         continue;
@@ -1254,7 +1358,7 @@ async function runFindSelectorsWithAI(
     if (!parsed) {
       failureReason = 'your reply was not a valid JSON object';
       rejectedSelector = undefined;
-      log('încercarea ' + attempt + '/' + AI_FINDER_MAX_ATTEMPTS + ' a eșuat: răspuns fără JSON');
+      log('încercarea ' + attempt + '/' + maxAttempts + ' a eșuat: răspuns fără JSON');
       continue;
     }
 
@@ -1268,8 +1372,7 @@ async function runFindSelectorsWithAI(
     log(
       'încercarea ' +
         attempt +
-        '/' +
-        AI_FINDER_MAX_ATTEMPTS +
+        '/' + maxAttempts +
         ' respinsă: ' +
         verdict.reason +
         (verdict.selector ? ' (' + verdict.selector + ')' : '')
@@ -1929,6 +2032,133 @@ export async function validateResponseSelector(
   };
 }
 
+/* -------------------------------------------------------------------------
+ * v2.5.61 (FIX 1) — VALIDARE FUNCȚIONALĂ A CANDIDAȚILOR HEALER-ULUI
+ *
+ * Healer-ul de fingerprint alegea „cel mai bun" candidat doar după scor: pe
+ * Claude alegea `button[user-message-retry]` pentru `newChat` — element care
+ * există, e vizibil, dar NU e butonul de chat nou. Înainte de `learn()`, Freekit
+ * TESTEAZĂ candidatul în pagină:
+ *   - newChat : click → URL schimbat SAU conversația s-a golit; etichetele de
+ *               acțiune (retry/regenerate/edit/delete) sunt respinse din start;
+ *   - input   : type „x" → textul apare în căsuță → șterge; altfel respins;
+ *   - response: citirea dă >RESPONSE_MIN_CHARS caractere; altfel respins.
+ * Eșecul se loghează cu `[healer] candidate rejected: <selector> (functional
+ * test failed)` și candidatul NU se salvează.
+ * ------------------------------------------------------------------------- */
+
+/** Etichete care nu pot fi niciodată butonul de chat nou (FIX 1 + FIX 5). */
+const NON_NEWCHAT_LABEL_RE = /retry|regenerate|edit|delete|remove/i;
+
+/**
+ * Click pe un candidat de newChat și măsurarea efectului.
+ *
+ * Testul se face DOAR pe un chat gol: click-ul e atunci ne-distructiv, iar
+ * butonul corect lasă conversația goală (sau schimbă URL-ul). Pe o conversație
+ * cu răspunsuri NU apăsăm nimic — un candidat greșit (ex. „retry") ar putea
+ * distruge contextul utilizatorului, iar unul corect ar părea „fără efect";
+ * acolo rămân verificările structurale (eticheta de acțiune + scorul din
+ * scanCandidates, FIX 5).
+ */
+async function functionallyValidateNewChat(
+  page: Page,
+  providerId: string,
+  selector: string
+): Promise<boolean> {
+  if (NON_NEWCHAT_LABEL_RE.test(selector)) {
+    log('functional test failed for newChat ' + selector + ': action label (retry/regenerate/edit/delete)');
+    return false;
+  }
+  const responseSelectors = selectors.candidates(providerId, 'response');
+  let replies = 0;
+  try {
+    replies = await countAssistantResponses(page, responseSelectors);
+  } catch {
+    replies = 0;
+  }
+  if (replies > 0) {
+    log(
+      'newChat ' + selector + ': the conversation has replies — the click test is skipped ' +
+        '(non-destructive), structural checks only'
+    );
+    return true;
+  }
+  const before = page.url();
+  try {
+    await page.locator(selector).first().click({ timeout: 5000 });
+  } catch (e: any) {
+    log('functional test failed for newChat ' + selector + ': click failed (' + (e?.message ?? String(e)) + ')');
+    return false;
+  }
+  await sleep(1000);
+  const changed = page.url() !== before;
+  const stillEmpty = (await countAssistantResponses(page, responseSelectors).catch(() => 0)) === 0;
+  if (!changed && !stillEmpty) {
+    log(
+      'functional test failed for newChat ' + selector +
+        ': the click did not start a new chat (the URL changed nowhere and a reply appeared)'
+    );
+    return false;
+  }
+  return true;
+}
+
+/**
+ * v2.5.61 (FIX 1): testul funcțional al unui candidat, în pagina reală.
+ * Înregistrat în SelectorStore prin `setFunctionalValidator()`.
+ */
+export async function functionallyValidateSlot(
+  page: Page,
+  providerId: string,
+  slot: SlotName,
+  selector: string
+): Promise<boolean> {
+  const sel = String(selector || '').trim();
+  if (!sel) return false;
+  try {
+    if (slot === 'response') {
+      const check = await validateResponseSelector(page, sel);
+      if (!check.ok) {
+        log('functional test failed for response ' + sel + ': ' + check.reason);
+        return false;
+      }
+      return true;
+    }
+    if (slot === 'input') {
+      const check = await validateChatInputSelector(page, sel);
+      if (!check.ok) {
+        log('functional test failed for input ' + sel + ': ' + check.reason);
+        return false;
+      }
+      const loc = page.locator(sel).first();
+      await loc.click({ timeout: 5000 });
+      await page.keyboard.insertText('x');
+      await sleep(150);
+      const typed = await loc.evaluate((el) => {
+        const node = el as HTMLElement;
+        const value = (node as HTMLInputElement).value;
+        return typeof value === 'string' ? value : node.innerText || node.textContent || '';
+      });
+      await page.keyboard.press('ControlOrMeta+A');
+      await page.keyboard.press('Backspace');
+      await sleep(80);
+      if (String(typed || '').indexOf('x') < 0) {
+        log('functional test failed for input ' + sel + ': the typed text did not appear');
+        return false;
+      }
+      return true;
+    }
+    if (slot === 'newChat') {
+      return await functionallyValidateNewChat(page, providerId, sel);
+    }
+    // stopButton e vizibil doar cât se generează — nu poate fi testat funcțional
+    return true;
+  } catch (e: any) {
+    log('functional test failed for ' + slot + ' ' + sel + ': ' + (e?.message ?? String(e)));
+    return false;
+  }
+}
+
 /**
  * Validează selectorii propuși de AI în pagina reală (fără să învețe nimic).
  * Aplică aceleași reguli de siguranță ca scanul healer-ului: nu acceptăm
@@ -2127,6 +2357,133 @@ export function userSelectorsFilePath(): string | null {
   return storageDir ? path.join(storageDir, USER_FILE_NAME) : null;
 }
 
+/* -------------------------------------------------------------------------
+ * v2.5.61 (FIX 8) — BACKUP DE SELECTOARI BUNI
+ *
+ * Înainte de fiecare rescriere, conținutul de pe disc (adică ultima versiune
+ * care a funcționat) e copiat în `selectors-user.json.backup`. Păstrăm ultimele
+ * BACKUP_MAX_VERSIONS versiuni distincte (amprentă SHA-256, fără duplicate) și,
+ * dacă toți selectorii se rup, tier-ul 5 al cascadei restaurează automat cea mai
+ * nouă versiune de acolo.
+ * ------------------------------------------------------------------------- */
+
+const BACKUP_FILE_NAME = USER_FILE_NAME + '.backup';
+/** Câte versiuni bune păstrăm (FIX 8). */
+export const BACKUP_MAX_VERSIONS = 3;
+
+interface BackupVersion {
+  at: string;
+  hash: string;
+  payload: unknown;
+}
+
+interface BackupStore {
+  version: number;
+  updated: string;
+  versions: BackupVersion[];
+}
+
+export function userBackupFilePath(): string | null {
+  return storageDir ? path.join(storageDir, BACKUP_FILE_NAME) : null;
+}
+
+/** true cât timp scriem fișierul restaurat — nu vrem să „îngropăm" versiunile bune. */
+let backupSuppressed = false;
+
+function readBackupStore(file: string): BackupStore {
+  const empty: BackupStore = { version: 1, updated: '', versions: [] };
+  try {
+    if (!fs.existsSync(file)) return empty;
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.versions)) return empty;
+    const versions = parsed.versions
+      .filter((v: any) => v && typeof v.hash === 'string' && v.payload && typeof v.payload === 'object')
+      .slice(0, BACKUP_MAX_VERSIONS);
+    return { version: 1, updated: String(parsed.updated || ''), versions };
+  } catch (e: any) {
+    log('backup: fișierul de backup e invalid — ignorat: ' + (e?.message ?? String(e)));
+    return empty;
+  }
+}
+
+/** Copiază versiunea curentă a fișierului în backup (înainte de rescriere). */
+function backupCurrentUserSelectors(): void {
+  if (backupSuppressed) return;
+  const file = userSelectorsFilePath();
+  const backup = userBackupFilePath();
+  if (!file || !backup || !fs.existsSync(file)) return;
+  try {
+    const raw = fs.readFileSync(file, 'utf8');
+    const hash = crypto.createHash('sha256').update(raw).digest('hex');
+    const store = readBackupStore(backup);
+    if (store.versions.length && store.versions[0].hash === hash) return; // neschimbat
+    const payload = JSON.parse(raw);
+    store.versions.unshift({ at: new Date().toISOString(), hash, payload });
+    store.versions = store.versions.slice(0, BACKUP_MAX_VERSIONS);
+    store.updated = new Date().toISOString();
+    fs.mkdirSync(path.dirname(backup), { recursive: true });
+    fs.writeFileSync(backup, JSON.stringify(store, null, 2) + '\n', 'utf8');
+    log('backup: ' + store.versions.length + ' good version(s) kept');
+  } catch (e: any) {
+    log('backup failed: ' + (e?.message ?? String(e)));
+  }
+}
+
+/**
+ * v2.5.61 (FIX 8) / tier 5 (FIX 7): restaurează selecțiile din backupul cu
+ * versiuni bune. Întoarce selectorul pentru `slot`, dacă a fost restaurat.
+ */
+export function restoreFromBackup(
+  providerId: string,
+  slot: SlotName
+): string | null {
+  const backup = userBackupFilePath();
+  if (!backup) return null;
+  const store = readBackupStore(backup);
+  if (!store.versions.length) return null;
+  tierLog(
+    'backup restore attempt for ' + providerId + '.' + slot + ' (' +
+      store.versions.length + ' version(s) available)'
+  );
+  for (const version of store.versions) {
+    const payload: any = version.payload;
+    if (!payload || typeof payload !== 'object') continue;
+    let restored = 0;
+    // cheile plate „provider.slot" (selecții manuale) + `providers` (auto)
+    for (const [key, value] of Object.entries<any>(payload)) {
+      if (USER_FILE_RESERVED.has(key)) continue;
+      const parsed = splitSlotKey(key);
+      if (!parsed) continue;
+      const sel = typeof value === 'string' ? value : value?.selector;
+      if (typeof sel === 'string' && selectors.learnLocked(parsed.provider, parsed.slot, sel)) {
+        restored++;
+      }
+    }
+    const providers = payload.providers;
+    if (providers && typeof providers === 'object') {
+      for (const [pid, slots] of Object.entries<any>(providers)) {
+        if (!slots || typeof slots !== 'object') continue;
+        for (const s of SLOTS) {
+          const entry = slots[s];
+          const sel = typeof entry === 'string' ? entry : entry?.selector;
+          if (typeof sel !== 'string' || !sel.trim()) continue;
+          if (selectors.learn(pid, s, sel.trim(), 'ai')) restored++;
+        }
+      }
+    }
+    if (!restored) continue;
+    backupSuppressed = true;
+    try {
+      saveUserSelectors();
+    } finally {
+      backupSuppressed = false;
+    }
+    tierLog('restored from backup (' + store.versions.length + ' versions)');
+    return selectors.learned(providerId, slot)?.selector ?? null;
+  }
+  return null;
+}
+
 /**
  * Rescrie fișierul: selecțiile „locked" (scrise manual) ca chei plate, cele
  * descoperite de AI (how='ai') sub `providers`.
@@ -2134,6 +2491,8 @@ export function userSelectorsFilePath(): string | null {
 export function saveUserSelectors(): void {
   const file = userSelectorsFilePath();
   if (!file) return;
+  // v2.5.61 (FIX 8): versiunea de dinaintea rescrierii intră în backup
+  backupCurrentUserSelectors();
   const locked: Record<string, string> = {};
   const providers: Record<string, Record<string, unknown>> = {};
   let lockedCount = 0;
@@ -2322,6 +2681,12 @@ function loadUserSelectorsFromDisk(): void {
 
 const recentAttempts = new Map<string, number>();
 const inFlight = new Set<string>();
+/**
+ * v2.5.61 (FIX 8): sloturile deja restaurate din backup în sesiunea curentă —
+ * un restore nu se repetă (altfel un selector restaurat care pică iar ar fi
+ * restaurat la nesfârșit, în buclă cu FIX 4).
+ */
+const backupRestored = new Set<string>();
 
 /** Doar pentru teste: resetează rate limiting-ul. */
 export function resetAIFinderCache(): void {
@@ -2422,9 +2787,11 @@ async function discoverForHealer(
   slot: SlotName,
   echoText?: string
 ): Promise<string | null> {
+  const slotKey = providerId + '.' + slot;
   // v2.5.44 (bug #101): slot cu selecție manuală → AI finder-ul nu propune nimic
   if (selectors.isLocked(providerId, slot)) {
     healLog('skip ' + providerId + ':' + slot + ' — user-locked');
+    tierLog('tier 2 (user) locked for ' + slotKey + ' — keeping the user selector');
     return null;
   }
   if (await isLoginOrCaptchaPage(page)) {
@@ -2438,7 +2805,7 @@ async function discoverForHealer(
   }
   const settings = finderSettings();
   if (!settings.enabled) {
-    log('AI finder dezactivat (freekit.aiSelectorFinder=false)');
+    tierLog('tier 4 (AI Finder) skipped — mode=off');
     return null;
   }
 
@@ -2452,15 +2819,18 @@ async function discoverForHealer(
   const last = recentAttempts.get(key) ?? 0;
   if (Date.now() - last < AI_RETRY_MS) {
     log('AI finder: încercare recentă pentru ' + key + ' — sar peste');
-    return null;
+    tierLog('tier 4 (AI Finder) rate-limited for ' + slotKey);
+    return backupTier(providerId, slot);
   }
   if (inFlight.has(key)) {
     log('AI finder: deja în curs pentru ' + key);
+    tierLog('tier 4 (AI Finder) already running for ' + slotKey);
     return null;
   }
   inFlight.add(key);
   recentAttempts.set(key, Date.now());
   const cancellationsBefore = getAIFinderCancellationCount();
+  const startedAt = Date.now();
   // v2.5.20 (bug #44/#58): fără conținut de răspuns în DOM nu există nimic de
   // găsit — finder-ul ar arde timeout-ul complet (45–120s) pe un snapshot fără
   // bilă AI. Se întâmplă când bila nu e încă randată (selectorul static e
@@ -2468,13 +2838,20 @@ async function discoverForHealer(
   // să rămână singura cale de reparare până apare conținut real.
   if (slot === 'response' && !(await hasResponseContentToFind(page, providerId, echoText))) {
     log('AI finder: no response content in the DOM yet — skipping for ' + key);
-    return null;
+    tierLog('tier 4 (AI Finder) deferred for ' + slotKey + ' — no reply in the DOM yet');
+    inFlight.delete(key);
+    return backupTier(providerId, slot);
   }
+  const tier4 =
+    'tier 4 (AI Finder ' + (settings.mode === 'browser' ? 'browser' : 'ollama') + ')';
+  tierLog(tier4 + ' for ' + slotKey + '...');
   try {
     const label = PROVIDER_LABELS[providerId] || providerId;
     const discovered = await findSelectorsWithAI(page, label, [slot], {
       providerId,
       echoText,
+      // v2.5.61 (FIX 6): reparație automată → niciun card în chat, doar log
+      silent: true,
       // conținutul de răspuns a fost verificat mai sus (hasResponseContentToFind)
       replyPresent: slot === 'response' ? true : undefined
     });
@@ -2482,7 +2859,7 @@ async function discoverForHealer(
       if (getAIFinderCancellationCount() === cancellationsBefore) {
         dropStaleOverride(providerId, slot);
       }
-      return null;
+      return backupTier(providerId, slot);
     }
 
     const validated = await validateSelectors(page, discovered, { echoText });
@@ -2528,19 +2905,53 @@ async function discoverForHealer(
           providerId,
           providerName: label,
           phase: 'failed',
-          message: 'Repair failed. Manual intervention required.'
+          message: 'Repair failed. Manual intervention required.',
+          silent: true
         });
       }
       dropStaleOverride(providerId, slot);
+      return backupTier(providerId, slot);
     }
+    // v2.5.61 (FIX 3/6): reparația automată e completă — doar o linie de log
+    log(
+      'repaired ' + slotKey + ' in ' +
+        Math.max(1, Math.round((Date.now() - startedAt) / 1000)) + 's'
+    );
     return found;
   } catch (e: any) {
     log('AI finder a eșuat: ' + (e?.message ?? String(e)));
     dropStaleOverride(providerId, slot);
-    return null;
+    return backupTier(providerId, slot);
   } finally {
     inFlight.delete(key);
   }
+}
+
+/**
+ * v2.5.61 (FIX 7) — tier 5: dacă toți selectorii curenți s-au rupt, restaurăm
+ * automat ultima versiune bună din `selectors-user.json.backup`. Se loghează
+ * explicit (`tier 5 (backup) restored!`) ca să se vadă în Output → Freekit.
+ */
+function backupTier(providerId: string, slot: SlotName): string | null {
+  const slotKey = providerId + '.' + slot;
+  if (backupRestored.has(slotKey)) {
+    tierLog('tier 5 (backup) already restored ' + slotKey + ' in this session — skipping');
+    return null;
+  }
+  backupRestored.add(slotKey);
+  tierLog('tier 5 (backup) for ' + slotKey + '...');
+  try {
+    const restored = restoreFromBackup(providerId, slot);
+    if (restored) {
+      tierLog('tier 5 (backup) restored! ' + slotKey + ' -> ' + restored);
+      return restored;
+    }
+    tierLog('tier 5 (backup) empty — nothing to restore for ' + slotKey);
+  } catch (e: any) {
+    log('backup restore failed: ' + (e?.message ?? String(e)));
+    tierLog('tier 5 (backup) failed for ' + slotKey);
+  }
+  return null;
 }
 
 /* =========================================================================
@@ -2671,8 +3082,8 @@ export async function proactiveDiscover(
 
   const settings = finderSettings();
   if (!settings.enabled && !opts.force) {
-    log('AI finder dezactivat (freekit.aiSelectorFinder=false)');
-    return skip('the AI finder is disabled (freekit.aiSelectorFinder)');
+    log('AI finder disabled (freekit.aiSelectorFinder.mode=off)');
+    return skip('the AI finder is disabled (freekit.aiSelectorFinder.mode)');
   }
 
   // Fix 4 (bug #101): sloturile cu selecție manuală rămân ale utilizatorului.
@@ -2814,7 +3225,11 @@ export async function repairChatInput(
   const cancellationsBefore = getAIFinderCancellationCount();
   log('input suspect for ' + label + ' — asking the AI finder for the composer');
   try {
-    const discovered = await findSelectorsWithAI(page, label, ['input'], { inputOnly: true });
+    const discovered = await findSelectorsWithAI(page, label, ['input'], {
+      inputOnly: true,
+      // v2.5.61 (FIX 6): reparația inputului e automată — fără carduri în chat
+      silent: true
+    });
     const sel = discovered?.input;
     if (sel) {
       // aceeași validare strictă ca la descoperire (vizibil, activ, acceptă
@@ -2920,9 +3335,13 @@ export function initAISelectorFinder(storageFsPath: string): void {
   setProactiveDiscovery(proactiveDiscover);
   setInputRepair(repairChatInput);
   setNotReadyNotifier(noteProviderNotReady);
+  // v2.5.61 (FIX 1): healer-ul de fingerprint testează funcțional candidatul
+  // înainte să-l salveze (aceleași criterii ca validateSelectors).
+  setFunctionalValidator(functionallyValidateSlot);
   loadUserSelectorsFromDisk();
   log(
     'AI selector finder pregătit — fișier: ' +
-      (userSelectorsFilePath() || '(fără globalStorage)')
+      (userSelectorsFilePath() || '(fără globalStorage)') +
+      ', mode=' + finderSettings().mode
   );
 }

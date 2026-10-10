@@ -8,6 +8,14 @@ import { logLine } from './log';
 const log = (msg: string) => logLine('selectors', msg);
 /** v2.5.44 (bug #101): mesajele healer-ului, ca să fie ușor de filtrat în Output. */
 const healLog = (msg: string) => logLine('healer', msg);
+/** v2.5.68 (FIX 3): log-urile citirii răspunsului (același tag ca în providers/base.ts). */
+const readLog = (msg: string) => logLine('read', msg);
+
+/**
+ * v2.5.68 (FIX 3): ultimul număr de potriviri raportat — logăm doar când se
+ * SCHIMBĂ (citirea rulează la fiecare pas de polling, nu vrem linii identice).
+ */
+let lastLoggedMatches = 0;
 
 /* =========================================================================
  * FAZA I — SELECTOARE MODULARE + AUTO-REPARARE
@@ -1715,6 +1723,11 @@ export interface ResponseRead {
   deduplicated?: boolean;
   /** v2.5.66 (FIX 4): paragrafele de „thinking" scoase din text după citire. */
   filtered?: number;
+  /**
+   * v2.5.68 (FIX 3): câte elemente a prins selectorul care a dat răspunsul —
+   * se citește DOAR ultimul (log `[read] using last of N assistant messages`).
+   */
+  matches?: number;
 }
 
 /**
@@ -1853,12 +1866,44 @@ const scanResponses = (args: ResponseScanArgs): ResponseRead => {
   };
 
   /* ---- v2.5.46 (bug #105): thinking ≠ răspuns --------------------------- */
-  const THINKING_ATTRS = ['class', 'id', 'data-testid', 'data-role', 'aria-label'];
+  // v2.5.68 (FIX 2): `data-step-key` („thinking-0") = blocul de raționament al
+  // lui Claude, inclusiv în timpul generării („Claude is thinking").
+  const THINKING_ATTRS = ['class', 'id', 'data-testid', 'data-role', 'data-step-key', 'aria-label'];
   const THINKING_ATTR_RE = /think|reason|thought/i;
   const THINKING_MARKER_RE =
     /^(thinking|thought(\s+for)?|reasoning|se g[âa]nde[șs]te|ra[tț]ionament)/i;
   /** Peste atâtea caractere, textul nu mai poate fi un marker scurt de thinking. */
   const THINKING_MARKER_MAX = 160;
+
+  /**
+   * v2.5.68 (FIX 1): TEXTUL „DOAR PENTRU SCREEN READER" NU E RĂSPUNS.
+   *
+   * Claude pune în `div[data-testid='assistant-message']` un titlu ascuns care
+   * copiază începutul răspunsului:
+   *   `<h2 class="sr-only select-none">Claude responded: Salut, Laurentiu!</h2>`
+   * Citit ca „copil" al containerului, după ce `finish()` tăia prefixul
+   * „Claude responded:" rămânea un paragraf-fantomă, iar răspunsul ieșea
+   * duplicat: „Salut, Laurentiu!\n\nSalut, Laurentiu! Cu te pot ajuta în proiect?".
+   * Același tipar la ChatGPT (`<h6 class="sr-only">ChatGPT said:</h6>`).
+   */
+  const SR_ONLY_RE =
+    /\b(?:sr-only|sr_only|visually-hidden|screen-reader-only|screenreader-only|a11y-hidden)\b/i;
+
+  /**
+   * v2.5.68 (FIX 2): Claude randează raționamentul/starea ca „TurnStatus"
+   * (`data-cds`/`data-testid="TurnStatus"`, `data-step-key="thinking-0"`); în
+   * timpul generării același bloc afișează „Cogitating / Claude is thinking".
+   * Nici starea, nici rezumatul raționamentului nu sunt răspunsul.
+   */
+  const STATUS_ATTR_RE = /^(?:turn-?status|thinking)$/i;
+  const isStatusEl = (el: Element): boolean =>
+    STATUS_ATTR_RE.test(el.getAttribute('data-cds') || '') ||
+    STATUS_ATTR_RE.test(el.getAttribute('data-testid') || '');
+
+  const classOf = (el: Element): string => {
+    const c = (el as HTMLElement).className;
+    return typeof c === 'string' ? c : '';
+  };
 
   const isThinkingEl = (el: Element): boolean => {
     for (let i = 0; i < THINKING_ATTRS.length; i++) {
@@ -1867,6 +1912,15 @@ const scanResponses = (args: ResponseScanArgs): ResponseRead => {
     }
     return false;
   };
+
+  /**
+   * v2.5.68 (FIX 1/2): „chrome" care nu poate fi niciodată răspunsul — textul de
+   * screen reader și blocul de STARE („TurnStatus"). Regula se aplică în AMBELE
+   * treceri (cu/fără filtrul de atribute), fiindcă nu depinde de marcarea
+   * raționamentului, care în trecerea „relaxed" rămâne citit (paritate bug #105).
+   */
+  const isNonAnswerChrome = (el: Element): boolean =>
+    SR_ONLY_RE.test(classOf(el)) || isStatusEl(el);
 
   const isThinkingMarker = (text: string): boolean => {
     const flat = text.replace(/\s+/g, ' ').trim();
@@ -1884,21 +1938,36 @@ const scanResponses = (args: ResponseScanArgs): ResponseRead => {
   ): { text: string; ignored: number; deduplicated: boolean } => {
     const original = textOf(el);
     if (!original) return { text: '', ignored: 0, deduplicated: false };
+    if (isNonAnswerChrome(el)) {
+      return { text: '', ignored: original.length, deduplicated: false };
+    }
     if (useAttrFilter && isThinkingEl(el)) {
       return { text: '', ignored: original.length, deduplicated: false };
     }
 
     const clean = el.cloneNode(true) as Element;
     let ignored = 0;
+
+    // v2.5.68 (FIX 1/2): textul de screen reader + blocul de stare se scot în
+    // AMBELE treceri — nu sunt niciodată răspunsul.
+    const chrome = Array.prototype.slice.call(clean.querySelectorAll('*')) as Element[];
+    for (const node of chrome) {
+      if (!clean.contains(node)) continue;
+      if (isNonAnswerChrome(node)) {
+        ignored += textOf(node).length;
+        node.remove();
+      }
+    }
+
     if (useAttrFilter) {
       const descendants = Array.prototype.slice.call(clean.querySelectorAll('*')) as Element[];
       for (const node of descendants) {
         if (!clean.contains(node)) continue;
-        const className =
-          typeof (node as HTMLElement).className === 'string'
-            ? (node as HTMLElement).className
-            : '';
-        if (/\b(?:thinking|reasoning|extended-thinking)\b/i.test(className)) {
+        const className = classOf(node);
+        if (
+          /\b(?:thinking|reasoning|extended-thinking)\b/i.test(className) ||
+          isThinkingEl(node)
+        ) {
           ignored += textOf(node).length;
           node.remove();
         }
@@ -1986,14 +2055,17 @@ const scanResponses = (args: ResponseScanArgs): ResponseRead => {
 
   const readFromSelectors = (
     useAttrFilter: boolean
-  ): { text: string; ignored: number; deduplicated: boolean } | null => {
+  ): { text: string; ignored: number; deduplicated: boolean; matches: number } | null => {
     for (const sel of args.sels) {
       const nodes = matched(sel);
+      // v2.5.68 (FIX 3): ultimul element e răspunsul curent — elementele
+      // anterioare sunt mesaje VECHI (nu se concatenează). Numărul de potriviri
+      // se raportează în `matches`, ca să fie vizibil în log.
       for (let i = nodes.length - 1; i >= 0; i--) {
         if (inNav(nodes[i])) continue;
         const r = resolveAnswer(nodes[i], useAttrFilter);
         ignoredTotal += r.ignored;
-        if (r.text) return r;
+        if (r.text) return { ...r, matches: nodes.length };
       }
     }
     return null;
@@ -2073,7 +2145,8 @@ const scanResponses = (args: ResponseScanArgs): ResponseRead => {
       text: strict.text,
       ignored: ignoredTotal,
       count: 0,
-      deduplicated: strict.deduplicated
+      deduplicated: strict.deduplicated,
+      matches: strict.matches
     };
   }
 
@@ -2100,7 +2173,8 @@ const scanResponses = (args: ResponseScanArgs): ResponseRead => {
       text: relaxed.text,
       ignored: ignoredStrict + relaxed.ignored,
       count: 0,
-      deduplicated: relaxed.deduplicated
+      deduplicated: relaxed.deduplicated,
+      matches: relaxed.matches
     };
   }
 
@@ -2531,6 +2605,9 @@ export async function anySelectorPresent(page: Page, sels: string[]): Promise<bo
 /**
  * v2.5.46 (bug #105): citirea completă a răspunsului — textul + câte caractere
  * de „thinking" au fost ignorate (pentru log-ul `[read] response: …`).
+ * v2.5.68 (FIX 3): când selectorul prinde mai multe mesaje, se citește DOAR
+ * ultimul (răspunsul curent); numărul de potriviri apare în log o singură dată
+ * per schimbare (`[read] using last of N assistant messages`).
  */
 export async function getLastResponseRead(
   page: Page,
@@ -2544,6 +2621,13 @@ export async function getLastResponseRead(
       navSels: NAV_SELECTORS,
       mode: 'text'
     });
+    const matches = read.matches ?? 0;
+    if (matches !== lastLoggedMatches) {
+      lastLoggedMatches = matches;
+      if (matches > 1) {
+        readLog('using last of ' + matches + ' assistant messages');
+      }
+    }
     // v2.5.66 (FIX 4): scoate paragrafele de „thinking" rămase în elementul de
     // răspuns (același slot ca răspunsul, nu bloc separat) — vezi helper-ul.
     const cleaned = filterThinkingParagraphs(read.text);

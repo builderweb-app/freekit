@@ -458,7 +458,7 @@ function isFragileSelector(sel: string): boolean {
   return sel.indexOf(' > ') >= 0 && !/[#.\[]/.test(sel);
 }
 
-/** v2.5.61 (FIX 4): câte eșecuri consecutive expiră un selector salvat. */
+/** v2.5.61 (FIX 4): câte eșecuri consecutive expiră un selector salvat automat. */
 const FAILURE_EXPIRY_COUNT = 2;
 
 /** v2.5.61 (FIX 1): câți candidați de healer trec prin testul funcțional. */
@@ -468,8 +468,11 @@ export class SelectorStore {
   private overrides = new Map<string, LearnedSelector>();
   /** v2.5.61 (FIX 4): eșecuri consecutive per slot (doar în sesiunea curentă). */
   private failures = new Map<string, number>();
+  /** Sloturi deblocate automat după două teste funcționale eșuate. */
+  private unlockedUserLocks = new Set<string>();
   private memento?: vscode.Memento;
   private notifier?: (info: LearnedSelector) => void;
+  private userFileWriter?: () => void;
   /** v0.7.0: configul activ (bundled sau remote din cache). */
   private active: SelectorConfig = BUNDLED_CONFIG;
   /** v0.7.0: de unde vine configul activ (setat când se aplică/citește remote). */
@@ -518,6 +521,18 @@ export class SelectorStore {
 
   setNotifier(notifier: (info: LearnedSelector) => void) {
     this.notifier = notifier;
+  }
+
+  setUserFileWriter(writer: (() => void) | null) {
+    this.userFileWriter = writer ?? undefined;
+  }
+
+  private persistUserFile() {
+    try {
+      this.userFileWriter?.();
+    } catch (e: any) {
+      log('writing selectors-user.json failed: ' + (e?.message ?? String(e)));
+    }
   }
 
   private key(provider: string, slot: SlotName) {
@@ -632,6 +647,8 @@ export class SelectorStore {
     const sel = String(selector || '').trim();
     if (!sel || sel.length > 400) return false;
     const key = this.key(providerId, slot);
+    this.failures.delete(key);
+    this.unlockedUserLocks.delete(key);
     if (this.overrides.get(key)?.selector === sel) {
       this.overrides.get(key)!.locked = true;
       return true;
@@ -717,6 +734,7 @@ export class SelectorStore {
     this.overrides.set(key, entry);
     // v2.5.61 (FIX 4): un selector nou șters din eșecuri începe cu contorul la 0
     this.failures.delete(key);
+    this.unlockedUserLocks.delete(key);
     log('selector repaired: ' + key + ' -> ' + selector + ' (' + how + ')');
     void this.persist();
     try {
@@ -745,29 +763,46 @@ export class SelectorStore {
     return true;
   }
 
-  /* ---------------- v2.5.61 (FIX 4): expirarea selectorilor greșiți ----------------
+  /* ---------------- v2.5.61 / v2.5.62: expirarea selectorilor greșiți ----------------
    *
    * Un selector salvat (în selectors-user.json) care nu mai găsește elementul de
    * DOUĂ ori la rând e șters automat — altfel rămâne „lipit" peste slot și
    * fiecare task următor eșuează la fel. Se resetează la prima folosire reușită.
-   * Selecțiile scrise MANUAL (locked, bug #101) nu se șterg niciodată automat.
+   * Un selector user-locked este deblocat după două eșecuri ale testului
+   * funcțional și șters la al treilea eșec consecutiv.
    * ------------------------------------------------------------------------------ */
 
-  /** Eșecul unui selector salvat; la al doilea consecutiv îl șterge. */
+  /** Eșecul unui selector salvat; user-lock-urile sunt deblocate apoi expirate. */
   recordFailure(providerId: string, slot: SlotName): number {
     const key = this.key(providerId, slot);
     const existing = this.overrides.get(key);
     // fără override salvat nu avem ce expira (bundled-ul nu se atinge de aici)
     if (!existing) return 0;
     const count = (this.failures.get(key) ?? 0) + 1;
+    if (existing.locked) {
+      log('user-locked ' + key + ' failed functional test');
+      this.failures.set(key, count);
+      if (count >= 2) {
+        existing.locked = false;
+        existing.how = 'ai';
+        this.unlockedUserLocks.add(key);
+        log('unlocked ' + key + ' (2 failed functional tests)');
+        void this.persist();
+        this.persistUserFile();
+      }
+      return count;
+    }
+    if (this.unlockedUserLocks.has(key) && count >= 3) {
+      this.failures.delete(key);
+      this.unlockedUserLocks.delete(key);
+      this.overrides.delete(key);
+      log('removed ' + key + ' (3 failures, was user-locked)');
+      void this.persist();
+      this.persistUserFile();
+      return count;
+    }
     if (count >= FAILURE_EXPIRY_COUNT) {
       this.failures.delete(key);
-      if (existing.locked) {
-        healLog(
-          'keeping user-locked ' + key + ' after ' + count + ' failures (manual choice)'
-        );
-        return count;
-      }
       this.overrides.delete(key);
       log('removed failing ' + key + ' (' + FAILURE_EXPIRY_COUNT + ' failures)');
       void this.persist();
@@ -780,7 +815,9 @@ export class SelectorStore {
 
   /** Un selector a funcționat — contorul de eșecuri consecutive se resetează. */
   recordSuccess(providerId: string, slot: SlotName) {
-    this.failures.delete(this.key(providerId, slot));
+    const key = this.key(providerId, slot);
+    this.failures.delete(key);
+    this.unlockedUserLocks.delete(key);
   }
 
   /** Pentru teste/diagnostics: câte eșecuri consecutive are slotul dat. */
@@ -790,12 +827,18 @@ export class SelectorStore {
 
   /** Șterge override-urile (toate, sau doar pentru un provider). */
   reset(providerId?: string): number {
-    if (!providerId) this.failures.clear();
+    if (!providerId) {
+      this.failures.clear();
+      this.unlockedUserLocks.clear();
+    }
     let removed = 0;
     let kept = 0;
     for (const [key, entry] of Array.from(this.overrides.entries())) {
       if (providerId && entry.provider !== providerId) continue;
-      if (providerId) this.failures.delete(key);
+      if (providerId) {
+        this.failures.delete(key);
+        this.unlockedUserLocks.delete(key);
+      }
       // v2.5.44 (bug #101): reselecțiile manuale ale utilizatorului rămân —
       // altfel „uită selectorii învățați" ar șterge exact reparația lui.
       if (entry.locked) {
@@ -1912,12 +1955,33 @@ export async function healSlot(
   echoText?: string
 ): Promise<string | null> {
   const slotKey = providerId + '.' + slot;
-  // v2.5.44 (bug #101): slot cu selector scris manual → healer-ul nu se atinge
-  // de el (nici scanare de fingerprint, nici AI finder).
+  let failureRecorded = false;
   if (selectors.isLocked(providerId, slot)) {
-    healLog('skip ' + providerId + ':' + slot + ' — user-locked');
-    log('tier 2 (user) locked for ' + slotKey + ' — keeping the user selector');
-    return null;
+    const locked = selectors.learned(providerId, slot);
+    let ok = false;
+    if (locked && functionalValidatorFn) {
+      try {
+        ok = await functionalValidatorFn(page, providerId, slot, locked.selector);
+      } catch (e: any) {
+        log(
+          'functional test errored for user-locked ' + slotKey + ' (' + locked.selector + '): ' +
+            (e?.message ?? String(e))
+        );
+      }
+    }
+    if (ok) {
+      selectors.recordSuccess(providerId, slot);
+      healLog('user-locked ' + slotKey + ' passed functional test — keeping the user selector');
+      return null;
+    }
+    if (!functionalValidatorFn || !locked) {
+      healLog('skip ' + providerId + ':' + slot + ' — user-locked');
+      log('tier 2 (user) locked for ' + slotKey + ' — keeping the user selector');
+      return null;
+    }
+    selectors.recordFailure(providerId, slot);
+    failureRecorded = true;
+    if (selectors.isLocked(providerId, slot)) return null;
   }
 
   // v2.5.61 (FIX 3): reparația pornește la PRIMUL eșec — nu așteptăm trei.
@@ -1927,7 +1991,7 @@ export async function healSlot(
   // al unui selector salvat îl șterge automat.
   log('tier 1 (bundled) failed for ' + slotKey);
   const learned = selectors.learned(providerId, slot);
-  if (learned) {
+  if (learned && !failureRecorded) {
     log('tier 2 (user) failed for ' + slotKey);
     selectors.recordFailure(providerId, slot);
   }
@@ -1991,6 +2055,7 @@ export async function healSlot(
           candidate.why.join(', ') +
           ')'
       );
+      selectors.recordSuccess(providerId, slot);
       selectors.learn(providerId, slot, candidate.selector, 'fingerprint');
       return candidate.selector;
     }

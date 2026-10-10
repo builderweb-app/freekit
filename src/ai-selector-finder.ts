@@ -3329,6 +3329,7 @@ export async function rediscoverSelectors(
 /** Înregistrează fallback-ul AI + încarcă selectors-user.json (la activate()). */
 export function initAISelectorFinder(storageFsPath: string): void {
   storageDir = storageFsPath || null;
+  selectors.setUserFileWriter(saveUserSelectors);
   setAIFinder(discoverForHealer);
   // Reactive input repair is called by providers/base.ts; full discovery is
   // available only through the explicit Repair Selectors command.

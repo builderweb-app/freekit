@@ -15,6 +15,7 @@ import {
   configInfo,
   countAssistantResponses,
   DiscoveryOutcome,
+  getLastResponseRead,
   getLastResponseText,
   inputAvailable,
   InputRepairResult,
@@ -36,7 +37,7 @@ import {
   BROWSER_AI_TIMEOUT_MS,
   browserAiAvailable
 } from './browserAi';
-import { askProxyServer } from './proxyAi';
+import { askProxyServer, PROXY_MAX_DOM_CHARS } from './proxyAi';
 
 const log = (msg: string) => logLine('ai-finder', msg);
 /** v2.5.44 (bug #101): același tag ca healer-ul din selectors.ts. */
@@ -781,6 +782,18 @@ export function buildPrompt(ctx: PromptContext): string {
     );
   }
 
+  // v2.5.66 (FIX 3): prompt țintit pentru „newChat" — fără el modelul răspundea
+  // „null" (alegea butoane de acțiune din mesaje sau nu găsea butonul deloc).
+  if (ctx.missingSlots.indexOf('newChat') >= 0) {
+    lines.push(
+      '',
+      "Find the selector for the 'New chat' button in the sidebar (top-left).",
+      "It's usually <a href='/new'> or <button aria-label*='new chat'>.",
+      "EXCLUDE any element with 'action-bar', 'copy', 'edit', 'delete', 'share' in aria-label/testid.",
+      'Reply JSON: {"newChat": "..."}'
+    );
+  }
+
   if (ctx.attempt > 1 && ctx.failureReason) {
     lines.push(
       '',
@@ -1285,6 +1298,13 @@ async function runFindSelectorsWithAI(
     return null;
   }
   if (opts.signal?.aborted) return null;
+  // v2.5.66 (FIX 1): în modul api-proxy DOM-ul se trunchiază ÎNAINTE de a intra
+  // în prompt (altfel trunchierea din proxyAi.ts ar fi inutilă — promptul
+  // conține deja snapshot-ul). Peste 12000 proxy-ul răspundea 400.
+  if (mode === 'api-proxy' && dom.length > PROXY_MAX_DOM_CHARS) {
+    log('DOM trunchiat pentru proxy: ' + dom.length + ' -> ' + PROXY_MAX_DOM_CHARS + ' caractere');
+    dom = dom.slice(0, PROXY_MAX_DOM_CHARS - TRUNC_MARK.length) + TRUNC_MARK;
+  }
   log('DOM capturat: ' + dom.length + ' caractere');
 
   const settings = finderSettings();
@@ -1894,7 +1914,13 @@ function hasToolMarker(text: string): boolean {
 /** Textul pe care îl dă un selector azi, cu ACELAȘI reader ca la rulare. */
 async function readResponseText(page: Page, selector: string): Promise<string> {
   try {
-    return await getLastResponseText(page, [selector]);
+    // v2.5.66 (FIX 4): citirea scoate paragrafele de „thinking" rămase în
+    // elementul de răspuns — logăm câte, ca să se vadă filtrul în Output.
+    const read = await getLastResponseRead(page, [selector]);
+    if (read.filtered) {
+      logLine('read', 'filtered ' + read.filtered + ' thinking paragraphs');
+    }
+    return read.text;
   } catch (e: any) {
     log('reading a candidate response failed (' + selector + '): ' + (e?.message ?? String(e)));
     return '';
@@ -2492,6 +2518,55 @@ function backupCurrentUserSelectors(): void {
 }
 
 /**
+ * v2.5.66 (FIX 1): migrația șterge selectorii auto invalizi din fișier, dar
+ * versiunea de dinainte (cu ei cu tot) intră în backup la `saveUserSelectors`.
+ * Îi scoatem din TOATE versiunile de backup, ca tier 5 să nu-i aducă înapoi.
+ * Log explicit: `[migration] purged <key> from backup too`.
+ */
+function purgeFromBackup(keys: string[]): void {
+  const backup = userBackupFilePath();
+  if (!backup || !keys.length || !fs.existsSync(backup)) return;
+  try {
+    const store = readBackupStore(backup);
+    const purged: string[] = [];
+    let changed = false;
+    for (const version of store.versions) {
+      const payload: any = version.payload;
+      if (!payload || typeof payload !== 'object') continue;
+      for (const key of keys) {
+        const parsed = splitSlotKey(key);
+        if (!parsed) continue;
+        let hit = false;
+        if (Object.prototype.hasOwnProperty.call(payload, key)) {
+          delete payload[key];
+          hit = true;
+        }
+        const providers = payload.providers;
+        if (
+          providers &&
+          typeof providers === 'object' &&
+          providers[parsed.provider] &&
+          providers[parsed.provider][parsed.slot] !== undefined
+        ) {
+          delete providers[parsed.provider][parsed.slot];
+          hit = true;
+        }
+        if (hit) {
+          changed = true;
+          if (purged.indexOf(key) < 0) purged.push(key);
+        }
+      }
+    }
+    if (!changed) return;
+    store.updated = new Date().toISOString();
+    fs.writeFileSync(backup, JSON.stringify(store, null, 2) + '\n', 'utf8');
+    for (const key of purged) logLine('migration', 'purged ' + key + ' from backup too');
+  } catch (e: any) {
+    log('backup purge failed: ' + (e?.message ?? String(e)));
+  }
+}
+
+/**
  * v2.5.61 (FIX 8) / tier 5 (FIX 7): restaurează selecțiile din backupul cu
  * versiuni bune. Întoarce selectorul pentru `slot`, dacă a fost restaurat.
  */
@@ -2503,6 +2578,9 @@ export function restoreFromBackup(
   if (!backup) return null;
   const store = readBackupStore(backup);
   if (!store.versions.length) return null;
+  // v2.5.66 (FIX 1/3): selectorii șterși de migrație nu se restaurează NICIODATĂ
+  const purged = migrationPurgedKeys();
+  const skipped = new Set<string>();
   tierLog(
     'backup restore attempt for ' + providerId + '.' + slot + ' (' +
       store.versions.length + ' version(s) available)'
@@ -2516,6 +2594,14 @@ export function restoreFromBackup(
       if (USER_FILE_RESERVED.has(key)) continue;
       const parsed = splitSlotKey(key);
       if (!parsed) continue;
+      const slotKey = parsed.provider + '.' + parsed.slot;
+      if (purged.has(slotKey)) {
+        if (!skipped.has(slotKey)) {
+          skipped.add(slotKey);
+          tierLog('backup restore skipped ' + slotKey + ' (purged by migration)');
+        }
+        continue;
+      }
       const sel = typeof value === 'string' ? value : value?.selector;
       if (typeof sel === 'string' && selectors.learnLocked(parsed.provider, parsed.slot, sel)) {
         restored++;
@@ -2529,6 +2615,13 @@ export function restoreFromBackup(
           const entry = slots[s];
           const sel = typeof entry === 'string' ? entry : entry?.selector;
           if (typeof sel !== 'string' || !sel.trim()) continue;
+          if (purged.has(pid + '.' + s)) {
+            if (!skipped.has(pid + '.' + s)) {
+              skipped.add(pid + '.' + s);
+              tierLog('backup restore skipped ' + pid + '.' + s + ' (purged by migration)');
+            }
+            continue;
+          }
           if (selectors.learn(pid, s, sel.trim(), 'ai')) restored++;
         }
       }
@@ -2763,6 +2856,24 @@ function migrationFilePath(): string | null {
 }
 
 /**
+ * v2.5.66 (FIX 1): cheile șterse de migrație („provider.slot"), persistate în
+ * marker. Tier 5 (backup) NU are voie să le restaureze — altfel migrația le șterge
+ * și backupul le aduce imediat înapoi.
+ */
+function migrationPurgedKeys(): Set<string> {
+  const file = migrationFilePath();
+  if (!file) return new Set();
+  try {
+    if (!fs.existsSync(file)) return new Set();
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const list = Array.isArray(parsed?.purged) ? parsed.purged : [];
+    return new Set(list.filter((k: any) => typeof k === 'string'));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
  * v2.5.65 (FIX 5): un selector auto e „invalid" dacă e evident rupt — lanțuri
  * kilometrici de DOM, structuri interne de tranzcript (Claude) sau, la
  * `response`, ceva ce trimite la caseta de input.
@@ -2796,6 +2907,7 @@ function runSelectorMigration(version: string): void {
   if (last === version) return;
 
   const removed: Record<string, string[]> = {};
+  const purgedKeys: string[] = [];
   let count = 0;
   for (const pid of selectors.providerIds()) {
     const force = MIGRATION_RESET_PROVIDERS.has(pid);
@@ -2806,11 +2918,17 @@ function runSelectorMigration(version: string): void {
       if (selectors.forget(pid, slot)) {
         count++;
         (removed[pid] = removed[pid] || []).push(slot);
+        purgedKeys.push(pid + '.' + slot);
       }
     }
   }
   if (count) {
+    // v2.5.66 (FIX 1): versiunea de dinainte (cu selectorii invalizi) intră în
+    // backup la saveUserSelectors(), deci purgăm backupul DUPĂ salvare — altfel
+    // tier 5 îi restaurează imediat (exact bug-ul „backup restore anulează
+    // migration").
     saveUserSelectors();
+    purgeFromBackup(purgedKeys);
     for (const [pid, slots] of Object.entries(removed)) {
       logLine(
         'migration',
@@ -2822,7 +2940,7 @@ function runSelectorMigration(version: string): void {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(
       file,
-      JSON.stringify({ version, at: new Date().toISOString() }, null, 2) + '\n',
+      JSON.stringify({ version, at: new Date().toISOString(), purged: purgedKeys }, null, 2) + '\n',
       'utf8'
     );
   } catch (e: any) {

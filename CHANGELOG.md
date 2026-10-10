@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.5.66
+
+- **The version migration is no longer undone by the backup restore.** `saveUserSelectors()` snapshots the previous file into `selectors-user.json.backup` before every rewrite, so the migration's purge of invalid auto selectors was immediately re-imported by tier 5. The removed keys are now purged from **every** backup version too (`[migration] purged <provider>.<slot> from backup too`) and recorded in `selectors-migration.json`; tier 5 skips any key listed there (`backup restore skipped … (purged by migration)`).
+- **The selector proxy no longer rejects large DOM snapshots with 400.** In `api-proxy` mode the DOM is truncated to 12 000 chars **before** it goes into the prompt (the prompt embeds the same snapshot, so truncating only the request field was useless), which keeps the whole payload under the proxy's 30 000-char limit.
+- **A failed proxy call now explains itself.** On a non-OK response the proxy body is logged in Output → Freekit as `[proxy] <status> reason: <body>` (redacted if it echoes the prompt or DOM), together with the rejected request sizes — no sensitive data.
+- **The AI Finder can find `newChat` again.** The prompt now targets the "New chat" button explicitly (`<a href='/new'>` / `button[aria-label*='new chat']`), excludes action-bar/copy/edit/delete/share elements, and asks for the `newChat` JSON key — previously the model answered `null` for it.
+- **"Thinking" paragraphs are stripped from the reply.** When the thinking block is a plain paragraph inside the same element as the answer (so neither the attribute filter nor de-duplication removes it), the leading reasoning paragraphs are dropped — `[read] filtered N thinking paragraphs`. If only thinking is present the original text is kept, so waiting sentinels are unaffected.
+
 ## v2.5.65
 
 - **The healer no longer picks message-action buttons.** A stable `data-testid` was not enough: `claude.newChat` was "repaired" with `button[data-testid="action-bar-copy"]` (score 23) — the Copy button. Scoring now rejects `copy`/`edit`/`delete`/`retry`/`regenerate`/`share`/`download`/`feedback`/`thumbs`/`action-bar`/`message-actions` with `-50` on action elements, boosts `new`/`create`/`chat`/`plus`/`compose` with `+30` for `newChat`, and ignores the `data-testid`/`aria-label` stability bonus inside `[data-testid*="action-bar"]`.

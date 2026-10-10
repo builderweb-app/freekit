@@ -1225,6 +1225,7 @@ export async function sendAndWait(
   let lastIgnoredChars = -1;
   let lastHadText = false;
   let lastWasDeduplicated = false;
+  let lastFilteredParagraphs = 0;
   const readResponse = async (sels: string[], fallback = false): Promise<string> => {
     const read = await getLastResponseRead(page, sels, fallback);
     const hasText = read.text.length > 0;
@@ -1244,6 +1245,14 @@ export async function sendAndWait(
       logLine('read', 'deduplicated thinking from response');
     }
     lastWasDeduplicated = Boolean(read.deduplicated);
+    // v2.5.66 (FIX 4): paragrafele de „thinking" rămase în elementul de răspuns
+    // (același slot ca răspunsul) sunt scoase în selectors.ts — logăm câte au
+    // fost, o singură dată per schimbare, ca să nu umplem Output-ul la polling.
+    const filteredParagraphs = read.filtered ?? 0;
+    if (filteredParagraphs > 0 && filteredParagraphs !== lastFilteredParagraphs) {
+      logLine('read', 'filtered ' + filteredParagraphs + ' thinking paragraphs');
+    }
+    lastFilteredParagraphs = filteredParagraphs;
     return read.text;
   };
 

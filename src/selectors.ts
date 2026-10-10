@@ -1661,6 +1661,38 @@ export interface ResponseRead {
   ignored: number;
   count: number;
   deduplicated?: boolean;
+  /** v2.5.66 (FIX 4): paragrafele de „thinking" scoase din text după citire. */
+  filtered?: number;
+}
+
+/**
+ * v2.5.66 (FIX 4): uneori „Thinking" e un PARAGRAF de sine stătător în ACELAȘI
+ * element cu răspunsul (nu un bloc separat), deci nici filtrarea pe atribute,
+ * nici deduplicarea nu îl scot. Scoatem paragrafele de la început care încep cu
+ * un cuvânt de raționament, până la primul paragraf care nu e thinking. Dacă
+ * rămâne gol (doar thinking), păstrăm textul original — paritate cu versiunile
+ * anterioare, ca sentinelele din sendAndWait să nu vadă „răspuns" gol.
+ */
+const THINKING_PARAGRAPH_RE =
+  /^(thinking|thought(\s+for)?|reasoning|cogitating|picturing|preg[ăa]tirea|r[ăa]spunz[âa]nd|se g[âa]nde|ra[tț]ionament)\b/i;
+
+export function filterThinkingParagraphs(text: string): { text: string; filtered: number } {
+  const src = String(text ?? '');
+  if (!src) return { text: src, filtered: 0 };
+  const paragraphs = src.split(/\n{2,}/);
+  let i = 0;
+  while (i < paragraphs.length) {
+    const flat = paragraphs[i].replace(/\s+/g, ' ').trim();
+    if (!flat || THINKING_PARAGRAPH_RE.test(flat)) {
+      i++;
+      continue;
+    }
+    break;
+  }
+  if (i === 0) return { text: src, filtered: 0 };
+  const kept = paragraphs.slice(i).join('\n\n').trim();
+  if (!kept) return { text: src, filtered: 0 };
+  return { text: kept, filtered: i };
 }
 
 interface ResponseScanArgs extends ReadArgs {
@@ -2424,12 +2456,19 @@ export async function getLastResponseRead(
   fallback = false
 ): Promise<ResponseRead> {
   try {
-    return await page.evaluate<ResponseRead, ResponseScanArgs>(scanResponses, {
+    const read = await page.evaluate<ResponseRead, ResponseScanArgs>(scanResponses, {
       sels,
       fallback,
       navSels: NAV_SELECTORS,
       mode: 'text'
     });
+    // v2.5.66 (FIX 4): scoate paragrafele de „thinking" rămase în elementul de
+    // răspuns (același slot ca răspunsul, nu bloc separat) — vezi helper-ul.
+    const cleaned = filterThinkingParagraphs(read.text);
+    if (cleaned.filtered) {
+      return { ...read, text: cleaned.text, filtered: cleaned.filtered };
+    }
+    return read;
   } catch (e: any) {
     log('reading the response failed: ' + (e?.message ?? String(e)));
     return { text: '', ignored: 0, count: 0 };

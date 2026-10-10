@@ -251,7 +251,9 @@ async function validateConnectSelectors(
   providerId: string,
   label: string
 ): Promise<void> {
-  const slots: SlotName[] = ['input', 'response', 'newChat'];
+  // Response selectors need real assistant content for functional validation.
+  // Repair them reactively after sending, never against an empty chat.
+  const slots: SlotName[] = ['input', 'newChat'];
   const missing = await Promise.all(
     slots.map(async (slot) => {
       const primary = selectors.primary(providerId, slot);
@@ -1222,6 +1224,7 @@ export async function sendAndWait(
    */
   let lastIgnoredChars = -1;
   let lastHadText = false;
+  let lastWasDeduplicated = false;
   const readResponse = async (sels: string[], fallback = false): Promise<string> => {
     const read = await getLastResponseRead(page, sels, fallback);
     const hasText = read.text.length > 0;
@@ -1237,6 +1240,10 @@ export async function sendAndWait(
           ' chars ignored)'
       );
     }
+    if (read.deduplicated && !lastWasDeduplicated) {
+      logLine('read', 'deduplicated thinking from response');
+    }
+    lastWasDeduplicated = Boolean(read.deduplicated);
     return read.text;
   };
 
@@ -1268,6 +1275,7 @@ export async function sendAndWait(
 
   let responseSelectors = selectors.candidates(providerId, 'response');
   let beforeText = await readResponse(responseSelectors);
+  let beforeFallbackText = await readResponse(responseSelectors, true);
   // v2.5.12 FIX (bug #36): numărul de răspunsuri existente ÎNAINTE de trimitere —
   // sentinela pentru „a apărut un răspuns nou", independentă de conținutul lui.
   let beforeCount = await countAssistantResponses(page, responseSelectors);
@@ -1378,6 +1386,9 @@ export async function sendAndWait(
   let previousText = '';
   let lastChangeAt = Date.now();
   let healIndex = 0;
+  let responseRepairPending = false;
+  let responseRepairAttempted = false;
+  const firstReplyInSession = beforeCount === 0 && !beforeFallbackText;
   let lastErrorCheckpoint = 0;
   let enterRetried = false;
   let lastStreamAt = 0;
@@ -1427,6 +1438,7 @@ export async function sendAndWait(
     input = await composeAndSend(sentText);
     // chat nou → sentinelele repornesc (alt DOM, altă numărătoare de răspunsuri)
     beforeText = await readResponse(responseSelectors);
+    beforeFallbackText = await readResponse(responseSelectors, true);
     beforeCount = await countAssistantResponses(page, responseSelectors);
     previousText = '';
     sawNewResponse = false;
@@ -1593,21 +1605,7 @@ export async function sendAndWait(
           log(label + ': response selectors work, waiting for the stream');
         }
       } else {
-        const healed = await healSlot(page, providerId, 'response', sentText);
-        if (healed) {
-          const probe = await readResponse(
-            selectors.candidates(providerId, 'response')
-          );
-          if (probe && isEchoOf(probe, sentText)) {
-            log(label + ': repair rejected (it caught our message) — falling back to JSON');
-            selectors.forget(providerId, 'response');
-          } else {
-            responseSelectors = selectors.candidates(providerId, 'response');
-            previousText = '';
-            lastChangeAt = Date.now();
-            log(label + ': response selector repaired -> ' + healed);
-          }
-        }
+        responseRepairPending = true;
       }
     }
 
@@ -1624,6 +1622,39 @@ export async function sendAndWait(
         continue;
       }
       if (pageError) throwProviderError(providerId, pageError, page);
+    }
+
+    if (responseRepairPending && !responseRepairAttempted) {
+      const fallbackText = await readResponse(
+        selectors.candidates(providerId, 'response'),
+        true
+      );
+      const newReply = stripEchoedUserMessage(fallbackText, sentText);
+      if (
+        newReply.length >= 60 &&
+        fallbackText !== beforeFallbackText &&
+        !isEchoOf(newReply, sentText)
+      ) {
+        responseRepairAttempted = true;
+        if (firstReplyInSession) {
+          logLine('ai-finder', 'deferred repair — running after first reply');
+        }
+        const healed = await healSlot(page, providerId, 'response', sentText);
+        if (healed) {
+          const probe = await readResponse(
+            selectors.candidates(providerId, 'response')
+          );
+          if (probe && isEchoOf(probe, sentText)) {
+            log(label + ': repair rejected (it caught our message) — falling back to JSON');
+            selectors.forget(providerId, 'response');
+          } else {
+            responseSelectors = selectors.candidates(providerId, 'response');
+            previousText = '';
+            lastChangeAt = Date.now();
+            log(label + ': response selector repaired -> ' + healed);
+          }
+        }
+      }
     }
 
     // 2) la ~25s: al doilea Enter (uneori primul nu pleacă mesajul)

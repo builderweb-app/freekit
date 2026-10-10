@@ -2879,7 +2879,7 @@ async function discoverForHealer(
   }
   const key = providerId + ':' + slot + ':' + host;
   const last = recentAttempts.get(key) ?? 0;
-  if (Date.now() - last < AI_RETRY_MS) {
+  if (slot !== 'response' && Date.now() - last < AI_RETRY_MS) {
     log('AI finder: încercare recentă pentru ' + key + ' — sar peste');
     tierLog('tier 4 (AI Finder) rate-limited for ' + slotKey);
     return backupTier(providerId, slot);

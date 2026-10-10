@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.5.64
+
+- **Response repair waits for the first real reply.** Connect-time validation no longer tries to repair the response selector before sending; reactive repair waits for new response content and then runs the AI Finder.
+- **Healer scoring avoids unstable React IDs** and prefers stable test IDs, accessible labels, and Claude message classes.
+- **Response reading removes nested thinking/reasoning blocks and Thinking details, strips the `Claude responded:` prefix, and removes repeated paragraphs while keeping their final occurrence.**
+
 ## v2.5.63
 
 - **AI selector finder uses the hosted proxy by default.** The new `api-proxy` mode sends DOM snapshots to the Freekit Cloudflare proxy, stops waiting after 30 seconds, and falls back to browser analysis if the request fails.

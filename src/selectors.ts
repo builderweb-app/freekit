@@ -1262,6 +1262,29 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
 
     let s = 0;
     const why: string[] = [];
+    const id = el.getAttribute('id') || '';
+    if (
+      id &&
+      (/^base-ui-/i.test(id) ||
+        /^_r_/i.test(id) ||
+        /^:r[^:]*:/i.test(id) ||
+        /\d/.test(id))
+    ) {
+      s -= 50;
+      why.push('unstable-id');
+    }
+    if (el.hasAttribute('data-testid')) {
+      s += 10;
+      why.push('stable-testid');
+    }
+    if (el.hasAttribute('aria-label')) {
+      s += 10;
+      why.push('stable-aria-label');
+    }
+    if (el.classList.contains('font-claude-message')) {
+      s += 8;
+      why.push('stable-claude-message-class');
+    }
 
     if (tags.indexOf(tag) >= 0) {
       s += 3;
@@ -1556,6 +1579,7 @@ export interface ResponseRead {
   text: string;
   ignored: number;
   count: number;
+  deduplicated?: boolean;
 }
 
 interface ResponseScanArgs extends ReadArgs {
@@ -1592,8 +1616,25 @@ interface ResponseScanArgs extends ReadArgs {
  * local, fiindcă funcția e serializată.
  */
 const scanResponses = (args: ResponseScanArgs): ResponseRead => {
-  const textOf = (el: Element): string =>
-    (((el as HTMLElement).innerText || el.textContent || '') as string).trim();
+  const textOf = (el: Element): string => {
+    const liveText = (el as HTMLElement).innerText;
+    if (el.isConnected && liveText) return liveText.trim();
+    const collect = (node: Node): string => {
+      if (node.nodeType === 3) return node.nodeValue || '';
+      if (node.nodeType !== 1) return '';
+      const element = node as HTMLElement;
+      if (element.tagName === 'BR') return '\n';
+      const text = Array.prototype.map
+        .call(element.childNodes, (child: Node) => collect(child))
+        .join('');
+      return /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|DD|DIV|DL|DT|FIELDSET|FIGCAPTION|FIGURE|FOOTER|FORM|H[1-6]|HEADER|LI|MAIN|NAV|OL|P|PRE|SECTION|TABLE|TR|UL)$/.test(
+        element.tagName
+      )
+        ? '\n\n' + text + '\n\n'
+        : text;
+    };
+    return collect(el).replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  };
 
   const isVisible = (el: Element): boolean => {
     const r = el.getBoundingClientRect();
@@ -1645,39 +1686,85 @@ const scanResponses = (args: ResponseScanArgs): ResponseRead => {
   const resolveAnswer = (
     el: Element,
     useAttrFilter: boolean
-  ): { text: string; ignored: number } => {
-    const full = textOf(el);
-    if (!full) return { text: '', ignored: 0 };
+  ): { text: string; ignored: number; deduplicated: boolean } => {
+    const original = textOf(el);
+    if (!original) return { text: '', ignored: 0, deduplicated: false };
+    if (useAttrFilter && isThinkingEl(el)) {
+      return { text: '', ignored: original.length, deduplicated: false };
+    }
 
-    // container: păstrăm TOATE blocurile copil care nu sunt thinking
-    const kids = Array.prototype.slice.call(el.children) as Element[];
+    const clean = el.cloneNode(true) as Element;
     let ignored = 0;
+    if (useAttrFilter) {
+      const descendants = Array.prototype.slice.call(clean.querySelectorAll('*')) as Element[];
+      for (const node of descendants) {
+        if (!clean.contains(node)) continue;
+        const className =
+          typeof (node as HTMLElement).className === 'string'
+            ? (node as HTMLElement).className
+            : '';
+        if (/\b(?:thinking|reasoning|extended-thinking)\b/i.test(className)) {
+          ignored += textOf(node).length;
+          node.remove();
+        }
+      }
+      const details = Array.prototype.slice.call(clean.querySelectorAll('details')) as Element[];
+      if (clean.tagName.toLowerCase() === 'details') details.unshift(clean);
+      for (const detail of details) {
+        const summary = detail.querySelector('summary');
+        if (summary && /\bthinking\b/i.test(textOf(summary))) {
+          ignored += textOf(detail).length;
+          detail.remove();
+        }
+      }
+    }
+
+    const full = textOf(clean);
+    if (!full) return { text: '', ignored: original.length, deduplicated: false };
+    const kids = Array.prototype.slice.call(clean.children) as Element[];
     let sawThinkingChild = false;
     const kept: string[] = [];
     for (let i = 0; i < kids.length; i++) {
       const t = textOf(kids[i]);
       if (!t) continue;
-      if (isThinkingMarker(t) || (useAttrFilter && isThinkingEl(kids[i]))) {
+      if (isThinkingMarker(t)) {
         sawThinkingChild = true;
         ignored += t.length;
         continue;
       }
       kept.push(t);
     }
+    const finish = (value: string, ignoredChars: number) => {
+      let text = value.trim().replace(/^(?:Claude\s+responded:\s*)/i, '');
+      const paragraphs = text.split(/\n{2,}/);
+      const seen = new Set<string>();
+      const finalParagraphs: string[] = [];
+      let deduplicated = false;
+      let duplicateChars = 0;
+      for (let i = paragraphs.length - 1; i >= 0; i--) {
+        const paragraph = paragraphs[i].trim();
+        if (!paragraph) continue;
+        if (seen.has(paragraph)) {
+          deduplicated = true;
+          duplicateChars += paragraph.length;
+          continue;
+        }
+        seen.add(paragraph);
+        finalParagraphs.unshift(paragraph);
+      }
+      if (deduplicated) text = finalParagraphs.join('\n\n');
+      return { text, ignored: ignoredChars + duplicateChars, deduplicated };
+    };
     if (sawThinkingChild) {
       const text = kept.join('\n\n').trim();
-      if (!text) return { text: '', ignored };
-      if (isThinkingMarker(text)) return { text: '', ignored: ignored + text.length };
-      return { text, ignored };
+      if (!text) return finish('', ignored);
+      if (isThinkingMarker(text)) return finish('', ignored + text.length);
+      return finish(text, ignored);
     }
 
-    // elementul însuși e blocul de raționament (ex: qwen.response descoperit de
-    // AI finder prinde exact div-ul de thinking) → nu e răspuns
-    if (useAttrFilter && isThinkingEl(el)) return { text: '', ignored: full.length };
-
     if (kids.length === 0) {
-      if (isThinkingMarker(full)) return { text: '', ignored: full.length };
-      return { text: full, ignored: 0 };
+      if (isThinkingMarker(full)) return finish('', ignored + full.length);
+      return finish(full, ignored);
     }
 
     // „Thinking completed\n\n<răspuns>”: scoatem doar linia-marker de la început
@@ -1685,9 +1772,9 @@ const scanResponses = (args: ResponseScanArgs): ResponseRead => {
     if (nl > 0) {
       const head = full.slice(0, nl).trim();
       const rest = full.slice(nl + 1).trim();
-      if (rest && isThinkingMarker(head)) return { text: rest, ignored: head.length };
+      if (rest && isThinkingMarker(head)) return finish(rest, ignored + head.length);
     }
-    return { text: full, ignored: 0 };
+    return finish(full, ignored);
   };
 
   let ignoredTotal = 0;
@@ -1704,7 +1791,7 @@ const scanResponses = (args: ResponseScanArgs): ResponseRead => {
 
   const readFromSelectors = (
     useAttrFilter: boolean
-  ): { text: string; ignored: number } | null => {
+  ): { text: string; ignored: number; deduplicated: boolean } | null => {
     for (const sel of args.sels) {
       const nodes = matched(sel);
       for (let i = nodes.length - 1; i >= 0; i--) {
@@ -1736,7 +1823,7 @@ const scanResponses = (args: ResponseScanArgs): ResponseRead => {
     const strict = countFromSelectors(true);
     // paritate cu v2.5.45 pentru paginile fără blocuri de thinking detectabile
     const count = strict || countFromSelectors(false);
-    return { text: '', ignored: ignoredTotal, count };
+    return { text: '', ignored: ignoredTotal, count, deduplicated: false };
   }
 
   /**
@@ -1746,12 +1833,12 @@ const scanResponses = (args: ResponseScanArgs): ResponseRead => {
    */
   const pickGeneric = (
     useAttrFilter: boolean
-  ): { text: string; ignored: number } | null => {
+  ): { text: string; ignored: number; deduplicated: boolean } | null => {
     const pool = document.querySelectorAll(
       'div, article, section, p, message-content, model-response'
     );
     const candidates: Element[] = [];
-    const resolved = new Map<Element, string>();
+    const resolved = new Map<Element, { text: string; deduplicated: boolean }>();
     let ignored = 0;
     for (let i = 0; i < pool.length; i++) {
       const el = pool[i];
@@ -1764,27 +1851,36 @@ const scanResponses = (args: ResponseScanArgs): ResponseRead => {
       const r = resolveAnswer(el, useAttrFilter);
       ignored += r.ignored;
       if (!r.text) continue;
-      resolved.set(el, r.text);
+      resolved.set(el, { text: r.text, deduplicated: r.deduplicated });
       candidates.push(el);
     }
 
     // păstrăm doar cele mai "interioare" (fără un copil-candidat aproape la fel de mare)
     const inner = candidates.filter((el) => {
-      const own = resolved.get(el) as string;
+      const own = (resolved.get(el) as { text: string }).text;
       return !candidates.some(
         (child) =>
           child !== el &&
           el.contains(child) &&
-          (resolved.get(child) as string).length >= own.length * 0.7
+          (resolved.get(child) as { text: string }).text.length >= own.length * 0.7
       );
     });
 
     const last = inner.length ? inner[inner.length - 1] : null;
-    return last ? { text: resolved.get(last) as string, ignored } : null;
+    if (!last) return null;
+    const answer = resolved.get(last) as { text: string; deduplicated: boolean };
+    return { text: answer.text, ignored, deduplicated: answer.deduplicated };
   };
 
   const strict = readFromSelectors(true);
-  if (strict) return { text: strict.text, ignored: ignoredTotal, count: 0 };
+  if (strict) {
+    return {
+      text: strict.text,
+      ignored: ignoredTotal,
+      count: 0,
+      deduplicated: strict.deduplicated
+    };
+  }
 
   const ignoredStrict = ignoredTotal;
 
@@ -1793,23 +1889,38 @@ const scanResponses = (args: ResponseScanArgs): ResponseRead => {
   // în favoarea textului de raționament rămas pe ecran
   const genericStrict = args.fallback ? pickGeneric(true) : null;
   if (genericStrict) {
-    return { text: genericStrict.text, ignored: ignoredStrict + genericStrict.ignored, count: 0 };
+    return {
+      text: genericStrict.text,
+      ignored: ignoredStrict + genericStrict.ignored,
+      count: 0,
+      deduplicated: genericStrict.deduplicated
+    };
   }
 
   // pas 3: paritate cu v2.5.45 — reluăm citirea fără filtrul de atribute, ca să
   // nu răspundem „gol" acolo unde versiunea anterioară citea ceva
   const relaxed = readFromSelectors(false);
   if (relaxed) {
-    return { text: relaxed.text, ignored: ignoredStrict + relaxed.ignored, count: 0 };
+    return {
+      text: relaxed.text,
+      ignored: ignoredStrict + relaxed.ignored,
+      count: 0,
+      deduplicated: relaxed.deduplicated
+    };
   }
 
   // pas 4 (doar la rescue): scan generic fără filtrul de atribute
   const genericRelaxed = args.fallback ? pickGeneric(false) : null;
   if (genericRelaxed) {
-    return { text: genericRelaxed.text, ignored: ignoredStrict + genericRelaxed.ignored, count: 0 };
+    return {
+      text: genericRelaxed.text,
+      ignored: ignoredStrict + genericRelaxed.ignored,
+      count: 0,
+      deduplicated: genericRelaxed.deduplicated
+    };
   }
 
-  return { text: '', ignored: ignoredStrict, count: 0 };
+  return { text: '', ignored: ignoredStrict, count: 0, deduplicated: false };
 };
 
 /* =========================================================================

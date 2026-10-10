@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.5.67
+
+- **The healer no longer "repairs" `newChat` with the "Rename chat" button.** The bare token `chat` was enough for `button[aria-label="Rename chat"]` to score as a new-chat button (`[healer] … (scor 49 | bonus:chat)`). The `newChat` bonus now fires **only** on the full phrases `new chat` / `start chat` / `create chat` / `chat nou` / `nou chat` / `new conversation` (hyphens/underscores treated as spaces, so `new-chat-button` still matches), the actions on an **existing** chat (`rename`, `delete`, `edit`, `copy`, `share`, `archive`, `hide`, `mute`) are penalised with `-40` (and `-50` on action elements), and an explicit `<a href="/new">` link gets `+20`. The bare `chat` token is also removed from the `+30` accept list.
+- **A "thinking" paragraph in the middle of the reply is stripped too.** `filterThinkingParagraphs` used to remove reasoning paragraphs only at the **beginning**; a reply like `Bine, mulțumesc!\n\nFormularea unui răspuns scurt și casual.\n\nBine, mulțumesc!` kept the middle line. It now checks **every** paragraph and drops a short one (`< 150` chars) that starts with `Thinking` / `Reasoning` / `Cogitating` / `Picturing` / `Formularea` / `Pregătirea` / `Răspunzând` / `Se gândește` / `Analizând` / `Considerând`. Leading reasoning paragraphs are still removed regardless of length, and the original text is kept if nothing would remain.
+
 ## v2.5.66
 
 - **The version migration is no longer undone by the backup restore.** `saveUserSelectors()` snapshots the previous file into `selectors-user.json.backup` before every rewrite, so the migration's purge of invalid auto selectors was immediately re-imported by tier 5. The removed keys are now purged from **every** backup version too (`[migration] purged <provider>.<slot> from backup too`) and recorded in `selectors-migration.json`; tier 5 skips any key listed there (`backup restore skipped … (purged by migration)`).

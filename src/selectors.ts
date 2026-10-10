@@ -1036,6 +1036,30 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
     .map((k) => String(k).toLowerCase().trim())
     .filter(Boolean);
 
+  // v2.5.67 (FIX 1): „chat" singur NU mai e semnal de chat NOU — `button[aria-label="Rename chat"]`
+  // primea bonusul și healer-ul îl învăța ca `newChat`. Bonusul merge doar pe fraza completă,
+  // iar acțiunile pe un chat EXISTENT sunt penalizate. (Funcția e serializată în pagină.)
+  const NEW_CHAT_PHRASES = [
+    'new chat',
+    'start chat',
+    'create chat',
+    'chat nou',
+    'nou chat',
+    'new conversation'
+  ];
+  const CHAT_ITEM_ACTIONS = [
+    'rename',
+    'delete',
+    'edit',
+    'copy',
+    'share',
+    'archive',
+    'hide',
+    'mute'
+  ];
+  // clasele/id-urile folosesc cratime (`new-chat-button`) — le tratăm ca spații la fraze
+  const phraseHay = (s: string): string => s.replace(/[-_]+/g, ' ');
+
   // FIX v2: 'auth' fără 'author' (ChatGPT: data-message-author-role).
   // v0.9.1: aceleași garduri de token ca în Node (funcția e serializată în
   // pagină, deci logica se duplică intenționat): 'mode' ≠ 'model', iar
@@ -1518,16 +1542,32 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
         why.push('penal:user-message');
       }
       if (slot === 'newChat') {
-        for (const good of ['new', 'chat', 'nou']) {
-          if (labelHay.indexOf(good) >= 0) {
-            s += 4;
-            why.push('bonus:' + good);
+        // v2.5.67 (FIX 1): bonus DOAR pe fraza completă de „chat nou" — tokenul
+        // „chat" singur era suficient ca „Rename chat" să câștige scanul.
+        const labelFlat = phraseHay(labelHay);
+        if (NEW_CHAT_PHRASES.some((p) => labelFlat.indexOf(p) >= 0)) {
+          s += 4;
+          why.push('bonus:chat');
+        }
+        // v2.5.67 (FIX 1): acțiunile pe un chat EXISTENT nu sunt „chat nou".
+        for (const bad of CHAT_ITEM_ACTIONS) {
+          if (labelHay.indexOf(bad) >= 0) {
+            s -= 40;
+            why.push('penal:' + bad);
           }
         }
         try {
           if (el.closest('header, [role="banner"], aside, nav, [class*="sidebar" i]')) {
             s += 3;
             why.push('bonus:header/sidebar');
+          }
+          // v2.5.67 (FIX 1): linkul explicit „/new" e mereu un buton de chat nou.
+          if (
+            tag === 'a' &&
+            /\/(new|nou)\/?$/i.test((el.getAttribute('href') || '').split(/[?#]/)[0])
+          ) {
+            s += 20;
+            why.push('bonus:href-new');
           }
           const icon = el.querySelector('svg, img');
           if (icon && /plus|add|compose|pen|pencil|new[-_]?chat/i.test(icon.outerHTML || '')) {
@@ -1564,7 +1604,12 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
           'feedback',
           'thumbs',
           'action-bar',
-          'message-actions'
+          'message-actions',
+          // v2.5.67 (FIX 1): acțiuni pe un chat existent — nu „chat nou".
+          'rename',
+          'archive',
+          'hide',
+          'mute'
         ]) {
           if (hay.indexOf(bad) >= 0) {
             s -= 50;
@@ -1572,11 +1617,18 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
           }
         }
         if (slot === 'newChat') {
-          for (const good of ['new', 'create', 'chat', 'plus', 'compose']) {
+          // v2.5.67 (FIX 1): tokenul „chat" singur NU mai e acceptat — „Rename
+          // chat" lua +30 și ajungea „chat nou". Semnalul e fraza completă.
+          for (const good of ['new', 'create', 'plus', 'compose']) {
             if (hay.indexOf(good) >= 0) {
               s += 30;
               why.push('accept:' + good);
             }
+          }
+          const hayFlat = phraseHay(hay);
+          if (NEW_CHAT_PHRASES.some((p) => hayFlat.indexOf(p) >= 0)) {
+            s += 30;
+            why.push('accept:chat');
           }
         }
       }
@@ -1666,33 +1718,63 @@ export interface ResponseRead {
 }
 
 /**
- * v2.5.66 (FIX 4): uneori „Thinking" e un PARAGRAF de sine stătător în ACELAȘI
- * element cu răspunsul (nu un bloc separat), deci nici filtrarea pe atribute,
- * nici deduplicarea nu îl scot. Scoatem paragrafele de la început care încep cu
- * un cuvânt de raționament, până la primul paragraf care nu e thinking. Dacă
- * rămâne gol (doar thinking), păstrăm textul original — paritate cu versiunile
- * anterioare, ca sentinelele din sendAndWait să nu vadă „răspuns" gol.
+ * v2.5.66 (FIX 4) / v2.5.67 (FIX 2): „Thinking" poate fi un PARAGRAF de sine
+ * stătător în ACELAȘI element cu răspunsul (nu un bloc separat), deci nici
+ * filtrarea pe atribute, nici deduplicarea nu îl scot.
+ *
+ * v2.5.66 scotea doar paragrafele de LA ÎNCEPUT; v2.5.67 verifică TOATE
+ * paragrafele — modelul strecoară uneori raționamentul LA MIJLOC:
+ *   „Bine, mulțumesc!\n\nFormularea unui răspuns scurt și casual.\n\nBine, mulțumesc!"
+ * Scoaterea se face doar pentru paragrafe SCURTE (< 150 caractere) care ÎNCEP cu
+ * un cuvânt de raționament (un paragraf lung poate fi răspuns real care doar
+ * pomenește termenul). Paragrafele de la început se scot fără limita de lungime
+ * (paritate cu v2.5.66). Dacă nu rămâne nimic, păstrăm textul original — paritate
+ * cu versiunile anterioare, ca sentinelele din sendAndWait să nu vadă „răspuns" gol.
  */
 const THINKING_PARAGRAPH_RE =
-  /^(thinking|thought(\s+for)?|reasoning|cogitating|picturing|preg[ăa]tirea|r[ăa]spunz[âa]nd|se g[âa]nde|ra[tț]ionament)\b/i;
+  /^(thinking|thought(\s+for)?|reasoning|cogitating|picturing|formularea|preg[ăa]tirea|r[ăa]spunz[âa]nd|se g[âa]nde|analiz[âa]nd|consider[âa]nd|ra[tț]ionament)\b/i;
+
+/** v2.5.67 (FIX 2): peste această lungime un paragraf nu mai e „thinking". */
+const THINKING_PARAGRAPH_MAX_LEN = 150;
+
+function isThinkingParagraph(flat: string): boolean {
+  return THINKING_PARAGRAPH_RE.test(flat);
+}
 
 export function filterThinkingParagraphs(text: string): { text: string; filtered: number } {
   const src = String(text ?? '');
   if (!src) return { text: src, filtered: 0 };
   const paragraphs = src.split(/\n{2,}/);
-  let i = 0;
-  while (i < paragraphs.length) {
-    const flat = paragraphs[i].replace(/\s+/g, ' ').trim();
-    if (!flat || THINKING_PARAGRAPH_RE.test(flat)) {
-      i++;
+  const flatOf = (p: string): string => p.replace(/\s+/g, ' ').trim();
+  // v2.5.66: paragrafele de la început (goale sau de raționament) sunt scoase
+  // indiferent de lungime — până la primul paragraf de conținut.
+  let start = 0;
+  while (start < paragraphs.length) {
+    const flat = flatOf(paragraphs[start]);
+    if (!flat || isThinkingParagraph(flat)) {
+      start++;
       continue;
     }
     break;
   }
-  if (i === 0) return { text: src, filtered: 0 };
-  const kept = paragraphs.slice(i).join('\n\n').trim();
-  if (!kept) return { text: src, filtered: 0 };
-  return { text: kept, filtered: i };
+  const kept: string[] = [];
+  let filtered = 0;
+  for (let i = 0; i < paragraphs.length; i++) {
+    const flat = flatOf(paragraphs[i]);
+    const leading = i < start;
+    // v2.5.67: ORICE paragraf scurt de raționament (și orice paragraf de la
+    // început) e scos — nu doar cele leading.
+    const shortThinking = flat.length > 0 && flat.length < THINKING_PARAGRAPH_MAX_LEN && isThinkingParagraph(flat);
+    if (leading || shortThinking) {
+      filtered++;
+      continue;
+    }
+    kept.push(paragraphs[i]);
+  }
+  if (filtered === 0) return { text: src, filtered: 0 };
+  const out = kept.join('\n\n').trim();
+  if (!out) return { text: src, filtered: 0 };
+  return { text: out, filtered };
 }
 
 interface ResponseScanArgs extends ReadArgs {

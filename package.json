@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.5.62",
+  "version": "2.5.63",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -202,14 +202,15 @@
         },
         "freekit.aiSelectorFinder.mode": {
           "type": "string",
-          "enum": ["off", "ollama", "browser"],
+          "enum": ["off", "ollama", "browser", "api-proxy"],
           "enumDescriptions": [
             "Disabled — the automatic selector repair stops after the fingerprint healer.",
             "Local Ollama model (3–5 min per analysis, needs a chat model installed).",
-            "A new Chrome tab asking ChatGPT (15–30s). No API key, no install."
+            "A new Chrome tab asking ChatGPT (15–30s). No API key, no install.",
+            "Hosted selector proxy (usually 3–5s); falls back to browser mode on failure."
           ],
-          "default": "browser",
-          "markdownDescription": "How Freekit repairs a broken selector automatically: `off` = disabled, `ollama` = local Ollama (3–5 min), `browser` = ChatGPT/Claude/Gemini web chat in a new Chrome tab (15–30s, **no API key needed**). Repair is fully automatic: no cards, no questions — details go to **Output → Freekit**. The manual `Freekit: Repair Selectors` command uses the same mode."
+          "default": "api-proxy",
+          "markdownDescription": "How Freekit repairs a broken selector automatically: `off` = disabled, `ollama` = local Ollama (3–5 min), `browser` = ChatGPT in a new Chrome tab (15–30s, **no API key needed**), `api-proxy` = hosted selector proxy (usually 3–5s, with browser fallback on failure). Repair is fully automatic: no cards, no questions — details go to **Output → Freekit**. The manual `Freekit: Repair Selectors` command uses the same mode."
         },
         "freekit.aiFinderModel": {
           "type": "string",
@@ -221,7 +222,7 @@
           "default": 30,
           "minimum": 5,
           "maximum": 30,
-          "markdownDescription": "Timeout per AI selector-analysis attempt in `ollama` mode (maximum 30s). The complete finder has a hard 60s timeout and at most two attempts. `browser` mode uses its own 45s budget for the new Chrome tab."
+          "markdownDescription": "Timeout per AI selector-analysis attempt in `ollama` mode (maximum 30s). The complete finder has a hard 60s timeout and at most two attempts. `browser` mode uses its own 45s budget for the new Chrome tab; `api-proxy` times out after 30s before falling back to browser."
         },
         "freekit.providerTimeout": {
           "type": "number",

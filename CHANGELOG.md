@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.5.63
+
+- **AI selector finder uses the hosted proxy by default.** The new `api-proxy` mode sends DOM snapshots to the Freekit Cloudflare proxy, stops waiting after 30 seconds, and falls back to browser analysis if the request fails.
+- **Claude response selection excludes internal reasoning.** The prompt explicitly requests only the final assistant reply, candidate validation rejects thinking/reasoning markers, and the bundled Claude response selector now targets `div[data-testid='assistant-message']`.
+
 ## v2.5.62
 
 - **User-locked selectors now recover automatically when broken.** Whenever the healer runs, it functionally tests a failed user-locked selector. A failed test is logged and counted; the first failure keeps the lock, the second unlocks it and allows fingerprint/AI repair, and a third consecutive failure removes it from `selectors-user.json`. A successful functional test resets the count and always preserves the lock. The failure count resets after a successful use.

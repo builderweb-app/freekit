@@ -146,11 +146,10 @@
         }
       },
       "response": {
-        "primary": ".font-claude-message",
+        "primary": "div[data-testid='assistant-message']",
         "alternatives": [
-          ".font-claude-response",
-          "[data-testid='assistant-message']",
-          "[data-testid*='assistant']"
+          ".font-claude-message",
+          ".font-claude-response"
         ],
         "fingerprint": {
           "tags": ["div", "article"],

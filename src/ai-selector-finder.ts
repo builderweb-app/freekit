@@ -36,6 +36,7 @@ import {
   BROWSER_AI_TIMEOUT_MS,
   browserAiAvailable
 } from './browserAi';
+import { askProxyServer } from './proxyAi';
 
 const log = (msg: string) => logLine('ai-finder', msg);
 /** v2.5.44 (bug #101): același tag ca healer-ul din selectors.ts. */
@@ -103,6 +104,8 @@ const AI_FINDER_GLOBAL_TIMEOUT_MS = 60_000;
  * în pagină a selectorilor propuși), deci plafonul global e mai mare.
  */
 const AI_FINDER_BROWSER_GLOBAL_TIMEOUT_MS = 75_000;
+/** Proxy-ul are 30s, cu până la 45s suplimentare pentru fallback-ul browser. */
+const AI_FINDER_PROXY_GLOBAL_TIMEOUT_MS = 75_000;
 
 /**
  * v2.5.41 (bug #96): ce ajunge în snapshot. HTML-ul complet al unui chat
@@ -167,16 +170,17 @@ const inputRepairFailures = new Map<string, number>();
 const inputRepairGaveUp = new Set<string>();
 
 /**
- * v2.5.61 (FIX 2): modul AI finder-ului.
+ * v2.5.63: modul AI finder-ului.
  *   - `off`     = dezactivat;
  *   - `ollama`  = model local (3–5 min);
  *   - `browser` = web chat într-un tab nou de Chrome (15–30s, fără API key).
- * Implicit `browser`: reparația selectorilor funcționează fără nicio instalare.
+ *   - `api-proxy` = proxy-ul Freekit (3–5s de regulă), cu fallback browser.
+ * Implicit `api-proxy`.
  */
-export type AiFinderMode = 'off' | 'ollama' | 'browser';
+export type AiFinderMode = 'off' | 'ollama' | 'browser' | 'api-proxy';
 
-const AI_FINDER_MODES: readonly AiFinderMode[] = ['off', 'ollama', 'browser'];
-export const AI_FINDER_DEFAULT_MODE: AiFinderMode = 'browser';
+const AI_FINDER_MODES: readonly AiFinderMode[] = ['off', 'ollama', 'browser', 'api-proxy'];
+export const AI_FINDER_DEFAULT_MODE: AiFinderMode = 'api-proxy';
 
 interface FinderSettings {
   mode: AiFinderMode;
@@ -768,6 +772,15 @@ export function buildPrompt(ctx: PromptContext): string {
     '5. If an element does not exist in the snapshot, return null for it.'
   );
 
+  if (ctx.missingSlots.indexOf('response') >= 0) {
+    lines.push(
+      '',
+      'Find CSS selector for the FINAL assistant reply ONLY.',
+      "EXCLUDE elements with 'thinking', 'reasoning', 'extended-thinking' in class.",
+      'Must return ONLY the last message text, not internal reasoning.'
+    );
+  }
+
   if (ctx.attempt > 1 && ctx.failureReason) {
     lines.push(
       '',
@@ -1082,9 +1095,13 @@ export async function findSelectorsWithAI(
   activeFinders.set(id, active);
   const silent = opts.silent === true;
   const mode = finderSettings().mode;
-  const maxAttempts = mode === 'browser' ? 1 : AI_FINDER_MAX_ATTEMPTS;
+  const maxAttempts = mode === 'browser' || mode === 'api-proxy' ? 1 : AI_FINDER_MAX_ATTEMPTS;
   const globalTimeoutMs =
-    mode === 'browser' ? AI_FINDER_BROWSER_GLOBAL_TIMEOUT_MS : AI_FINDER_GLOBAL_TIMEOUT_MS;
+    mode === 'browser'
+      ? AI_FINDER_BROWSER_GLOBAL_TIMEOUT_MS
+      : mode === 'api-proxy'
+        ? AI_FINDER_PROXY_GLOBAL_TIMEOUT_MS
+        : AI_FINDER_GLOBAL_TIMEOUT_MS;
   const globalTimeoutSeconds = Math.round(globalTimeoutMs / 1000);
   publishAIFinderStatus({
     ...statusBase,
@@ -1232,8 +1249,8 @@ async function runFindSelectorsWithAI(
   }
   const wantedRequired = required.filter((s) => wanted.indexOf(s) >= 0);
 
-  // v2.5.61 (FIX 2): modul decide CINE analizează DOM-ul (tab nou de Chrome sau
-  // Ollama local). `off` nu ajunge aici (apelanții verifică `enabled`).
+  // v2.5.63: modul decide dacă DOM-ul merge la proxy, la Ollama sau la browser.
+  // `off` nu ajunge aici (apelanții verifică `enabled`).
   const mode = finderSettings().mode;
   if (mode === 'off') {
     log('AI finder disabled (freekit.aiSelectorFinder.mode=off)');
@@ -1246,7 +1263,7 @@ async function runFindSelectorsWithAI(
     model = await resolveAiFinderModel();
     if (opts.signal?.aborted) return null;
     if (!model) return null;
-  } else if (!browserAiAvailable()) {
+  } else if (mode === 'browser' && !browserAiAvailable()) {
     log('mode=browser needs a Chrome page factory — none registered, skipping');
     return null;
   }
@@ -1273,13 +1290,15 @@ async function runFindSelectorsWithAI(
   const settings = finderSettings();
   const attemptTimeoutMs = Math.min(settings.timeoutMs, AI_FINDER_ATTEMPT_TIMEOUT_MS);
   // browser: o singură trecere (45s); ollama: până la două încercări de 30s
-  const maxAttempts = mode === 'browser' ? 1 : AI_FINDER_MAX_ATTEMPTS;
+  const maxAttempts = mode === 'browser' || mode === 'api-proxy' ? 1 : AI_FINDER_MAX_ATTEMPTS;
   const ollama = mode === 'ollama' ? new OllamaProvider({ model: model as string }) : null;
   if (mode === 'browser') {
     log(
       'mode=browser, provider=' + BROWSER_AI_PROVIDER + ', analyzing DOM (' +
         dom.length + ' chars)'
     );
+  } else if (mode === 'api-proxy') {
+    log('mode=api-proxy, analyzing DOM (' + dom.length + ' chars)');
   } else {
     log('mode=ollama, provider=' + model + ', analyzing DOM (' + dom.length + ' chars)');
   }
@@ -1299,6 +1318,8 @@ async function runFindSelectorsWithAI(
         message:
           mode === 'browser'
             ? 'Analyzing the DOM in a new Chrome tab (up to 45s)…'
+            : mode === 'api-proxy'
+              ? 'Analyzing the DOM with the selector proxy (up to 30s)…'
             : attempt === 1
               ? 'Analyzing DOM (attempt 1/2) — up to 30s per attempt, 60s max.'
               : 'Attempt 2/2 — retrying with a more specific prompt…',
@@ -1328,6 +1349,28 @@ async function runFindSelectorsWithAI(
           return null;
         }
         reply = answer;
+      } else if (mode === 'api-proxy') {
+        try {
+          reply = await askProxyServer(prompt, dom, opts.signal);
+          if (!reply.trim()) throw new Error('proxy returned an empty response');
+        } catch (e: any) {
+          if (opts.signal?.aborted) return null;
+          const reason = e?.message ?? String(e);
+          log('mode=api-proxy failed: ' + reason + ' — falling back to browser');
+          if (!browserAiAvailable()) {
+            log('mode=api-proxy fallback unavailable — no browser page factory registered');
+            return null;
+          }
+          const answer = await askBrowserAi(prompt, {
+            timeoutMs: BROWSER_AI_TIMEOUT_MS,
+            signal: opts.signal
+          });
+          if (!answer) {
+            log('mode=browser fallback: nothing usable came back');
+            return null;
+          }
+          reply = answer;
+        }
       } else {
         // fără istoric între încercări: promptul conține deja tot ce trebuie
         // (altfel cele 18k caractere de snapshot s-ar aduna peste num_ctx 8192)
@@ -1397,6 +1440,10 @@ export interface ValidateOptions {
 
 function normText(t: string): string {
   return String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function containsThinkingMarkers(text: string): boolean {
+  return /thinking|reasoning|picturing|răspunzând/i.test(text);
 }
 
 /** Textul NU are voie să conțină mesajul tocmai trimis (containere de
@@ -1911,15 +1958,26 @@ export async function validateResponseSelector(
         const text = await readResponseText(page, want);
         chars = text.length;
         bestChars = chars;
+        if (containsThinkingMarkers(text)) {
+          log('response rejected: contains thinking markers');
+          reason = 'contains thinking markers';
+        }
       }
     } else {
       structurallyOk = true;
       const text = await readResponseText(page, want);
       chars = text.length;
       bestChars = chars;
+      const hasThinkingMarkers = containsThinkingMarkers(text);
+      if (hasThinkingMarkers) {
+        log('response rejected: contains thinking markers');
+        reason = 'contains thinking markers';
+      }
       // Fix 2: un tool call din pagină care nu ajunge în textul citit = pierdut.
       const markerRequired = probe.markerBlock === 'after' || probe.markerBlock === 'inside';
-      if (!hasToolMarker(text) && markerRequired) {
+      if (hasThinkingMarkers) {
+        // Don't accept thinking/reasoning content as an assistant reply.
+      } else if (!hasToolMarker(text) && markerRequired) {
         needMarker = true;
         log('response selector missed tool call markers');
         reason = 'response selector missed tool call markers';
@@ -1972,6 +2030,10 @@ export async function validateResponseSelector(
     const n = text.length;
     if (n > bestChars) bestChars = n;
     if (n > bestOther) bestOther = n;
+    if (containsThinkingMarkers(text)) {
+      log('response rejected: contains thinking markers');
+      continue;
+    }
     if (n < RESPONSE_MIN_CHARS) continue;
     if (c.source === 'parent' && n <= Math.max(chars, 1) * RESPONSE_PARENT_TEXT_RATIO) continue;
     if (needMarker && !hasToolMarker(text)) continue;
@@ -2843,7 +2905,13 @@ async function discoverForHealer(
     return backupTier(providerId, slot);
   }
   const tier4 =
-    'tier 4 (AI Finder ' + (settings.mode === 'browser' ? 'browser' : 'ollama') + ')';
+    'tier 4 (AI Finder ' +
+    (settings.mode === 'browser'
+      ? 'browser'
+      : settings.mode === 'api-proxy'
+        ? 'api-proxy'
+        : 'ollama') +
+    ')';
   tierLog(tier4 + ' for ' + slotKey + '...');
   try {
     const label = PROVIDER_LABELS[providerId] || providerId;

@@ -37,7 +37,7 @@ import {
   BROWSER_AI_TIMEOUT_MS,
   browserAiAvailable
 } from './browserAi';
-import { askProxyServer, PROXY_MAX_DOM_CHARS } from './proxyAi';
+import { askProxyServer, PROXY_MAX_DOM_CHARS, proxyAiHost } from './proxyAi';
 
 const log = (msg: string) => logLine('ai-finder', msg);
 /** v2.5.44 (bug #101): același tag ca healer-ul din selectors.ts. */
@@ -1318,7 +1318,7 @@ async function runFindSelectorsWithAI(
         dom.length + ' chars)'
     );
   } else if (mode === 'api-proxy') {
-    log('mode=api-proxy, analyzing DOM (' + dom.length + ' chars)');
+    log('mode=api-proxy, calling ' + proxyAiHost() + ' (DOM ' + dom.length + ' chars)');
   } else {
     log('mode=ollama, provider=' + model + ', analyzing DOM (' + dom.length + ' chars)');
   }
@@ -1370,9 +1370,18 @@ async function runFindSelectorsWithAI(
         }
         reply = answer;
       } else if (mode === 'api-proxy') {
+        const proxyStarted = Date.now();
         try {
           reply = await askProxyServer(prompt, dom, opts.signal);
           if (!reply.trim()) throw new Error('proxy returned an empty response');
+          // v2.5.69 (FIX 3): vizibil în Output → Freekit (dimensiune + durată reală)
+          log(
+            'proxy got reply (' +
+              reply.length +
+              ' chars, ' +
+              ((Date.now() - proxyStarted) / 1000).toFixed(1) +
+              's)'
+          );
         } catch (e: any) {
           if (opts.signal?.aborted) return null;
           const reason = e?.message ?? String(e);

@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.5.68",
+  "version": "2.5.69",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -223,6 +223,11 @@
           "minimum": 5,
           "maximum": 30,
           "markdownDescription": "Timeout per AI selector-analysis attempt in `ollama` mode (maximum 30s). The complete finder has a hard 60s timeout and at most two attempts. `browser` mode uses its own 45s budget for the new Chrome tab; `api-proxy` times out after 30s before falling back to browser."
+        },
+        "freekit.aiFinderProxyUrl": {
+          "type": "string",
+          "default": "https://freekitproxy.identitate-brand.workers.dev",
+          "markdownDescription": "Endpoint used by `freekit.aiSelectorFinder.mode = api-proxy`. Freekit POSTs `{ prompt, dom }` and expects an OpenAI-compatible reply (`choices[0].message.content`); the Gemini key lives on the server, so nothing sensitive is stored locally. Change it only when you run your own proxy — an invalid value falls back to the default. Over 12 000 chars the DOM snapshot is truncated before the request."
         },
         "freekit.providerTimeout": {
           "type": "number",

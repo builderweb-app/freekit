@@ -8,7 +8,38 @@ export const PROXY_AI_TIMEOUT_MS = 30_000;
  * cu promptul fix (~2,5k) rămânem sub limita de 30000 a proxy-ului.
  */
 export const PROXY_MAX_DOM_CHARS = 12_000;
-const PROXY_AI_URL = 'https://freekit-proxy.identitate-brand.workers.dev';
+/**
+ * v2.5.69 (FIX 2): gazda corectă a proxy-ului. Vechea `freekit-proxy` (cu
+ * cratimă) răspundea 404 „error code: 1042", deci `api-proxy` eșua mereu și
+ * cădea pe browser (15-30s) — de aici lentoarea raportată.
+ */
+export const PROXY_AI_DEFAULT_URL = 'https://freekitproxy.identitate-brand.workers.dev';
+
+/** v2.5.69 (FIX 4): URL-ul proxy-ului, configurabil prin `freekit.aiFinderProxyUrl`. */
+export function proxyAiUrl(): string {
+  try {
+    // require lazy — în testele Node modulul 'vscode' poate lipsi
+    const v = require('vscode') as typeof import('vscode');
+    const raw = String(
+      v.workspace.getConfiguration('freekit').get<string>('aiFinderProxyUrl', PROXY_AI_DEFAULT_URL) ?? ''
+    ).trim();
+    // doar http(s), fără spații; o valoare invalidă cade înapoi pe default
+    if (/^https?:\/\/\S+$/i.test(raw)) return raw.replace(/\/+$/, '');
+  } catch {
+    /* fără 'vscode' (teste) — folosim default-ul */
+  }
+  return PROXY_AI_DEFAULT_URL;
+}
+
+/** Gazda apelată, pentru logul din Output → Freekit. */
+export function proxyAiHost(): string {
+  const url = proxyAiUrl();
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
 
 interface ProxyResponse {
   choices?: Array<{
@@ -53,7 +84,7 @@ export async function askProxyServer(
     dom.length > PROXY_MAX_DOM_CHARS ? dom.slice(0, PROXY_MAX_DOM_CHARS) : dom;
 
   try {
-    const res = await fetch(PROXY_AI_URL, {
+    const res = await fetch(proxyAiUrl(), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt, dom: safeDom }),

@@ -464,6 +464,15 @@ const FAILURE_EXPIRY_COUNT = 2;
 /** v2.5.61 (FIX 1): câți candidați de healer trec prin testul funcțional. */
 const HEALER_MAX_FUNCTIONAL_TRIES = 3;
 
+/**
+ * v2.5.65 (FIX 2): sub acest scor healer-ul NU salvează candidatul — un scor
+ * mic (ex: `#base-ui-_r_4e_` cu 7 la `claude.newChat`) înseamnă „ghiceală pe
+ * un id instabil", iar salvarea lui bloca cascada: AI Finder-ul (tier 4) nu
+ * mai apuca să caute. Candidatul slab se sare, se continuă cu următorii, iar
+ * dacă niciunul nu trece pragul cascada merge mai departe (tier 4 → 5 → 6).
+ */
+const MIN_HEALER_SCORE = 10;
+
 export class SelectorStore {
   private overrides = new Map<string, LearnedSelector>();
   /** v2.5.61 (FIX 4): eșecuri consecutive per slot (doar în sesiunea curentă). */
@@ -525,6 +534,23 @@ export class SelectorStore {
 
   setUserFileWriter(writer: (() => void) | null) {
     this.userFileWriter = writer ?? undefined;
+  }
+
+  /**
+   * v2.5.65 (FIX 4): scrie ACUM `selectors-user.json` din override-urile din
+   * memorie. Reparația „deferred" din providers/base.ts învață un selector nou,
+   * dar fără acest apel el trăia doar în memorie (și în globalState) — în
+   * fișier nu apărea, deci nu se vedea în `selectors-user.json`.
+   */
+  saveUserFile(): boolean {
+    if (!this.userFileWriter) return false;
+    try {
+      this.userFileWriter();
+      return true;
+    } catch (e: any) {
+      log('scrierea selectors-user.json a eșuat: ' + (e?.message ?? String(e)));
+      return false;
+    }
   }
 
   private persistUserFile() {
@@ -1273,11 +1299,24 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
       s -= 50;
       why.push('unstable-id');
     }
-    if (el.hasAttribute('data-testid')) {
+    /* v2.5.65 (FIX 1): butoanele din bara de acțiuni a mesajelor (Copy, Edit,
+       Share, …) au data-testid/aria-label STABILE, dar funcție greșită.
+       Bonusul lor de „stabilitate" făcea healer-ul să aleagă
+       `button[data-testid="action-bar-copy"]` drept „chat nou" (scor 23).
+       În interiorul unei bare de acțiuni testid/aria-label nu mai e semnal. */
+    let inActionBar = false;
+    if (typeof (el as Element).closest === 'function') {
+      try {
+        inActionBar = el.closest('[data-testid*="action-bar"]') !== null;
+      } catch {
+        /* selector invalid — ignorăm */
+      }
+    }
+    if (el.hasAttribute('data-testid') && !inActionBar) {
       s += 10;
       why.push('stable-testid');
     }
-    if (el.hasAttribute('aria-label')) {
+    if (el.hasAttribute('aria-label') && !inActionBar) {
       s += 10;
       why.push('stable-aria-label');
     }
@@ -1497,6 +1536,48 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
           }
         } catch {
           /* closest/outerHTML pot arunca pe noduri detașate — ignorăm */
+        }
+      }
+    }
+
+    /* v2.5.65 (FIX 1) — tokenii funcției, nu ai „stabilității".
+     * Healer-ul a ales `button[data-testid="action-bar-copy"]` pentru
+     * `claude.newChat` (scor 23) pentru că testid-ul e stabil — dar e butonul
+     * Copy. Un element de acțiune (buton/link, sau orice element din bara de
+     * acțiuni) care poartă tokeni de acțiune pe mesaj e respins cu -50; pentru
+     * `newChat`, tokenii de „chat nou" primesc +30. Regula se aplică doar
+     * sloturilor de acțiune / elementelor de tip buton, ca `.chat-input-editor`
+     * (input) sau `div`-urile de răspuns să nu fie respinse din greșeală. */
+    {
+      const hay = (signalText(el) + ' ' + textOf(el)).toLowerCase();
+      const isActionEl =
+        tag === 'button' || tag === 'a' || el.getAttribute('role') === 'button';
+      if (slot === 'newChat' || slot === 'stopButton' || isActionEl || inActionBar) {
+        for (const bad of [
+          'copy',
+          'edit',
+          'delete',
+          'retry',
+          'regenerate',
+          'share',
+          'download',
+          'feedback',
+          'thumbs',
+          'action-bar',
+          'message-actions'
+        ]) {
+          if (hay.indexOf(bad) >= 0) {
+            s -= 50;
+            why.push('reject:' + bad);
+          }
+        }
+        if (slot === 'newChat') {
+          for (const good of ['new', 'create', 'chat', 'plus', 'compose']) {
+            if (hay.indexOf(good) >= 0) {
+              s += 30;
+              why.push('accept:' + good);
+            }
+          }
         }
       }
     }
@@ -2139,6 +2220,14 @@ export async function healSlot(
 
     // v2.5.61 (FIX 1): candidatul se TESTEAZĂ funcțional înainte de `learn()`.
     for (const candidate of ordered.slice(0, HEALER_MAX_FUNCTIONAL_TRIES)) {
+      // v2.5.65 (FIX 2): un candidat slab nu se salvează (vezi MIN_HEALER_SCORE).
+      if (candidate.score < MIN_HEALER_SCORE) {
+        healLog(
+          'candidate rejected: ' + candidate.selector + ' (score ' + candidate.score +
+            ' < ' + MIN_HEALER_SCORE + ')'
+        );
+        continue;
+      }
       if (functionalValidatorFn) {
         let ok = false;
         try {
@@ -2171,7 +2260,9 @@ export async function healSlot(
       return candidate.selector;
     }
     if (ordered.length) {
-      log('tier 3 (healer) found no candidate that passed the functional test for ' + slotKey);
+      log(
+        'tier 3 (healer) found no candidate that passed the score/functional test for ' + slotKey
+      );
     } else {
       log('tier 3 (healer) found no candidate for ' + slotKey);
     }

@@ -1652,6 +1652,19 @@ export async function sendAndWait(
             previousText = '';
             lastChangeAt = Date.now();
             log(label + ': response selector repaired -> ' + healed);
+            // v2.5.65 (FIX 4): reparația „deferred" trebuie SĂ ȘI PERSISTE.
+            // Fără scrierea explicită, selectorul nou rămânea doar în memorie
+            // (sau în globalState la `learn()`), dar nu apărea în
+            // `selectors-user.json` — deci se pierdea la următoarea curățenie.
+            const saved = selectors.saveUserFile();
+            const persisted = selectors.learned(providerId, 'response')?.selector === healed;
+            logLine(
+              'selectors',
+              saved && persisted
+                ? 'saved ' + providerId + '.response via deferred repair'
+                : 'could not save ' + providerId +
+                  '.response after deferred repair (' + healed + ')'
+            );
           }
         }
       }

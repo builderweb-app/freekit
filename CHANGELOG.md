@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.5.65
+
+- **The healer no longer picks message-action buttons.** A stable `data-testid` was not enough: `claude.newChat` was "repaired" with `button[data-testid="action-bar-copy"]` (score 23) — the Copy button. Scoring now rejects `copy`/`edit`/`delete`/`retry`/`regenerate`/`share`/`download`/`feedback`/`thumbs`/`action-bar`/`message-actions` with `-50` on action elements, boosts `new`/`create`/`chat`/`plus`/`compose` with `+30` for `newChat`, and ignores the `data-testid`/`aria-label` stability bonus inside `[data-testid*="action-bar"]`.
+- **A weak healer candidate no longer blocks the AI Finder.** Candidates below `MIN_HEALER_SCORE = 10` are rejected (`[healer] candidate rejected: … (score N < 10)`) instead of saved, so the cascade continues to tier 4 (AI Finder), tier 5 (backup) and tier 6 (card) — the `#base-ui-_r_4e_` (score 7) "repair" that never reached the AI Finder is gone.
+- **The Claude response selector is the assistant message again.** Bundled `claude.response` is `div[data-testid='assistant-message']` with `div.font-claude-message` and `div[data-testid='assistant-message'] > div:last-child` as alternatives.
+- **Deferred repair now persists.** After a deferred response repair, `selectors-user.json` is written explicitly and the result is confirmed (`[selectors] saved claude.response via deferred repair`); fingerprint repairs are persisted to the file too.
+- **Invalid auto selectors are reset on every version update.** On a version change the extension drops invalid auto selectors — `claude.*` always, plus any provider with structurally broken selectors — and logs `[migration] removed invalid claude.* selectors`. The stale Claude `transcript-sizer`/`transcript-row` override disappears automatically after the update.
+
 ## v2.5.64
 
 - **Response repair waits for the first real reply.** Connect-time validation no longer tries to repair the response selector before sending; reactive repair waits for new response content and then runs the AI Finder.

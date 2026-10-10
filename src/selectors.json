@@ -148,8 +148,8 @@
       "response": {
         "primary": "div[data-testid='assistant-message']",
         "alternatives": [
-          ".font-claude-message",
-          ".font-claude-response"
+          "div.font-claude-message",
+          "div[data-testid='assistant-message'] > div:last-child"
         ],
         "fingerprint": {
           "tags": ["div", "article"],

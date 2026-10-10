@@ -2565,7 +2565,10 @@ export function saveUserSelectors(): void {
       lockedCount++;
       continue;
     }
-    if (item.how !== 'ai') continue;
+    // v2.5.65 (FIX 4): și reparațiile prin fingerprint ajung în fișier — altfel
+    // un selector găsit de „deferred repair" trăia doar în memorie/globalState
+    // și dispărea din `selectors-user.json` (deși funcționa).
+    if (item.how !== 'ai' && item.how !== 'fingerprint') continue;
     if (!providers[item.provider]) providers[item.provider] = {};
     providers[item.provider][item.slot] = {
       selector: item.selector,
@@ -2736,6 +2739,94 @@ function loadUserSelectorsFromDisk(): void {
     saveUserSelectors(); // adaugă marcajul „locked" + amprenta
   } else if (pruned) {
     saveUserSelectors(); // rescrie fără intrările respinse
+  }
+}
+
+/* -------------------------------------------------------------------------
+ * v2.5.65 (FIX 5) — MIGRAȚIE LA UPDATE DE VERSIUNE
+ *
+ * Un selector auto salvat greșit (ex: `claude.response` învățat ca
+ * `div[role="feed"] > div[data-testid="transcript-sizer"] > …`) rămâne „lipit"
+ * peste slot și umbrește selectorul bundled, corect. La fiecare versiune nouă
+ * a extensiei ștergem din `selectors-user.json` selectori invalizi — obligatoriu
+ * pentru `claude`, plus orice alt provider cu selectori structural invalizi —
+ * apoi rescriem fișierul. Rulează o singură dată per versiune (marker pe disc).
+ * ------------------------------------------------------------------------- */
+
+const MIGRATION_FILE_NAME = 'selectors-migration.json';
+
+/** Providerii ale căror selecții auto se resetează la fiecare update de versiune. */
+const MIGRATION_RESET_PROVIDERS = new Set(['claude']);
+
+function migrationFilePath(): string | null {
+  return storageDir ? path.join(storageDir, MIGRATION_FILE_NAME) : null;
+}
+
+/**
+ * v2.5.65 (FIX 5): un selector auto e „invalid" dacă e evident rupt — lanțuri
+ * kilometrici de DOM, structuri interne de tranzcript (Claude) sau, la
+ * `response`, ceva ce trimite la caseta de input.
+ */
+function looksLikeInvalidAutoSelector(slot: SlotName, selector: string): boolean {
+  const s = String(selector || '').toLowerCase();
+  if (!s) return true;
+  if (s.length > 200) return true;
+  if (s.indexOf('transcript-sizer') >= 0 || s.indexOf('transcript-row') >= 0) return true;
+  if (slot === 'response' && /textbox|contenteditable|composer/.test(s)) return true;
+  return false;
+}
+
+/**
+ * v2.5.65 (FIX 5): curăță selectorii auto invalizi la schimbarea versiunii.
+ * Log explicit (`[migration] removed invalid claude.* selectors`) ca să se vadă
+ * în Output → Freekit.
+ */
+function runSelectorMigration(version: string): void {
+  const file = migrationFilePath();
+  if (!file || !version) return;
+  let last = '';
+  try {
+    if (fs.existsSync(file)) {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+      last = String(parsed?.version || '');
+    }
+  } catch (e: any) {
+    log('migration: marker read failed: ' + (e?.message ?? String(e)));
+  }
+  if (last === version) return;
+
+  const removed: Record<string, string[]> = {};
+  let count = 0;
+  for (const pid of selectors.providerIds()) {
+    const force = MIGRATION_RESET_PROVIDERS.has(pid);
+    for (const slot of SLOTS) {
+      const learned = selectors.learned(pid, slot);
+      if (!learned || learned.locked) continue;
+      if (!force && !looksLikeInvalidAutoSelector(slot, learned.selector)) continue;
+      if (selectors.forget(pid, slot)) {
+        count++;
+        (removed[pid] = removed[pid] || []).push(slot);
+      }
+    }
+  }
+  if (count) {
+    saveUserSelectors();
+    for (const [pid, slots] of Object.entries(removed)) {
+      logLine(
+        'migration',
+        'removed invalid ' + pid + '.* selectors (' + slots.join(', ') + ')'
+      );
+    }
+  }
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ version, at: new Date().toISOString() }, null, 2) + '\n',
+      'utf8'
+    );
+  } catch (e: any) {
+    log('migration: marker write failed: ' + (e?.message ?? String(e)));
   }
 }
 
@@ -3395,7 +3486,7 @@ export async function rediscoverSelectors(
 }
 
 /** Înregistrează fallback-ul AI + încarcă selectors-user.json (la activate()). */
-export function initAISelectorFinder(storageFsPath: string): void {
+export function initAISelectorFinder(storageFsPath: string, extensionVersion = ''): void {
   storageDir = storageFsPath || null;
   selectors.setUserFileWriter(saveUserSelectors);
   setAIFinder(discoverForHealer);
@@ -3408,6 +3499,9 @@ export function initAISelectorFinder(storageFsPath: string): void {
   // înainte să-l salveze (aceleași criterii ca validateSelectors).
   setFunctionalValidator(functionallyValidateSlot);
   loadUserSelectorsFromDisk();
+  // v2.5.65 (FIX 5): la update de versiune, selectorii auto invalizi (ex:
+  // claude.response învățat greșit) sunt șterși automat din selectors-user.json.
+  runSelectorMigration(extensionVersion);
   log(
     'AI selector finder pregătit — fișier: ' +
       (userSelectorsFilePath() || '(fără globalStorage)') +

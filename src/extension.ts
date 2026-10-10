@@ -99,7 +99,9 @@ export async function activate(ctx: vscode.ExtensionContext) {
   // FAZA I: cache-ul de selectori (override-urile reparate în globalState)
   selectors.init(ctx.globalState);
   // v0.9.5: AI selector discovery (fallback pe Ollama) + selectors-user.json
-  initAISelectorFinder(ctx.globalStorageUri.fsPath);
+  // v2.5.65 (FIX 5): versiunea extensiei e folosită pentru migrația de selectori
+  // (curățenia automată a selectorilor auto invalizi la fiecare update).
+  initAISelectorFinder(ctx.globalStorageUri.fsPath, ctx.extension.packageJSON.version);
   // v2.5.61 (FIX 2): modul `browser` al AI Finder-ului are nevoie de un TAB NOU
   // în Chrome (chat-ul aflat în lucru nu se atinge); fereastra rămâne în fundal.
   setBrowserAiPageFactory(() => browser.newPage());

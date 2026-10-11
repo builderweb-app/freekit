@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.5.75",
+  "version": "2.5.76",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -246,7 +246,12 @@
         },
         "freekit.aiSelectorFinder.mode": {
           "type": "string",
-          "enum": ["off", "ollama", "browser", "api-proxy"],
+          "enum": [
+            "off",
+            "ollama",
+            "browser",
+            "api-proxy"
+          ],
           "enumDescriptions": [
             "Disabled — the automatic selector repair stops after the fingerprint healer.",
             "Local Ollama model (3–5 min per analysis, needs a chat model installed).",

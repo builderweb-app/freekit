@@ -28,3 +28,13 @@ export function logLine(tag: string, msg: string): void {
   }
   console.log('[Freekit][' + tag + '] ' + msg);
 }
+
+/** v2.5.72 (FIX 2): linie de WARN (auto-unlock) — vizibilă ca atare în Output. */
+export function logWarnLine(tag: string, msg: string): void {
+  try {
+    channel?.warn('[' + tag + '] ' + msg);
+  } catch {
+    /* canalul nu e disponibil (ex: teste fără VS Code) */
+  }
+  console.warn('[Freekit][' + tag + '] ' + msg);
+}

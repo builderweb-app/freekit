@@ -21,6 +21,7 @@ import {
   InputRepairResult,
   isUsableSelector,
   NAV_SELECTORS,
+  notifySelectorAlert,
   promoPhraseHit,
   selectors,
   setAIFinder,
@@ -28,8 +29,10 @@ import {
   setInputRepair,
   setNotReadyNotifier,
   setProactiveDiscovery,
+  setUserLockRepair,
   SLOTS,
-  SlotName
+  SlotName,
+  USER_LOCK_FAILURE_THRESHOLD
 } from './selectors';
 import {
   askBrowserAi,
@@ -849,6 +852,153 @@ export function buildPrompt(ctx: PromptContext): string {
   return lines.join('\n');
 }
 
+/* -------------------------------------------------------------------------
+ * v2.5.73 (FIX 1-3) — PARSER TOLERANT PENTRU RĂSPUNSUL PROXY-ULUI
+ *
+ * Proxy-ul e OpenAI-compatible: `{ choices: [ { message: { content: "<reply>" } } ] }`,
+ * iar `<reply>` e AL DOILEA nivel de JSON (`{"selector":"...","how":"fingerprint"}`).
+ * În plus, `content` poate veni dublu serializat (un string JSON care conține
+ * JSON-ul real) sau în code fences / cu text înainte și după. Vechiul parser lua
+ * tot textul ca atare și, pe un string JSON, scana greșit ghilimelele → „niciun
+ * JSON găsit". Acum desfacem cele două niveluri și cădem pe regex.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Nivel 1: desface envelope-ul OpenAI și string-urile JSON dublu serializate
+ * (max 3 iterații — proxy-ul poate înlănțui serializările).
+ */
+function unwrapAiReply(reply: string): string {
+  let current = String(reply ?? '');
+  for (let i = 0; i < 3; i++) {
+    const trimmed = current.trim();
+    if (!trimmed) return current;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return current;
+    }
+    if (typeof parsed === 'string') {
+      if (parsed === current) return current;
+      current = parsed;
+      continue;
+    }
+    if (parsed && typeof parsed === 'object') {
+      const content = (parsed as { choices?: Array<{ message?: { content?: unknown } }> })
+        ?.choices?.[0]?.message?.content;
+      if (typeof content === 'string' && content !== current) {
+        current = content;
+        continue;
+      }
+    }
+    return current;
+  }
+  return current;
+}
+
+/**
+ * Nivel 2 (FIX 2): parsează tolerant obiectul JSON din textul deja desfăcut —
+ * direct, în code fences, cu text înainte/după sau, ultimă variantă, doar
+ * perechea `"selector": "..."` (răspuns trunchiat / în proză).
+ */
+function parseJsonObjectLoose(text: string): Record<string, unknown> | null {
+  const source = String(text ?? '');
+  const fenced = source.replace(/```[a-z]*\s*|```/gi, ' ');
+  const attempts: string[] = [];
+  const balanced = extractJsonObject(source);
+  if (balanced) attempts.push(balanced);
+  const balancedFenced = extractJsonObject(fenced);
+  if (balancedFenced && attempts.indexOf(balancedFenced) < 0) attempts.push(balancedFenced);
+  attempts.push(source, fenced);
+  for (const candidate of attempts) {
+    const t = candidate.trim();
+    if (!t) continue;
+    try {
+      const parsed = JSON.parse(t);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      /* încercăm următoarea variantă */
+    }
+  }
+  const m = source.match(/"selector"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (m) return { selector: m[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\') };
+  return null;
+}
+
+/** Nivel 1 + 2 fără log-uri (folosit după ce apelantul a logat deja raw-ul). */
+function resolveAiObject(reply: string): {
+  content: string;
+  object: Record<string, unknown> | null;
+} {
+  const raw = String(reply ?? '');
+  const content = unwrapAiReply(raw);
+  return { content, object: parseJsonObjectLoose(content) };
+}
+
+/**
+ * FIX 3: citește obiectul JSON din răspunsul brut al proxy-ului, cu log-uri la
+ * fiecare pas (raw → content → obiect), ca eșecul să fie diagnosticabil.
+ */
+function readAiJsonObject(reply: string): Record<string, unknown> | null {
+  const raw = String(reply ?? '');
+  log('proxy raw (' + raw.length + ' chars): ' + raw.slice(0, 300));
+  const { content, object } = resolveAiObject(raw);
+  if (content !== raw) {
+    log('proxy content (' + content.length + ' chars): ' + content.slice(0, 300));
+  }
+  if (!object) {
+    log('niciun JSON găsit în răspunsul AI');
+    log('proxy parse failed — content dump: ' + JSON.stringify(content.slice(0, 500)));
+  }
+  return object;
+}
+
+/** Forma „un singur selector" a unui obiect extras (fără log-uri). */
+function selectorFromObject(
+  object: Record<string, unknown>
+): { selector: string; how: string } | null {
+  const selector = typeof object.selector === 'string' ? object.selector.trim() : '';
+  if (!selector) return null;
+  const how =
+    typeof object.how === 'string' && object.how.trim() ? object.how.trim() : 'fingerprint';
+  return { selector, how };
+}
+
+/** Cheile de slot pe care le poate purta un `DiscoveredSelectors`. */
+type SelectorSlotKey = 'input' | 'response' | 'newChat' | 'stopButton';
+
+function isSelectorSlotKey(slot: string): slot is SelectorSlotKey {
+  return slot === 'input' || slot === 'response' || slot === 'newChat' || slot === 'stopButton';
+}
+
+/** v2.5.73 (FIX 1): selectorul unic extras dintr-un răspuns de proxy. */
+export interface ExtractedSelector {
+  selector: string;
+  how: string;
+  /** Obiectul JSON complet extras (poate purta și forma multi-slot). */
+  object: Record<string, unknown>;
+}
+
+/**
+ * v2.5.73 (FIX 1-3): extrage `{ selector, how }` dintr-un răspuns de proxy, oricât
+ * ar fi de împachetat (envelope OpenAI, string JSON dublu serializat, code
+ * fences, proză). Întoarce `null` dacă răspunsul nu conține un obiect JSON cu
+ * cheia `selector` (ex: forma multi-slot).
+ */
+export function extractSelectorFromProxyResponse(reply: string): ExtractedSelector | null {
+  const object = readAiJsonObject(reply);
+  if (!object) return null;
+  const single = selectorFromObject(object);
+  if (!single) {
+    log('parsed selector: null (răspuns fără cheia „selector")');
+    return null;
+  }
+  log('parsed selector: ' + JSON.stringify(single));
+  return { selector: single.selector, how: single.how, object };
+}
+
 /** Extrage primul obiect JSON echilibrat din text (ignoră string-urile). */
 function extractJsonObject(text: string): string | null {
   const t = String(text || '');
@@ -882,20 +1032,18 @@ function extractJsonObject(text: string): string | null {
   return null;
 }
 
-export function parseAIResponse(reply: string): DiscoveredSelectors | null {
-  const raw = extractJsonObject(reply);
-  if (!raw) {
-    log('niciun JSON găsit în răspunsul AI');
-    return null;
-  }
-  let parsed: any;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e: any) {
-    log('JSON invalid în răspunsul AI: ' + (e?.message ?? String(e)));
-    return null;
-  }
-  if (!parsed || typeof parsed !== 'object') return null;
+/**
+ * v2.5.73 (FIX 1-2): parser tolerant — acceptă atât forma multi-slot
+ * (`{input,response,newChat,…}`) cât și forma „un singur selector" a
+ * proxy-ului (`{selector, how}`), care e atribuită primului slot cerut
+ * (`fallbackSlots` — healer-ul cere exact unul).
+ */
+export function parseAIResponse(
+  reply: string,
+  fallbackSlots?: readonly string[]
+): DiscoveredSelectors | null {
+  const parsed = readAiJsonObject(reply);
+  if (!parsed) return null;
 
   const pick = (k: string): string | undefined => {
     const v = parsed[k];
@@ -916,6 +1064,19 @@ export function parseAIResponse(reply: string): DiscoveredSelectors | null {
     reasoning:
       typeof parsed.reasoning === 'string' ? parsed.reasoning.slice(0, 300) : ''
   };
+
+  // v2.5.73 (FIX 1): răspunsul proxy-ului e `{selector, how}` (un singur
+  // selector). Fără nicio cheie de slot, îl atribuim slotului cerut.
+  const hasSlots = Boolean(result.input || result.response || result.newChat || result.stopButton);
+  const target = fallbackSlots?.[0];
+  if (!hasSlots && target && isSelectorSlotKey(target)) {
+    const single = selectorFromObject(parsed);
+    if (single && single.selector.length <= 300) {
+      result[target] = single.selector;
+      if (!result.reasoning) result.reasoning = single.how;
+      log('parsed selector: ' + JSON.stringify(single));
+    }
+  }
   return result;
 }
 
@@ -1426,7 +1587,9 @@ async function runFindSelectorsWithAI(
     }
     log('răspuns AI: ' + reply.length + ' caractere');
 
-    const parsed = parseAIResponse(reply);
+    // v2.5.73 (FIX 1): `wanted` = sloturile cerute; dacă răspunsul e forma
+    // „{selector}" a proxy-ului, selectorul e atribuit primului slot cerut.
+    const parsed = parseAIResponse(reply, wanted);
     if (!parsed) {
       failureReason = 'your reply was not a valid JSON object';
       rejectedSelector = undefined;
@@ -2384,6 +2547,28 @@ const USER_FILE_VERSION = 3;
 /** Cheile rezervate din selectors-user.json (nu sunt „provider.slot"). */
 const USER_FILE_RESERVED = new Set(['version', 'updated', 'providers', '_meta']);
 
+/* -------------------------------------------------------------------------
+ * v2.5.72 (FIX 1-6) — AUTO-UNLOCK PENTRU SELECTORI USER-LOCKED STRICAȚI
+ *
+ * Un selector scris manual („user-locked") pe care site-ul l-a stricat era
+ * testat funcțional, eșua, dar NU putea fi reparat (healer-ul și AI Finder-ul
+ * îl ocoleau). Acum se numără eșecurile consecutive per selector, iar la al
+ * treilea selectorul iese din `_meta.locked`, AI Finder-ul e întrebat, iar la
+ * succes noul selector e re-lockuit. Uniform pentru toți cei 6 provideri.
+ * ------------------------------------------------------------------------- */
+
+/** Providerii vizați de auto-unlock (toți cei cu automatizare în browser). */
+export const USER_LOCK_PROVIDERS = ['chatgpt', 'claude', 'deepseek', 'mistral', 'gemini', 'qwen'];
+
+/** Sloturile numărate în `_meta.failures`. */
+const USER_LOCK_KINDS: SlotName[] = ['newChat', 'input', 'response'];
+
+/** Câte backup-uri timestampate păstrăm (FIX 4). */
+export const BACKUP_KEEP = 5;
+
+/** Numele de backup timestampat: `selectors-user.json.bak-YYYYMMDD-HHmmss`. */
+const TIMESTAMPED_BACKUP_RE = /^selectors-user\.json\.bak-\d{8}-\d{6}$/;
+
 /** Amprenta conținutului (fără `_meta`), ca să detectăm editarea manuală. */
 function hashUserPayload(payload: Record<string, unknown>): string {
   return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 16);
@@ -2523,6 +2708,58 @@ function backupCurrentUserSelectors(): void {
     log('backup: ' + store.versions.length + ' good version(s) kept');
   } catch (e: any) {
     log('backup failed: ' + (e?.message ?? String(e)));
+  }
+}
+
+/**
+ * v2.5.72 (FIX 4): backup timestampat al fișierului, luat ÎNAINTE de a scoate
+ * vreun selector din `_meta.locked`. Numele e `selectors-user.json.bak-
+ * YYYYMMDD-HHmmss`; păstrăm ultimele BACKUP_KEEP (cele mai vechi se șterg).
+ * Backup-ul e SINGUR pentru tot fișierul (toți cei 6 provideri deodată).
+ */
+function timestampSuffix(d = new Date()): string {
+  // v2.5.73 (FIX 5): timp LOCAL (getFullYear/getHours…), nu UTC — numele
+  // `bak-YYYYMMDD-HHmmss` trebuie să corespundă ceasului utilizatorului.
+  const p = (n: number) => String(n).padStart(2, '0');
+  return (
+    d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-' +
+    p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds())
+  );
+}
+
+/** Șterge backup-urile timestampate peste limita BACKUP_KEEP (cele mai vechi). */
+function pruneTimestampedBackups(dir: string): void {
+  try {
+    const entries = fs
+      .readdirSync(dir)
+      .filter((name) => TIMESTAMPED_BACKUP_RE.test(name))
+      // formatul e cronologic la sortarea lexicografică (YYYYMMDD-HHmmss)
+      .sort();
+    const excess = entries.length - BACKUP_KEEP;
+    for (let i = 0; i < excess; i++) {
+      fs.rmSync(path.join(dir, entries[i]), { force: true });
+      tierLog('backup pruned: ' + entries[i]);
+    }
+  } catch (e: any) {
+    log('backup prune failed: ' + (e?.message ?? String(e)));
+  }
+}
+
+/** v2.5.72 (FIX 4): salvează `selectors-user.json.bak-<timestamp>` înainte de unlock. */
+export function backupTimestampedUserSelectors(): string | null {
+  const file = userSelectorsFilePath();
+  if (!file || !fs.existsSync(file)) return null;
+  try {
+    const name = USER_FILE_NAME + '.bak-' + timestampSuffix();
+    const dir = path.dirname(file);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.copyFileSync(file, path.join(dir, name));
+    tierLog('backup saved: ' + name);
+    pruneTimestampedBackups(dir);
+    return name;
+  } catch (e: any) {
+    log('timestamped backup failed: ' + (e?.message ?? String(e)));
+    return null;
   }
 }
 
@@ -2697,7 +2934,19 @@ export function saveUserSelectors(): void {
       if (typeof sel === 'string' && sel) auto[pid + '.' + slot] = sel;
     }
   }
-  const meta: Record<string, unknown> = { locked: Object.keys(locked) };
+  // v2.5.72 (FIX 1): `_meta.failures` = eșecuri consecutive per selector
+  // user-locked (toți cei 6 provideri × newChat/input/response). Valorile
+  // implicite sunt 0, ca fișierul să aibă mereu toate cheile (ușor de editat).
+  const failures: Record<string, number> = {};
+  for (const pid of USER_LOCK_PROVIDERS) {
+    for (const kind of USER_LOCK_KINDS) {
+      failures[pid + '.' + kind] = selectors.lockFailureCount(pid, kind);
+    }
+  }
+  for (const [key, value] of selectors.lockFailuresSnapshot()) {
+    if (!(key in failures)) failures[key] = value;
+  }
+  const meta: Record<string, unknown> = { locked: Object.keys(locked), failures };
   if (count) meta.auto = auto;
   if (discoveryDates.size) {
     const dates: Record<string, string> = {};
@@ -2754,6 +3003,22 @@ function loadUserSelectorsFromDisk(): void {
   const declaredLocked = new Set<string>(
     Array.isArray(meta.locked) ? meta.locked.map((k: unknown) => String(k)) : []
   );
+
+  // v2.5.72 (FIX 1): contoarele de eșec persistate per selector user-locked.
+  if (meta.failures && typeof meta.failures === 'object') {
+    const record: Record<string, number> = {};
+    for (const [key, value] of Object.entries<unknown>(meta.failures)) {
+      const n = Number(value);
+      if (Number.isFinite(n) && n > 0) record[key] = Math.floor(n);
+    }
+    selectors.hydrateLockFailures(record);
+    if (Object.keys(record).length) {
+      log(
+        'selectors-user.json: contoare de eșec încărcate (' +
+          Object.keys(record).length + ')'
+      );
+    }
+  }
 
   // v2.5.45 (bug #102): data ultimei descoperiri (cache-ul de 7 zile).
   if (meta.discoveryDate && typeof meta.discoveryDate === 'object') {
@@ -2975,34 +3240,28 @@ export function resetAIFinderCache(): void {
 }
 
 /**
- * v2.5.17 (bug #44): când AI finder-ul nu produce NIMIC pentru un slot (timeout,
- * răspuns neparsabil, selector respins la validare), override-ul local rămas
- * (how='ai'/'fingerprint') e aproape sigur stale — a fost „reparat" pe un DOM
- * vechi (ex: `div.xh8yej3.x1ghz6dp` la ChatGPT) și, fiind primul în
- * `candidates()`, umbrește selectorul static din selectors.json la citirea
- * răspunsului. Îl ștergem, ca să rămână selectorul original (bundled/remote).
- * Override-urile publicate de server (how='server') NU se ating — nu sunt
- * ghicite pe DOM-ul curent. Nici cele scrise manual de utilizator (v2.5.44,
- * bug #101): „curățenia" automată nu are ce căuta peste ele.
+ * v2.5.73 (FIX 4): când AI Finder-ul nu produce un selector NOU valid (timeout,
+ * răspuns neparsabil, selector respins la validare) NU mai ștergem override-ul
+ * existent. Vechiul `dropStaleOverride` (v2.5.17) ștergea override-ul bun, iar
+ * tier 5 (backup) „restaura" imediat exact selectorul VECHI, stricat — deci
+ * reparația nu putea reuși niciodată. Override-ul se păstrează acum până când
+ * AI Finder-ul întoarce un selector nou, validat în pagină (vezi `learn()`).
  */
-function dropStaleOverride(providerId: string, slot: SlotName): void {
+function keepOverrideAfterAiFailure(providerId: string, slot: SlotName): void {
   const learned = selectors.learned(providerId, slot);
-  if (!learned || learned.how === 'server' || learned.locked) return;
-  if (!selectors.forget(providerId, slot)) return;
-  log(
+  if (!learned) return;
+  healLog(
     'AI finder nu a produs un selector pentru ' +
       providerId +
       '.' +
       slot +
-      ' — override stale șters („' +
+      ' — păstrez override-ul existent („' +
       learned.selector +
       '", sursă ' +
       learned.how +
-      '); se folosește selectorul static'
+      ')' +
+      (learned.locked ? ' [user-locked]' : '')
   );
-  // fișierul e rescris din listLearned() — altfel intrarea 'ai' ar reveni la
-  // următoarea pornire, vezi loadUserSelectorsFromDisk()
-  if (learned.how === 'ai') saveUserSelectors();
 }
 
 /**
@@ -3065,10 +3324,12 @@ async function discoverForHealer(
   page: Page,
   providerId: string,
   slot: SlotName,
-  echoText?: string
+  echoText?: string,
+  opts: { force?: boolean; relock?: boolean } = {}
 ): Promise<string | null> {
   const slotKey = providerId + '.' + slot;
   // v2.5.44 (bug #101): slot cu selecție manuală → AI finder-ul nu propune nimic
+  // v2.5.72 (FIX 2): după auto-unlock, `isLocked` e deja false, deci se continuă.
   if (selectors.isLocked(providerId, slot)) {
     healLog('skip ' + providerId + ':' + slot + ' — user-locked');
     tierLog('tier 2 (user) locked for ' + slotKey + ' — keeping the user selector');
@@ -3079,7 +3340,9 @@ async function discoverForHealer(
     noteProviderNotReady(providerId, 'login/CAPTCHA page');
     return null;
   }
-  if (await bundledPrimarySelectorsWork(page, providerId, [slot])) {
+  // v2.5.72 (FIX 2): la auto-unlock NU ne oprim pentru că selectorul bundled
+  // „pare" prezent — utilizatorul tocmai a avut un selector stricat pe slot.
+  if (!opts.force && (await bundledPrimarySelectorsWork(page, providerId, [slot]))) {
     log('skip ' + providerId + ' — bundled ' + slot + ' selector works');
     return null;
   }
@@ -3097,7 +3360,7 @@ async function discoverForHealer(
   }
   const key = providerId + ':' + slot + ':' + host;
   const last = recentAttempts.get(key) ?? 0;
-  if (slot !== 'response' && Date.now() - last < AI_RETRY_MS) {
+  if (!opts.force && slot !== 'response' && Date.now() - last < AI_RETRY_MS) {
     log('AI finder: încercare recentă pentru ' + key + ' — sar peste');
     tierLog('tier 4 (AI Finder) rate-limited for ' + slotKey);
     return backupTier(providerId, slot);
@@ -3142,8 +3405,9 @@ async function discoverForHealer(
       replyPresent: slot === 'response' ? true : undefined
     });
     if (!discovered) {
+      // v2.5.73 (FIX 4): nu ștergem override-ul dacă AI Finder-ul n-a produs nimic
       if (getAIFinderCancellationCount() === cancellationsBefore) {
-        dropStaleOverride(providerId, slot);
+        keepOverrideAfterAiFailure(providerId, slot);
       }
       return backupTier(providerId, slot);
     }
@@ -3182,8 +3446,8 @@ async function discoverForHealer(
           '”)'
       );
     }
-    // nimic util pentru slotul cerut (selector respins la validare / respins la
-    // salvare) → override-ul local rămas e stale, vezi dropStaleOverride()
+    // v2.5.73 (FIX 4): nimic util pentru slotul cerut (respins la validare /
+    // la salvare) → păstrăm override-ul existent, vezi keepOverrideAfterAiFailure()
     if (!found) {
       if (discovered.finderId) {
         publishAIFinderStatus({
@@ -3195,7 +3459,7 @@ async function discoverForHealer(
           silent: true
         });
       }
-      dropStaleOverride(providerId, slot);
+      keepOverrideAfterAiFailure(providerId, slot);
       return backupTier(providerId, slot);
     }
     // v2.5.61 (FIX 3/6): reparația automată e completă — doar o linie de log
@@ -3203,10 +3467,22 @@ async function discoverForHealer(
       'repaired ' + slotKey + ' in ' +
         Math.max(1, Math.round((Date.now() - startedAt) / 1000)) + 's'
     );
+    // v2.5.72 (FIX 2): reparația unui selector user-locked auto-unlocked păstrează
+    // user-lock-ul pe NOUL selector (și repornește contorul de eșecuri).
+    if (opts.relock) {
+      // learnLocked() golește contorul de eșecuri al selectorului (FIX 1/2)
+      if (selectors.learnLocked(providerId, slot, found)) {
+        saveUserSelectors();
+        tierLog('auto-repaired ' + slotKey + ' via AI Finder, re-locked');
+        notifySelectorAlert({ kind: 'repaired', key: slotKey, selector: found });
+      } else {
+        log('auto-repair: could not re-lock ' + slotKey + ' on "' + found + '"');
+      }
+    }
     return found;
   } catch (e: any) {
     log('AI finder a eșuat: ' + (e?.message ?? String(e)));
-    dropStaleOverride(providerId, slot);
+    keepOverrideAfterAiFailure(providerId, slot);
     return backupTier(providerId, slot);
   } finally {
     inFlight.delete(key);
@@ -3220,6 +3496,16 @@ async function discoverForHealer(
  */
 function backupTier(providerId: string, slot: SlotName): string | null {
   const slotKey = providerId + '.' + slot;
+  // v2.5.73 (FIX 4): dacă slotul are deja un override (inclusiv un user-lock pe
+  // care tocmai l-am păstrat), tier 5 NU are voie să-l suprascrie cu o versiune
+  // veche din backup — altfel „reparația" readuce exact selectorul stricat.
+  const existing = selectors.learned(providerId, slot);
+  if (existing) {
+    tierLog(
+      'tier 5 (backup) skipped for ' + slotKey + ' — override kept (' + existing.selector + ')'
+    );
+    return null;
+  }
   if (backupRestored.has(slotKey)) {
     tierLog('tier 5 (backup) already restored ' + slotKey + ' in this session — skipping');
     return null;
@@ -3612,6 +3898,124 @@ export async function rediscoverSelectors(
   return { providerId, outcome };
 }
 
+/* -------------------------------------------------------------------------
+ * v2.5.72 (FIX 2-6) — AUTO-UNLOCK + COMENZI PENTRU SELECTORI USER-LOCKED
+ *
+ * Un selector user-locked stricat (site redesign) era testat, eșua, dar NU
+ * putea fi reparat (healer-ul și AI Finder-ul îl ocoleau). Acum:
+ *   - se numără eșecurile consecutive per selector (FIX 1);
+ *   - la al 3-lea eșec iese din `_meta.locked` și AI Finder-ul e întrebat,
+ *     cu re-lock pe noul selector la succes (FIX 2);
+ *   - backup timestampat înainte de orice unlock (FIX 4).
+ * ------------------------------------------------------------------------- */
+
+/**
+ * v2.5.72 (FIX 2/4): handlerul de auto-unlock. Backup-ul se ia ÎNAINTE de a
+ * scoate selectorul din `_meta.locked`; apoi fișierul e rescris (fără el în
+ * `_meta.locked`, dar cu selectorul păstrat ca override obișnuit).
+ */
+function onUserLockExhausted(providerId: string, slot: SlotName, count: number): void {
+  const key = providerId + '.' + slot;
+  backupTimestampedUserSelectors();
+  if (!selectors.autoUnlockUserLock(providerId, slot, count)) {
+    log('auto-unlock: ' + key + ' is no longer locked — nothing to do');
+    return;
+  }
+  saveUserSelectors();
+}
+
+/**
+ * v2.5.72 (FIX 2): reparația unui selector user-locked auto-unlocked — AI
+ * Finder-ul e întrebat țintit pentru slot, iar la succes noul selector e
+ * re-lockuit (user-lock păstrat) și contorul de eșecuri repornește.
+ */
+async function repairUserLockedSelector(
+  page: Page,
+  providerId: string,
+  slot: SlotName
+): Promise<string | null> {
+  if (!finderSettings().enabled) {
+    tierLog(
+      'auto-unlock: AI Finder disabled (mode=off) for ' + providerId + '.' + slot
+    );
+    return null;
+  }
+  return discoverForHealer(page, providerId, slot, undefined, { force: true, relock: true });
+}
+
+/** Rezultatul comenzii „Unlock broken selectors" (FIX 3). */
+export interface UnlockOutcome {
+  /** Câți selectori user-locked (din scope) au fost testați. */
+  tested: number;
+  /** Câți au fost scoși din `_meta.locked`. */
+  unlocked: number;
+  /** Câți au fost reparați de AI Finder și re-lockuiți. */
+  repaired: number;
+}
+
+/**
+ * v2.5.72 (FIX 3): comanda manuală „Freekit: Unlock broken selectors" —
+ * testează funcțional fiecare selector user-locked (toți providerii sau doar
+ * unul) și, pe cele stricate, le scoate din `_meta.locked` și cere AI
+ * Finder-ului să le repare. Log: `[selectors] unlocked N broken selectors`.
+ */
+export async function unlockBrokenUserSelectors(
+  getPage: (providerId: string) => Promise<Page | null>,
+  opts: { provider?: string } = {}
+): Promise<UnlockOutcome> {
+  const outcome: UnlockOutcome = { tested: 0, unlocked: 0, repaired: 0 };
+  const providers = opts.provider ? [opts.provider] : USER_LOCK_PROVIDERS;
+  for (const pid of providers) {
+    const keys = selectors.lockedKeys().filter((k) => k.startsWith(pid + '.'));
+    if (!keys.length) continue;
+    let page: Page | null = null;
+    try {
+      page = await getPage(pid);
+    } catch (e: any) {
+      log('unlock: could not get the page for ' + pid + ': ' + (e?.message ?? String(e)));
+    }
+    if (!page) {
+      tierLog('unlock: no open tab for ' + pid + ' — skipped');
+      continue;
+    }
+    for (const key of keys) {
+      const parsed = splitSlotKey(key);
+      if (!parsed) continue;
+      const entry = selectors.learned(parsed.provider, parsed.slot);
+      if (!entry?.locked) continue;
+      outcome.tested++;
+      let ok = false;
+      try {
+        ok = await functionallyValidateSlot(page, parsed.provider, parsed.slot, entry.selector);
+      } catch (e: any) {
+        log('unlock: functional test errored for ' + key + ': ' + (e?.message ?? String(e)));
+      }
+      if (ok) {
+        tierLog('unlock: ' + key + ' still works — kept locked');
+        continue;
+      }
+      backupTimestampedUserSelectors();
+      if (!selectors.unlockUserLock(parsed.provider, parsed.slot)) continue;
+      outcome.unlocked++;
+      saveUserSelectors();
+      if (await repairUserLockedSelector(page, parsed.provider, parsed.slot)) outcome.repaired++;
+    }
+  }
+  tierLog('unlocked ' + outcome.unlocked + ' broken selectors');
+  return outcome;
+}
+
+/**
+ * v2.5.72 (FIX 6): resetează contoarele de eșec (scope: toți providerii sau
+ * doar unul) și rescrie `selectors-user.json`.
+ */
+export function resetUserLockFailures(provider?: string): number {
+  const removed = selectors.resetLockFailures(provider);
+  saveUserSelectors();
+  tierLog('failure counters reset (scope: ' + (provider || 'all') + ')');
+  return removed;
+}
+
 /** Înregistrează fallback-ul AI + încarcă selectors-user.json (la activate()). */
 export function initAISelectorFinder(storageFsPath: string, extensionVersion = ''): void {
   storageDir = storageFsPath || null;
@@ -3625,6 +4029,11 @@ export function initAISelectorFinder(storageFsPath: string, extensionVersion = '
   // v2.5.61 (FIX 1): healer-ul de fingerprint testează funcțional candidatul
   // înainte să-l salveze (aceleași criterii ca validateSelectors).
   setFunctionalValidator(functionallyValidateSlot);
+  // v2.5.72 (FIX 2/4): la al 3-lea eșec al unui selector user-locked → backup
+  // timestampat + scoatere din `_meta.locked` + reparație țintită prin AI Finder
+  // (cu re-lock pe noul selector).
+  selectors.setUserLockFailureHandler(onUserLockExhausted);
+  setUserLockRepair(repairUserLockedSelector);
   loadUserSelectorsFromDisk();
   // v2.5.65 (FIX 5): la update de versiune, selectorii auto invalizi (ex:
   // claude.response învățat greșit) sunt șterși automat din selectors-user.json.

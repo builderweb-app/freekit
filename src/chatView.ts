@@ -33,7 +33,7 @@ import {
 } from './hardware';
 import { AIProvider, SendOptions } from './providers/types';
 import { applyModel, browserModelKey, listModels, modelLabel } from './modelSelector';
-import { configInfo, selectors } from './selectors';
+import { configInfo, SelectorAlert, selectors, setSelectorAlertNotifier } from './selectors';
 import { BrowserManager } from './browser';
 import {
   VisualThumbnail,
@@ -732,6 +732,28 @@ export function buildReviewPreview(changes: FileChangePreview[]): string {
   return text.length > 8000 ? text.slice(0, 8000) + '\n… (truncated)' : text;
 }
 
+/**
+ * v2.5.72 (FIX 5): textul feedback-ului subtil pentru selectorii user-locked
+ * stricați — un rând sub răspuns, în chat.
+ */
+function selectorAlertText(alert: SelectorAlert): string {
+  switch (alert.kind) {
+    case 'failed':
+      return (
+        '⚠️ ' + alert.key + ' selector broken (' + (alert.count ?? 0) + '/3)' +
+        ' — auto-repair la 3/3'
+      );
+    case 'unlocked':
+      return (
+        '⚠️ ' + alert.key + ' selector broken (3/3) — auto-unlocked, AI Finder is repairing it…'
+      );
+    case 'repaired':
+      return '⚠️ ' + alert.key + ' auto-repaired — new selector: ' + (alert.selector ?? '');
+    default:
+      return '';
+  }
+}
+
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'freekit.chatView';
   private view?: vscode.WebviewView;
@@ -947,6 +969,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         info.slot +
         ' → ' +
         info.selector;
+      log(text);
+      this.post('notice', text);
+    });
+
+    // v2.5.72 (FIX 5): feedback subtil în chat pentru selectorii user-locked
+    // stricați (N/3) și pentru auto-reparația lor.
+    setSelectorAlertNotifier((alert) => {
+      const text = selectorAlertText(alert);
       log(text);
       this.post('notice', text);
     });

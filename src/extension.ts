@@ -6,7 +6,13 @@ import { configInfo, selectors, selectorsUrlFromSettings } from './selectors';
 import { initLogChannel, logLine } from './log';
 import { runDiagnostics } from './diagnostics';
 import { checkAndApplyRemote, shouldAutoCheck } from './remoteSelectors';
-import { initAISelectorFinder, rediscoverSelectors } from './ai-selector-finder';
+import {
+  initAISelectorFinder,
+  rediscoverSelectors,
+  resetUserLockFailures,
+  unlockBrokenUserSelectors,
+  USER_LOCK_PROVIDERS
+} from './ai-selector-finder';
 import { setBrowserAiPageFactory } from './browserAi';
 import { mcp } from './mcp/manager';
 import { setupWhisperAssets } from './stt';
@@ -448,6 +454,115 @@ export async function activate(ctx: vscode.ExtensionContext) {
           }
         }
       );
+    })
+  );
+
+  /* ---------------------------------------------------------------------
+   * v2.5.72 (FIX 3/6) — SELECTORI USER-LOCKED STRICAȚI
+   *
+   * Un selector scris manual care nu mai găsește elementul e testat funcțional
+   * și, dacă pică, iese din `_meta.locked` (apoi AI Finder-ul îl repară și îl
+   * re-lockuiește). Comenzile de mai jos fac același lucru LA CERERE, pentru
+   * toți providerii sau doar pentru unul.
+   * ------------------------------------------------------------------- */
+  const PROVIDER_CHOICES = USER_LOCK_PROVIDERS.map((id) => ({
+    label: PROVIDER_LABELS[id] || id,
+    id
+  }));
+
+  const unlockForProvider = async (provider?: string) => {
+    if (isRestricted()) {
+      showRestrictedNotification(true);
+      return;
+    }
+    const label = provider ? PROVIDER_LABELS[provider] || provider : 'all providers';
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'Freekit: unlocking broken selectors (' + label + ')…'
+      },
+      async () => {
+        const getPage = async (pid: string) => {
+          try {
+            return await browser.pageForHost(selectors.host(pid));
+          } catch {
+            return null;
+          }
+        };
+        const outcome = await unlockBrokenUserSelectors(getPage, { provider });
+        if (!outcome.tested) {
+          vscode.window.showInformationMessage(
+            'Freekit: no user-locked selector to test' +
+              (provider ? ' for ' + label : '') +
+              ' — open the provider chat in Chrome first.'
+          );
+          return;
+        }
+        if (!outcome.unlocked) {
+          vscode.window.showInformationMessage(
+            'Freekit: tested ' + outcome.tested + ' user-locked selector(s) — all still work.'
+          );
+          return;
+        }
+        vscode.window.showInformationMessage(
+          'Freekit: unlocked ' +
+            outcome.unlocked +
+            ' broken selector(s)' +
+            (outcome.repaired ? ' — ' + outcome.repaired + ' auto-repaired' : '') +
+            '.'
+        );
+      }
+    );
+  };
+
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand('freekit.unlockBrokenSelectors', () => unlockForProvider())
+  );
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand('freekit.unlockBrokenSelectorsProvider', async () => {
+      const pick = await vscode.window.showQuickPick(
+        PROVIDER_CHOICES.map((c) => ({ label: c.label, id: c.id })),
+        {
+          title: 'Freekit: Unlock broken selectors — provider',
+          placeHolder: 'Choose a provider'
+        }
+      );
+      if (!pick) return;
+      await unlockForProvider(pick.id);
+    })
+  );
+  for (const choice of PROVIDER_CHOICES) {
+    const suffix = choice.id.charAt(0).toUpperCase() + choice.id.slice(1);
+    ctx.subscriptions.push(
+      vscode.commands.registerCommand('freekit.unlockBrokenSelectors' + suffix, () =>
+        unlockForProvider(choice.id)
+      )
+    );
+  }
+
+  const resetFailures = async (provider?: string) => {
+    const removed = resetUserLockFailures(provider);
+    vscode.window.showInformationMessage(
+      'Freekit: selector failure counters reset' +
+        (provider ? ' for ' + (PROVIDER_LABELS[provider] || provider) : ' (all providers)') +
+        (removed ? ' — ' + removed + ' counter(s) cleared' : '') +
+        '.'
+    );
+  };
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand('freekit.resetSelectorFailures', () => resetFailures())
+  );
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand('freekit.resetSelectorFailuresProvider', async () => {
+      const pick = await vscode.window.showQuickPick(
+        PROVIDER_CHOICES.map((c) => ({ label: c.label, id: c.id })),
+        {
+          title: 'Freekit: Reset selector failure counters — provider',
+          placeHolder: 'Choose a provider'
+        }
+      );
+      if (!pick) return;
+      await resetFailures(pick.id);
     })
   );
 

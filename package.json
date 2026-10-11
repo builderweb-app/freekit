@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.5.71",
+  "version": "2.5.73",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -164,6 +164,50 @@
         "command": "freekit.reportingReset",
         "title": "Freekit: Reset Reporting Registration",
         "icon": "$(key)"
+      },
+      {
+        "command": "freekit.unlockBrokenSelectors",
+        "title": "Freekit: Unlock broken selectors",
+        "icon": "$(unlock)"
+      },
+      {
+        "command": "freekit.unlockBrokenSelectorsProvider",
+        "title": "Freekit: Unlock broken selectors (provider...)",
+        "icon": "$(unlock)"
+      },
+      {
+        "command": "freekit.unlockBrokenSelectorsChatgpt",
+        "title": "Freekit: Unlock broken — ChatGPT"
+      },
+      {
+        "command": "freekit.unlockBrokenSelectorsClaude",
+        "title": "Freekit: Unlock broken — Claude"
+      },
+      {
+        "command": "freekit.unlockBrokenSelectorsDeepseek",
+        "title": "Freekit: Unlock broken — DeepSeek"
+      },
+      {
+        "command": "freekit.unlockBrokenSelectorsMistral",
+        "title": "Freekit: Unlock broken — Mistral"
+      },
+      {
+        "command": "freekit.unlockBrokenSelectorsGemini",
+        "title": "Freekit: Unlock broken — Gemini"
+      },
+      {
+        "command": "freekit.unlockBrokenSelectorsQwen",
+        "title": "Freekit: Unlock broken — Qwen"
+      },
+      {
+        "command": "freekit.resetSelectorFailures",
+        "title": "Freekit: Reset selector failure counters",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "freekit.resetSelectorFailuresProvider",
+        "title": "Freekit: Reset selector failure counters (provider...)",
+        "icon": "$(refresh)"
       }
     ],
     "configuration": {

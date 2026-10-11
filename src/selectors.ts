@@ -3,9 +3,11 @@ import { Locator, Page } from 'playwright';
 // modulul să poată fi încărcat și în teste Node (fără VS Code).
 import type * as vscode from 'vscode';
 import rawConfig from './selectors.json';
-import { logLine } from './log';
+import { logLine, logWarnLine } from './log';
 
 const log = (msg: string) => logLine('selectors', msg);
+/** v2.5.72 (FIX 2): auto-unlock-ul e un eveniment WARN, nu informativ. */
+const logWarn = (msg: string) => logWarnLine('selectors', msg);
 /** v2.5.44 (bug #101): mesajele healer-ului, ca să fie ușor de filtrat în Output. */
 const healLog = (msg: string) => logLine('healer', msg);
 /** v2.5.68 (FIX 3): log-urile citirii răspunsului (același tag ca în providers/base.ts). */
@@ -469,6 +471,43 @@ function isFragileSelector(sel: string): boolean {
 /** v2.5.61 (FIX 4): câte eșecuri consecutive expiră un selector salvat automat. */
 const FAILURE_EXPIRY_COUNT = 2;
 
+/**
+ * v2.5.72 (FIX 1/2): câte eșecuri consecutive ale testului funcțional
+ * declanșează auto-unlock-ul unui selector user-locked (scris manual). La
+ * prag, selectorul iese din `_meta.locked`, AI Finder-ul e întrebat, iar la
+ * succes noul selector e re-lockuit pentru utilizator.
+ */
+export const USER_LOCK_FAILURE_THRESHOLD = 3;
+
+/** v2.5.72 (FIX 5): notificările de selector (chat + log), emise uniform. */
+export type SelectorAlertKind = 'failed' | 'unlocked' | 'repaired';
+
+export interface SelectorAlert {
+  kind: SelectorAlertKind;
+  /** Cheia „<provider>.<slot>". */
+  key: string;
+  /** Eșecuri consecutive (pentru `failed`/`unlocked`). */
+  count?: number;
+  /** Noul selector (pentru `repaired`). */
+  selector?: string;
+}
+
+let selectorAlertFn: ((alert: SelectorAlert) => void) | null = null;
+
+/** Înregistrează notificarea de selector (chat). null = dezactivată. */
+export function setSelectorAlertNotifier(fn: ((alert: SelectorAlert) => void) | null) {
+  selectorAlertFn = fn;
+}
+
+/** Emite o notificare de selector (fail-open: nu are voie să strice fluxul). */
+export function notifySelectorAlert(alert: SelectorAlert): void {
+  try {
+    selectorAlertFn?.(alert);
+  } catch (e: any) {
+    log('selector alert notifier failed: ' + (e?.message ?? String(e)));
+  }
+}
+
 /** v2.5.61 (FIX 1): câți candidați de healer trec prin testul funcțional. */
 const HEALER_MAX_FUNCTIONAL_TRIES = 3;
 
@@ -485,8 +524,21 @@ export class SelectorStore {
   private overrides = new Map<string, LearnedSelector>();
   /** v2.5.61 (FIX 4): eșecuri consecutive per slot (doar în sesiunea curentă). */
   private failures = new Map<string, number>();
-  /** Sloturi deblocate automat după două teste funcționale eșuate. */
+  /**
+   * v2.5.72 (FIX 1): eșecuri consecutive per selector user-locked, persistate
+   * în `selectors-user.json` (`_meta.failures`). Separat de `failures` (care
+   * expiră override-urile auto) — un selector scris manual nu se șterge automat.
+   */
+  private lockFailures = new Map<string, number>();
+  /** Sloturi deblocate automat (user-lock expirat) — vezi isAutoUnlocked(). */
   private unlockedUserLocks = new Set<string>();
+  /**
+   * v2.5.72 (FIX 2/4): handlerul de auto-unlock (înregistrat de AI finder).
+   * Rulează ÎNAINTE de scoaterea selectorului din `_meta.locked`, ca să poată
+   * salva backup-ul timestampat al fișierului; dacă lipsește, store-ul face
+   * unlock-ul singur (fără backup).
+   */
+  private userLockFailureHandler?: (providerId: string, slot: SlotName, count: number) => void;
   private memento?: vscode.Memento;
   private notifier?: (info: LearnedSelector) => void;
   private userFileWriter?: () => void;
@@ -542,6 +594,13 @@ export class SelectorStore {
 
   setUserFileWriter(writer: (() => void) | null) {
     this.userFileWriter = writer ?? undefined;
+  }
+
+  /** v2.5.72 (FIX 2): înregistrează handlerul de auto-unlock (AI finder). */
+  setUserLockFailureHandler(
+    fn: ((providerId: string, slot: SlotName, count: number) => void) | null
+  ) {
+    this.userLockFailureHandler = fn ?? undefined;
   }
 
   /**
@@ -670,6 +729,96 @@ export class SelectorStore {
     return n;
   }
 
+  /** v2.5.72 (FIX 3): cheile user-locked („<provider>.<slot>"), pentru comenzi. */
+  lockedKeys(): string[] {
+    const out: string[] = [];
+    for (const [key, entry] of this.overrides.entries()) if (entry.locked) out.push(key);
+    return out;
+  }
+
+  /* ---------------- v2.5.72: contoare de eșec per selector user-locked ---------------- */
+
+  /** Eșecurile consecutive ale unui selector user-locked (persistate). */
+  lockFailureCount(providerId: string, slot: SlotName): number {
+    return this.lockFailures.get(this.key(providerId, slot)) ?? 0;
+  }
+
+  /** Eșecurile consecutive pentru o cheie „<provider>.<slot>" (pentru fișier). */
+  lockFailureCountForKey(key: string): number {
+    return this.lockFailures.get(key) ?? 0;
+  }
+
+  /** Snapshot-ul contoarelor (doar valorile > 0), pentru `_meta.failures`. */
+  lockFailuresSnapshot(): Array<[string, number]> {
+    return Array.from(this.lockFailures.entries());
+  }
+
+  /** Încarcă contoarele persistate din `selectors-user.json`. */
+  hydrateLockFailures(record: Record<string, number>): void {
+    for (const [key, value] of Object.entries(record)) {
+      const n = Number(value);
+      if (Number.isFinite(n) && n > 0) this.lockFailures.set(key, Math.floor(n));
+    }
+  }
+
+  /**
+   * v2.5.72 (FIX 6): resetează contoarele de eșec. Fără `providerId` → toate;
+   * cu `providerId` → doar selectorii acelui provider. Întoarce câte chei au
+   * fost resetate.
+   */
+  resetLockFailures(providerId?: string): number {
+    if (!providerId) {
+      const n = this.lockFailures.size;
+      this.lockFailures.clear();
+      return n;
+    }
+    const prefix = providerId + '.';
+    let removed = 0;
+    for (const key of Array.from(this.lockFailures.keys())) {
+      if (key.startsWith(prefix)) {
+        this.lockFailures.delete(key);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  /** v2.5.72 (FIX 2): slotul a fost scos din `_meta.locked` în această sesiune? */
+  isAutoUnlocked(providerId: string, slot: SlotName): boolean {
+    return this.unlockedUserLocks.has(this.key(providerId, slot));
+  }
+
+  /**
+   * v2.5.72 (FIX 2/3): scoate un selector din `_meta.locked` PĂSTRÂNDU-l ca
+   * override obișnuit (unlocked), ca AI Finder-ul să poată propune unul nou.
+   * Nu atinge contorul de eșecuri (rămâne pentru „next retry").
+   */
+  unlockUserLock(providerId: string, slot: SlotName): boolean {
+    const key = this.key(providerId, slot);
+    const existing = this.overrides.get(key);
+    if (!existing || !existing.locked) return false;
+    existing.locked = false;
+    if (existing.how === 'user') existing.how = 'ai';
+    this.unlockedUserLocks.add(key);
+    void this.persist();
+    return true;
+  }
+
+  /**
+   * v2.5.72 (FIX 2): auto-unlock după pragul de eșecuri — unlock + log WARN +
+   * notificare în chat. Întoarce true dacă selectorul a fost efectiv deblocat.
+   */
+  autoUnlockUserLock(providerId: string, slot: SlotName, count: number): boolean {
+    const key = this.key(providerId, slot);
+    if (!this.unlockUserLock(providerId, slot)) return false;
+    logWarn(
+      'auto-unlocked ' + key + ' after ' + count + ' failures' +
+        ' — AI Finder can repair it now'
+    );
+    notifySelectorAlert({ kind: 'unlocked', key, count });
+    return true;
+  }
+
   /**
    * v2.5.44 (bug #101): înregistrează un selector scris MANUAL de utilizator
    * (inclusiv migrarea fișierelor vechi, v1). Îl marchează `locked` și NU îl
@@ -683,6 +832,8 @@ export class SelectorStore {
     const key = this.key(providerId, slot);
     this.failures.delete(key);
     this.unlockedUserLocks.delete(key);
+    // v2.5.72 (FIX 2): re-lock-ul (după reparație) repornește contorul de eșecuri
+    this.lockFailures.delete(key);
     if (this.overrides.get(key)?.selector === sel) {
       this.overrides.get(key)!.locked = true;
       return true;
@@ -806,40 +957,56 @@ export class SelectorStore {
    * funcțional și șters la al treilea eșec consecutiv.
    * ------------------------------------------------------------------------------ */
 
-  /** Eșecul unui selector salvat; user-lock-urile sunt deblocate apoi expirate. */
+  /**
+   * Eșecul unui selector salvat. v2.5.72 (FIX 1/2): selectoarele user-locked au
+   * un contor PERSISTENT per selector (nu per provider) în `_meta.failures`; la
+   * al treilea eșec consecutiv ies din `_meta.locked` (auto-unlock) și AI
+   * Finder-ul poate propune un înlocuitor (re-lockuit la succes).
+   */
   recordFailure(providerId: string, slot: SlotName): number {
     const key = this.key(providerId, slot);
     const existing = this.overrides.get(key);
     // fără override salvat nu avem ce expira (bundled-ul nu se atinge de aici)
     if (!existing) return 0;
-    const count = (this.failures.get(key) ?? 0) + 1;
+
     if (existing.locked) {
-      log('user-locked ' + key + ' failed functional test');
-      this.failures.set(key, count);
-      if (count >= 2) {
-        existing.locked = false;
-        existing.how = 'ai';
-        this.unlockedUserLocks.add(key);
-        log('unlocked ' + key + ' (2 failed functional tests)');
-        void this.persist();
+      const count = (this.lockFailures.get(key) ?? 0) + 1;
+      this.lockFailures.set(key, count);
+      log(
+        'user-locked ' + key + ' failed (failure ' + count +
+          '/' + USER_LOCK_FAILURE_THRESHOLD + ')'
+      );
+      notifySelectorAlert({ kind: 'failed', key, count });
+      void this.persist();
+      if (count >= USER_LOCK_FAILURE_THRESHOLD) {
+        // v2.5.72 (FIX 2/4): handlerul (AI finder) salvează backup-ul și scoate
+        // selectorul din `_meta.locked`; fără handler, facem unlock-ul local.
+        if (this.userLockFailureHandler) {
+          try {
+            this.userLockFailureHandler(providerId, slot, count);
+          } catch (e: any) {
+            log('user-lock unlock handler failed: ' + (e?.message ?? String(e)));
+            this.autoUnlockUserLock(providerId, slot, count);
+            this.persistUserFile();
+          }
+        } else {
+          this.autoUnlockUserLock(providerId, slot, count);
+          this.persistUserFile();
+        }
+      } else {
         this.persistUserFile();
       }
       return count;
     }
-    if (this.unlockedUserLocks.has(key) && count >= 3) {
+
+    const count = (this.failures.get(key) ?? 0) + 1;
+    if (count >= FAILURE_EXPIRY_COUNT) {
       this.failures.delete(key);
       this.unlockedUserLocks.delete(key);
       this.overrides.delete(key);
-      log('removed ' + key + ' (3 failures, was user-locked)');
-      void this.persist();
-      this.persistUserFile();
-      return count;
-    }
-    if (count >= FAILURE_EXPIRY_COUNT) {
-      this.failures.delete(key);
-      this.overrides.delete(key);
       log('removed failing ' + key + ' (' + FAILURE_EXPIRY_COUNT + ' failures)');
       void this.persist();
+      this.persistUserFile();
       return count;
     }
     this.failures.set(key, count);
@@ -852,6 +1019,9 @@ export class SelectorStore {
     const key = this.key(providerId, slot);
     this.failures.delete(key);
     this.unlockedUserLocks.delete(key);
+    // v2.5.72 (FIX 2): succesul unui selector user-locked resetează contorul
+    // persistent (și îl salvează, ca `_meta.failures` să reflecte realitatea).
+    if (this.lockFailures.delete(key)) this.persistUserFile();
   }
 
   /** Pentru teste/diagnostics: câte eșecuri consecutive are slotul dat. */
@@ -864,6 +1034,8 @@ export class SelectorStore {
     if (!providerId) {
       this.failures.clear();
       this.unlockedUserLocks.clear();
+      // v2.5.72: „uită selectorii" resetează și contoarele user-lock
+      this.lockFailures.clear();
     }
     let removed = 0;
     let kept = 0;
@@ -2243,6 +2415,28 @@ export function setFunctionalValidator(fn: SlotFunctionalValidatorFn | null) {
 }
 
 /* -------------------------------------------------------------------------
+ * v2.5.72 (FIX 2) — REPARAREA UNUI SELECTOR USER-LOCKED AUTO-UNLOCKED (hook)
+ *
+ * Când un selector user-locked pică de 3 ori la rând, iese din `_meta.locked`
+ * și, imediat, AI Finder-ul e întrebat pentru acel slot (implementarea stă în
+ * ai-selector-finder.ts, înregistrată din initAISelectorFinder()). La succes,
+ * finder-ul re-lockuiește noul selector pentru utilizator.
+ * ------------------------------------------------------------------------- */
+
+export type UserLockRepairFn = (
+  page: Page,
+  providerId: string,
+  slot: SlotName
+) => Promise<string | null>;
+
+let userLockRepairFn: UserLockRepairFn | null = null;
+
+/** Înregistrează repararea selectorilor user-locked auto-unlocked. */
+export function setUserLockRepair(fn: UserLockRepairFn | null) {
+  userLockRepairFn = fn;
+}
+
+/* -------------------------------------------------------------------------
  * v2.5.45 (bug #102) — DESCOPERIRE PROACTIVĂ + REPARAREA INPUTULUI (hook-uri)
  *
  * Aceleași două funcții sunt implementate în ai-selector-finder.ts și
@@ -2362,6 +2556,21 @@ export async function healSlot(
     selectors.recordFailure(providerId, slot);
     failureRecorded = true;
     if (selectors.isLocked(providerId, slot)) return null;
+    // v2.5.72 (FIX 2): selectorul tocmai a fost auto-unlocked (al 3-lea eșec) —
+    // întrebăm AI Finder-ul acum; la succes, finder-ul îl re-lockuiește pentru
+    // utilizator. Dacă nu găsește nimic, rămâne unlocked pentru următoarea
+    // încercare (cascada normală nu mai rulează în acest apel).
+    if (selectors.isAutoUnlocked(providerId, slot) && userLockRepairFn) {
+      try {
+        log('auto-unlock repair via AI Finder for ' + slotKey + '...');
+        const repaired = await userLockRepairFn(page, providerId, slot);
+        if (repaired) return repaired;
+      } catch (e: any) {
+        log('auto-unlock repair failed for ' + slotKey + ': ' + (e?.message ?? String(e)));
+      }
+      log('auto-unlock failed for ' + slotKey + ' — leaving unlocked for next retry');
+      return null;
+    }
   }
 
   // v2.5.61 (FIX 3): reparația pornește la PRIMUL eșec — nu așteptăm trei.

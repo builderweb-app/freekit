@@ -32,3 +32,6 @@ node_modules/.package-lock.json
 @img/
 sharp/
 *.wasm
+
+factorial.py
+test.txt

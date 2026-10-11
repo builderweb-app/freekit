@@ -164,6 +164,10 @@ Additional safeguards:
 | `Freekit: Reporting Status` | Show the reporting integration: registration, endpoint, selectors revision, last health check / fetch — with shortcuts to run a check now or reset the identity |
 | `Freekit: Run Selector Health Check` | Immediately check the selectors of the providers that have a tab open (repair locally, report only if the repair fails) |
 | `Freekit: Reset Reporting Registration` | Remove the local reporting identity (apiKey + installation id); the extension registers as a new installation on the next start |
+| `Freekit: Unlock broken selectors` | Test every manually written (user-locked) selector from all providers whose chat is open in Chrome; the broken ones are removed from `_meta.locked` and repaired by the AI Finder (a timestamped backup is saved first) |
+| `Freekit: Unlock broken selectors (provider...)` | Same as above, but you pick a single provider; each provider also has its own `Freekit: Unlock broken — ChatGPT` / `Claude` / `DeepSeek` / `Mistral` / `Gemini` / `Qwen` command |
+| `Freekit: Reset selector failure counters` | Reset `_meta.failures` for all six providers (give user-locked selectors a fresh 3-failure budget) |
+| `Freekit: Reset selector failure counters (provider...)` | Reset `_meta.failures` for a single provider |
 
 ## Settings
 
@@ -288,6 +292,18 @@ Every MCP call shows an **approval card** (server, tool and arguments) before it
 **Browser automation issues**
 
 → Click **Freekit: Reset Repaired Selectors** and try again.
+
+**Selectori stricați (broken selectors)**
+
+A selector you wrote by hand in `selectors-user.json` (a "user-locked" key, listed in `_meta.locked`) is **never** overwritten by the healer or the AI Finder — your choice is final. But when the site is redesigned, that selector stops matching and Freekit can no longer repair it: every message fails.
+
+Freekit now notices. After the functional test of a user-locked selector fails, it counts the failures per selector (`_meta.failures`, `N/3`, shown in the chat as `⚠️ <provider>.<kind> selector broken (N/3) — auto-repair la 3/3`). At the **third** consecutive failure it saves a timestamped backup (`selectors-user.json.bak-YYYYMMDD-HHmmss`, last 5 kept), removes the selector from `_meta.locked` (`[selectors] auto-unlocked … after 3 failures — AI Finder can repair it now`) and asks the AI Finder to repair that slot. If a new selector is found it is saved and **re-locked** for you (`[selectors] auto-repaired … via AI Finder, re-locked`); if not, it stays unlocked for the next attempt (`[selectors] auto-unlock failed for … — leaving unlocked for next retry`).
+
+To force it (open the provider's chat in Chrome first):
+
+- `Freekit: Unlock broken selectors` — test the user-locked selectors of **all** providers; the broken ones are unlocked and repaired.
+- `Freekit: Unlock broken selectors (provider...)` — same, but for one provider only (so the others keep their locks).
+- `Freekit: Reset selector failure counters` / `(provider...)` — give the counters a fresh start (e.g. after you fixed a selector by hand).
 
 ## Requirements
 

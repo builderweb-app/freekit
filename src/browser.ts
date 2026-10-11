@@ -497,6 +497,39 @@ export class BrowserManager {
   }
 
   /**
+   * v2.5.72 (FIX 3): pagina deja deschisă pentru un anumit host — fără a porni
+   * Chrome și fără a schimba pagina activă a chat-ului. `null` = niciun tab
+   * pentru acel host (comenzile de unlock sar peste providerul respectiv).
+   */
+  async pageForHost(host: string): Promise<Page | null> {
+    const want = String(host || '')
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/^www\./, '')
+      .replace(/[\/?#].*$/, '')
+      .replace(/:\d+$/, '');
+    if (!want || !(await this.isRunning())) return null;
+    try {
+      const browser = await chromium.connectOverCDP(this.cdpUrl());
+      const context = browser.contexts()[0];
+      if (!context) return null;
+      for (const p of context.pages()) {
+        let h = '';
+        try {
+          h = new URL(p.url()).host.toLowerCase().replace(/^www\./, '');
+        } catch {
+          continue;
+        }
+        if (h === want) return p;
+      }
+    } catch (e: any) {
+      log('pageForHost failed: ' + (e?.message ?? String(e)));
+    }
+    return null;
+  }
+
+  /**
    * v0.3.0 (P0.3): închide REAL browserul.
    * browser.close() pe connectOverCDP doar deconectează — așa că:
    *   1) încercăm CDP `Browser.close` (închidere grațioasă);

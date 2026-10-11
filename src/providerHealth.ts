@@ -33,7 +33,17 @@ export const PROVIDER_SWITCH_ORDER: readonly string[] = [
 export interface ProviderHealthEntry {
   malformed: number;
   success: number;
+  /**
+   * v2.5.74 (FIX 5): de câte ori providerul a rămas MUT (input acceptat, dar
+   * niciun răspuns până la bugetul de așteptare) — ex: Qwen pe „Salut!".
+   */
+  noResponse?: number;
+  /** v2.5.74 (FIX 5): momentul ultimei „mut" (epoch ms); 0 = niciodată. */
+  unhealthyAt?: number;
 }
+
+/** v2.5.74 (FIX 5): cât timp un provider rămâne marcat „unhealthy". */
+export const UNHEALTHY_TTL_MS = 30 * 60 * 1000;
 
 export type ProviderHealthMap = Record<string, ProviderHealthEntry>;
 
@@ -54,9 +64,14 @@ export function readProviderHealth(root: string): ProviderHealthMap {
       const malformed = Math.floor(Number((raw as any)?.malformed));
       const success = Math.floor(Number((raw as any)?.success));
       if (!Number.isFinite(malformed) && !Number.isFinite(success)) continue;
+      // v2.5.74 (FIX 5): câmpurile de „mut" sunt opționale (fișiere vechi)
+      const noResponse = Math.floor(Number((raw as any)?.noResponse));
+      const unhealthyAt = Math.floor(Number((raw as any)?.unhealthyAt));
       map[name] = {
         malformed: Number.isFinite(malformed) && malformed > 0 ? malformed : 0,
-        success: Number.isFinite(success) && success > 0 ? success : 0
+        success: Number.isFinite(success) && success > 0 ? success : 0,
+        noResponse: Number.isFinite(noResponse) && noResponse > 0 ? noResponse : 0,
+        unhealthyAt: Number.isFinite(unhealthyAt) && unhealthyAt > 0 ? unhealthyAt : 0
       };
     }
     return map;
@@ -83,7 +98,7 @@ function bump(root: string, name: string, field: keyof ProviderHealthEntry): voi
   if (!root || !name) return;
   const map = readProviderHealth(root);
   const entry = map[name] ?? { malformed: 0, success: 0 };
-  entry[field]++;
+  entry[field] = (Number(entry[field]) || 0) + 1;
   map[name] = entry;
   writeProviderHealth(root, map);
 }
@@ -96,6 +111,50 @@ export function recordProviderMalformed(root: string, name: string): void {
 /** Un mesaj încheiat cu răspuns final (fără eșec de protocol). */
 export function recordProviderSuccess(root: string, name: string): void {
   bump(root, name, 'success');
+  // v2.5.74 (FIX 5): un răspuns reușit scoate providerul din starea „unhealthy"
+  clearProviderUnhealthy(root, name);
+}
+
+/**
+ * v2.5.74 (FIX 5): providerul a rămas MUT (input acceptat, dar niciun răspuns)
+ * — intră în statistici ca „noResponse" și e marcat `unhealthy`, ca mesajele
+ * următoare să nu-l mai aștepte degeaba. Log: `[provider-health] <name> marked
+ * unhealthy …`.
+ */
+export function recordProviderNoResponse(root: string, name: string): void {
+  if (!root || !name) return;
+  const map = readProviderHealth(root);
+  const entry = map[name] ?? { malformed: 0, success: 0 };
+  entry.noResponse = (entry.noResponse ?? 0) + 1;
+  entry.unhealthyAt = Date.now();
+  map[name] = entry;
+  writeProviderHealth(root, map);
+  logLine(
+    'provider-health',
+    name + ' marked unhealthy (no response ' + entry.noResponse + 'x)'
+  );
+}
+
+/** v2.5.74 (FIX 5): `true` dacă providerul e marcat „unhealthy" (recent). */
+export function isProviderUnhealthy(
+  root: string,
+  name: string,
+  withinMs = UNHEALTHY_TTL_MS
+): boolean {
+  const entry = readProviderHealth(root)[name];
+  if (!entry?.unhealthyAt) return false;
+  return Date.now() - entry.unhealthyAt < withinMs;
+}
+
+/** v2.5.74 (FIX 5): scoate marcajul „unhealthy" (ex: după un răspuns reușit). */
+export function clearProviderUnhealthy(root: string, name: string): void {
+  if (!root || !name) return;
+  const map = readProviderHealth(root);
+  const entry = map[name];
+  if (!entry?.unhealthyAt) return;
+  entry.unhealthyAt = 0;
+  map[name] = entry;
+  writeProviderHealth(root, map);
 }
 
 /** Rata de eșecuri malformed (0..1); 0 când încă nu există date. */

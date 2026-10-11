@@ -376,12 +376,16 @@ export function checkInputCandidate(
   // căsuța de chat e „lipită" de marginea de jos a paginii
   const nearBottom = r.y > viewport.height * 0.5;
 
+  // v2.5.74 (FIX 2): criteriile de bază — există, e vizibil, e activ, acceptă
+  // text, e în viewport. „Near bottom" NU mai respinge candidatul: pe Gemini
+  // căsuța stă într-un layout care nu o lasă în jumătatea de jos, iar vechea
+  // regulă respingea selectorul corect (`textarea[placeholder="Ask Gemini"]`).
+  // Rămâne doar un AVERTISMENT (câmpul `nearBottom`, afișat în snapshot).
   let reason: string | undefined;
   if (!visible) reason = 'not visible';
   else if (!enabled) reason = 'disabled';
   else if (!acceptsText) reason = 'does not accept text';
   else if (!inViewport) reason = 'outside the viewport';
-  else if (!nearBottom) reason = 'not near the bottom of the page';
 
   return { visible, enabled, acceptsText, inViewport, nearBottom, ok: !reason, reason };
 }
@@ -1662,12 +1666,75 @@ function assignSlot(target: DiscoveredSelectors, slot: SlotName, selector: strin
  * în jumătatea de jos a paginii. Fără ele, AI-ul a salvat un input ascuns din
  * UI (`input[aria-label="Line wrap"]`) și a stricat ChatGPT până la fix manual.
  */
+/**
+ * v2.5.74 (FIX 2): `tag[attr="value"]` → părțile lui (null dacă selectorul e
+ * altceva). Doar formei simple i se poate aplica potrivirea tolerantă de mai jos.
+ */
+function parseAttrSelector(
+  selector: string
+): { tag: string; attr: string; value: string } | null {
+  const m = String(selector || '')
+    .trim()
+    .match(/^([a-zA-Z][\w-]*)\s*\[\s*([\w:-]+)\s*=\s*(['"])([\s\S]*?)\3\s*\]$/);
+  if (!m) return null;
+  return { tag: m[1], attr: m[2], value: m[4] };
+}
+
+/**
+ * v2.5.74 (FIX 2): rescrie selectorul de atribut folosind VALOAREA REALĂ din
+ * DOM (cu ghilimelele ei, tipografice sau nu). AI-ul propune
+ * `textarea[placeholder="Ask Gemini"]`, dar pagina poate avea „Ask Gemini" cu
+ * ghilimele tipografice — iar CSS acceptă doar `"`/`'` ca delimitatori, deci
+ * varianta „înlocuim ghilimelele în selector" e invalidă. Potrivim valoarea
+ * normalizat, în pagină, apoi construim un selector valid care conține textul
+ * real. Întoarce `null` dacă nu găsește nimic.
+ */
+async function selectorWithNormalizedQuotes(
+  page: Page,
+  selector: string
+): Promise<string | null> {
+  const parsed = parseAttrSelector(selector);
+  if (!parsed) return null;
+  const actual = await page
+    .evaluate<string | null, { tag: string; attr: string; value: string }>(
+      (args) => {
+        // scoatem TOATE ghilimelele (drepte sau tipografice) din comparație —
+        // „Ask Gemini" (DOM) vs. "Ask Gemini" (propus de AI) trebuie să fie egal
+        const norm = (s: string): string =>
+          String(s ?? '')
+            .replace(/["'\u2018\u2019\u201C\u201D\u00AB\u00BB\u2039\u203A]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+        const want = norm(args.value);
+        const nodes = Array.prototype.slice.call(
+          document.querySelectorAll(args.tag)
+        ) as Element[];
+        for (const el of nodes) {
+          const v = el.getAttribute(args.attr);
+          if (v !== null && norm(v) === want) return v;
+        }
+        return null;
+      },
+      parsed
+    )
+    .catch(() => null);
+  if (!actual) return null;
+  const escaped = actual.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const rebuilt = parsed.tag + '[' + parsed.attr + '="' + escaped + '"]';
+  return rebuilt === selector ? null : rebuilt;
+}
+
 export async function validateChatInputSelector(
   page: Page,
   selector: string
-): Promise<InputCandidateCheck & { count: number }> {
-  const fail = (reason: string, count = 0): InputCandidateCheck & { count: number } => ({
+): Promise<InputCandidateCheck & { count: number; selector: string }> {
+  const fail = (
+    reason: string,
+    count = 0
+  ): InputCandidateCheck & { count: number; selector: string } => ({
     count,
+    selector,
     visible: false,
     enabled: false,
     acceptsText: false,
@@ -1677,10 +1744,34 @@ export async function validateChatInputSelector(
     reason
   });
 
+  // v2.5.74 (FIX 2): dacă selectorul propus nu prinde nimic din cauza
+  // ghilimelelor (drepte vs. tipografice), validăm varianta care chiar există
+  // și o întoarcem ca `selector` — apelantul salvează ce a funcționat.
+  let effective = selector;
   let count = 0;
   try {
-    const loc = page.locator(selector);
+    let loc = page.locator(effective);
     count = await loc.count();
+    // v2.5.74 (FIX 2): „no element matches" poate fi doar o problemă de
+    // ghilimele (drepte vs. tipografice) — căutăm valoarea reală în DOM și
+    // reconstruim selectorul înainte de a respinge.
+    if (count === 0) {
+      const normalized = await selectorWithNormalizedQuotes(page, effective);
+      if (normalized) {
+        try {
+          const alt = page.locator(normalized);
+          const altCount = await alt.count();
+          if (altCount > 0) {
+            log('input selector matched with normalized quotes: ' + normalized);
+            effective = normalized;
+            loc = alt;
+            count = altCount;
+          }
+        } catch {
+          /* selector reconstruit invalid — rămâne „no element matches" */
+        }
+      }
+    }
     if (count === 0) return fail('no element matches', 0);
     if (count > 20) return fail('too generic (' + count + ' matches)', count);
     if (!(await loc.first().isVisible())) return fail('not visible', count);
@@ -1692,7 +1783,7 @@ export async function validateChatInputSelector(
   let probe: InputCandidateProbe | undefined;
   let viewport = { width: 0, height: 0 };
   try {
-    const probed = await probeInputCandidates(page, selector, 1);
+    const probed = await probeInputCandidates(page, effective, 1);
     probe = probed.probes[0];
     viewport = probed.viewport;
   } catch {
@@ -1700,7 +1791,7 @@ export async function validateChatInputSelector(
   }
   if (!probe) return fail('cannot be inspected', count);
 
-  return { ...checkInputCandidate(probe, viewport), count };
+  return { ...checkInputCandidate(probe, viewport), count, selector: effective };
 }
 
 /* -------------------------------------------------------------------------
@@ -2307,8 +2398,13 @@ export async function validateResponseSelector(
  * test failed)` și candidatul NU se salvează.
  * ------------------------------------------------------------------------- */
 
-/** Etichete care nu pot fi niciodată butonul de chat nou (FIX 1 + FIX 5). */
-const NON_NEWCHAT_LABEL_RE = /retry|regenerate|edit|delete|remove/i;
+/**
+ * Etichete care nu pot fi niciodată butonul de chat nou (FIX 1 + FIX 5).
+ * v2.5.74 (FIX 1): + butoanele de banner/chrome — healer-ul alegea
+ * `button[aria-label="Dismiss upgrade banner"]` pentru `claude.newChat` (există,
+ * e vizibil, dar închide un banner de upsell).
+ */
+const NON_NEWCHAT_LABEL_RE = /retry|regenerate|edit|delete|remove|dismiss|upgrade|cancel|close/i;
 
 /**
  * Click pe un candidat de newChat și măsurarea efectului.
@@ -2446,8 +2542,9 @@ export async function validateSelectors(
         log('respins input (' + check.reason + '): ' + sel);
         continue;
       }
-      assignSlot(valid, slot, sel);
-      log('validat ' + slot + ': ' + sel + ' (' + check.count + ' potriviri)');
+      // v2.5.74 (FIX 2): salvăm varianta care a potrivit (ghilimele normalizate)
+      assignSlot(valid, slot, check.selector);
+      log('validat ' + slot + ': ' + check.selector + ' (' + check.count + ' potriviri)');
       continue;
     }
     if (slot === 'response') {
@@ -3808,7 +3905,8 @@ export async function repairChatInput(
       // text, în viewport, în jumătatea de jos)
       const check = await validateChatInputSelector(page, sel);
       if (check.ok) {
-        const stored = selectors.learn(providerId, 'input', sel, 'ai', {
+        // v2.5.74 (FIX 2): salvăm varianta validată (ghilimele normalizate)
+        const stored = selectors.learn(providerId, 'input', check.selector, 'ai', {
           confidence: discovered?.confidence,
           reasoning: discovered?.reasoning
         });
@@ -3817,10 +3915,10 @@ export async function repairChatInput(
           pendingDiscovery.delete(providerId);
           inputRepairFailures.delete(providerId);
           saveUserSelectors();
-          log('input repaired for ' + label + ': ' + sel);
-          return { selector: sel, gaveUp: false, reason: 'ok' };
+          log('input repaired for ' + label + ': ' + check.selector);
+          return { selector: check.selector, gaveUp: false, reason: 'ok' };
         }
-        log('input repair refused at save time (' + sel + ')');
+        log('input repair refused at save time (' + check.selector + ')');
       } else {
         log('input repair rejected (' + check.reason + '): ' + sel);
       }

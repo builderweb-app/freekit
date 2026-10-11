@@ -90,6 +90,7 @@ import {
   nextProviderInOrder,
   readProviderHealth,
   recordProviderMalformed,
+  recordProviderNoResponse,
   recordProviderSuccess
 } from './providerHealth';
 import {
@@ -239,6 +240,29 @@ export function classifyPrompt(text: string): 'question' | 'task' {
   }
   if (text.length > 300) return 'task';
   return 'question';
+}
+
+/**
+ * v2.5.74 FIX 4: mai e nevoie de handoff-ul COMPLET (task + pași + fișiere) când
+ * chatul/providerul se schimbă? Un „Salut!" pe un chat nou primea tot contextul
+ * plus system prompt-ul complet, iar modelele se blocau (Gemini ecouia
+ * promptul, Qwen nu răspundea deloc).
+ *
+ * Handoff DOAR când: mesajul curent e un task SAU mesajul anterior era un task
+ * SAU în conversație s-au modificat fișiere SAU mesajul e lung (> 200 chars).
+ */
+export function needsCrossProviderHandoff(args: {
+  promptKind: 'question' | 'task';
+  previousKind: 'question' | 'task';
+  writtenFiles: number;
+  userTextLength: number;
+}): boolean {
+  return (
+    args.promptKind === 'task' ||
+    args.previousKind === 'task' ||
+    args.writtenFiles > 0 ||
+    args.userTextLength > 200
+  );
 }
 
 /**
@@ -810,6 +834,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * Viață: per chat de browser (vezi resetBrowserChatState).
    */
   private chatWrittenFiles = new Set<string>();
+  /**
+   * v2.5.74 (FIX 4): clasa mesajului ANTERIOR ('question' | 'task'). Handoff-ul
+   * complet la schimbarea de provider se trimite doar când ultimul task chiar
+   * era un task (sau există fișiere modificate / mesajul e lung) — altfel un
+   * „Salut!" pe un chat nou poluează promptul și blochează modelul (Gemini
+   * ecouia promptul, Qwen nu răspundea deloc).
+   */
+  private lastPromptKind: 'question' | 'task' = 'question';
+  /**
+   * v2.5.74 (FIX 4): handoff-ul e necesar pentru MESAJUL CURENT? Calculat o
+   * dată per mesaj (vezi handleUserMessage) și citit de `openOrResumeChat`.
+   */
+  private handoffNeeded = true;
   /** v0.2.1: aprobă automat toate operațiile care necesită confirmare. */
   private autoApprove = false;
   /** v0.4.0: guard anti-suprapunere pentru verificarea de status. */
@@ -1965,6 +2002,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ? 'using short system prompt (question mode)'
         : 'using full system prompt (task mode)'
     );
+    // v2.5.74 (FIX 4): handoff-ul complet (schimbare de provider / chat nou) se
+    // trimite doar când e cu adevărat nevoie de context. Întrebare simplă, fără
+    // fișiere modificate și sub 200 de caractere → fără handoff (și fără
+    // PROJECT STRUCTURE, care oricum lipsește în question mode).
+    const prevPromptKind = this.lastPromptKind;
+    this.lastPromptKind = promptKind;
+    this.handoffNeeded = needsCrossProviderHandoff({
+      promptKind,
+      previousKind: prevPromptKind,
+      writtenFiles: this.chatWrittenFiles.size,
+      userTextLength: userText.length
+    });
+    if (!this.handoffNeeded) {
+      logLine('handoff', 'skipped — simple question, no handoff needed');
+    }
 
     // v2.4.1: Restricted Mode nu mai blochează tot chat-ul — modelul poate citi
     // și răspunde; doar uneltele care scriu/rulează sunt refuzate la execuție
@@ -3422,6 +3474,46 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             'The next message will start a new chat.'
         );
         return;
+      } else if (
+        e instanceof DetectedProviderError &&
+        e.details.kind === 'no_response' &&
+        e.providerId !== 'ollama'
+      ) {
+        // v2.5.74 (FIX 5): providerul a rămas MUT (input acceptat, dar niciun
+        // răspuns — „Salut!" pe Qwen). Îl marcăm „unhealthy" în statisticile de
+        // fiabilitate și trecem AUTOMAT pe următorul provider din ordinea de
+        // rezervă, trimițând chiar mesajul utilizatorului.
+        log('no response from ' + e.providerId + ' — marking unhealthy and switching');
+        try {
+          recordProviderNoResponse(this.globalStorageRoot, e.providerId);
+        } catch (err: any) {
+          log('could not record the no-response failure: ' + (err?.message ?? String(err)));
+        }
+        // `baseSendOpts`/`provider` trăiesc în blocul try, deci aici plecăm cu
+        // opțiunile minime (fără streaming de progres) și postăm direct răspunsul
+        const switched = await this.tryAutoSwitchProvider(
+          e.providerId,
+          new Set<string>([e.providerId]),
+          signal,
+          {},
+          this.lastUserText
+        ).catch((err: any) => {
+          log('auto-switch after no-response failed: ' + (err?.message ?? String(err)));
+          return null;
+        });
+        if (switched && switched.reply) {
+          await this.appendHistory('assistant', switched.reply);
+          this.post('reply', switched.reply);
+          return;
+        }
+        // niciun alt provider nu a răspuns (sau nu există altul) — cardul clar
+        log('provider error: ' + (e?.message ?? String(e)));
+        this.post('provider_error', {
+          kind: e.details.kind,
+          message: e.message,
+          providerId: e.providerId
+        });
+        return;
       } else if (e instanceof DetectedProviderError) {
         // v2.5.1: eroare de provider detectată (mesaje gratuite epuizate,
         // rate limit, CAPTCHA) — nu mai arătăm un timeout sec, ci un mesaj
@@ -3816,6 +3908,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // apeluri / fișiere scrise) — handoff-ul are nevoie de ea, iar rotirile
       // ulterioare de pe noul provider o duc mai departe (ca la rotire).
       this.chatToolSteps = 0;
+      // v2.5.74 (FIX 4): pentru o întrebare simplă (fără fișiere, mesaj scurt)
+      // NU ducem contextul — chatul nou pornește curat și răspunde direct.
+      if (!this.handoffNeeded) {
+        logLine(
+          'handoff',
+          'cross-provider to ' + provider.name + ' skipped — simple question, no handoff needed'
+        );
+        // memoria per-chat rămâne (ca mai sus) — un task ulterior din aceeași
+        // conversație are nevoie de fișierele citite
+        return '';
+      }
       logLine(
         'handoff',
         'cross-provider — sending full context to ' + provider.name
@@ -3924,7 +4027,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     currentId: string,
     attempted: Set<string>,
     signal: AbortSignal,
-    sendOpts: SendOptions
+    sendOpts: SendOptions,
+    /**
+     * v2.5.74 (FIX 5): ce trimitem pe providerul nou. Implicit = reluarea
+     * task-ului întrerupt (3 tool call-uri malformate); la „provider mut" e
+     * chiar mesajul utilizatorului, ca întrebarea să primească un răspuns.
+     */
+    resumeText?: string
   ): Promise<{ provider: AIProvider; page?: Page; reply: string } | null> {
     for (const id of PROVIDER_SWITCH_ORDER) {
       if (attempted.has(id) || id === currentId) continue;
@@ -3936,7 +4045,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // handoff-ul se construiește ÎNAINTE de deschiderea chatului nou:
         // openOrResumeChat poate reseta memoria per-chat (fișiere citite /
         // acțiuni), iar handoff-ul are nevoie de ea.
-        const handoff = this.buildChatHandoff(label, 'cross-provider');
+        // v2.5.74 (FIX 4): dar NU pentru o întrebare simplă (vezi handoffNeeded)
+        const handoff = this.handoffNeeded
+          ? this.buildChatHandoff(label, 'cross-provider')
+          : '';
         // chat NOU pe providerul nou (ca la schimbarea manuală de provider)
         const openHandoff = await this.openOrResumeChat(
           prov,
@@ -3948,23 +4060,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.applySelectedModel(id, prep.page, label);
         this.active = { provider: prov, page: prep.page };
         const fromLabel = PROVIDER_LABELS[currentId] ?? currentId;
-        log('auto-switch: ' + currentId + ' -> ' + id + ' (3x malformed)');
+        const reason =
+          resumeText !== undefined
+            ? 'no response'
+            : '3x malformed';
+        log('auto-switch: ' + currentId + ' -> ' + id + ' (' + reason + ')');
         this.post(
           'heal',
           '🔀 Auto-switch: ' + fromLabel + ' → ' + label +
-            ' (3 malformed tool calls on the same message) — sending the full handoff and continuing here.'
+            (resumeText !== undefined
+              ? ' (no response from ' + fromLabel + ') — sending your message there.'
+              : ' (3 malformed tool calls on the same message) — sending the full handoff and continuing here.')
         );
         this.postVerboseStep({
           kind: 'decision',
           title: 'Auto-switch ' + fromLabel + ' → ' + label,
-          text: '3 malformed tool calls in a row — switching provider and resuming the task with the full handoff.',
+          text:
+            resumeText !== undefined
+              ? 'no response from ' + fromLabel + ' — switching provider and resending the message.'
+              : '3 malformed tool calls in a row — switching provider and resuming the task with the full handoff.',
           status: 'done'
         });
         attempted.add(id);
         const context = openHandoff || handoff;
         const resume =
           (context ? context + '\n\n' : '') +
-          'USER MESSAGE:\nContinue the original task from where it left off — send the next action (ONE tool call), nothing else.';
+          (resumeText !== undefined
+            ? 'USER MESSAGE:\n' + resumeText
+            : 'USER MESSAGE:\nContinue the original task from where it left off — send the next action (ONE tool call), nothing else.');
         const urlBeforeSend = prep.page?.url();
         const reply = await prov.send(prep.page, resume, signal, sendOpts);
         await this.rememberBrowserChat(prov, prep.page, urlBeforeSend);

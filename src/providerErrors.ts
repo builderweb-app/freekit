@@ -142,6 +142,47 @@ const PLAN_LIMIT_RE =
   /free plan|quota exceeded|limit reached|you'?ve reached[^.\n]{0,60}|daily limit|message limit|try again later/i;
 
 /**
+ * v2.5.74 (FIX 3): textele de PROMO/CHROME care nu sunt niciodată o eroare de
+ * provider. „Upgrade for more" (bannerul de upsell din sidebar) + „Dismiss" +
+ * „Learn more" apăreau în scanul de pagină și, împreună cu orice cuvânt de
+ * limită din DOM, produceau un `plan_limit` fals pe un cont Pro.
+ */
+const PROVIDER_PROMO_NOISE_RE = /\bupgrade for more\b|\bdismiss\b|\blearn more\b|\bnot now\b/i;
+
+/** true dacă textul e doar promo/chrome (nu o eroare de provider). */
+export function isProviderPromoNoise(text: string): boolean {
+  return PROVIDER_PROMO_NOISE_RE.test(String(text ?? ''));
+}
+
+/**
+ * v2.5.74 (FIX 3): semnalele care CONFIRMĂ o limită reală (nu un banner de
+ * upsell): textul de limită chiar în zona de chat + inputul dezactivat +
+ * butonul de trimitere ascuns. Sunt necesare 2 din 3 (vezi `confirmLimit`).
+ */
+export interface LimitSignals {
+  /** Textul de limită a fost citit din zona de chat (nu din sidebar/banner). */
+  textInChat: boolean;
+  /** Căsuța de input e dezactivată (readonly/disabled/aria-disabled). */
+  inputDisabled: boolean;
+  /** Butonul de trimitere nu e vizibil. */
+  sendHidden: boolean;
+}
+
+/** Câte dintre cele 3 semnale sunt prezente. */
+export function limitSignalCount(s: LimitSignals): number {
+  return (s.textInChat ? 1 : 0) + (s.inputDisabled ? 1 : 0) + (s.sendHidden ? 1 : 0);
+}
+
+/**
+ * v2.5.74 (FIX 3): limita (plan/cotă/rate) e CONFIRMATĂ doar cu ≥2 din cele 3
+ * semnale. Un banner de upsell într-un cont care funcționează normal are cel
+ * mult 1 (textul „limit" din banner) → nu mai raportăm eroare falsă.
+ */
+export function confirmLimit(signals: LimitSignals): boolean {
+  return limitSignalCount(signals) >= 2;
+}
+
+/**
  * v2.5.43 (bug #100): textul care semnalează o limită de plan/cotă (bannere de
  * tip „You've reached your free plan limit", „Quota exceeded", „Try again
  * later"). Folosit atât de scanul de pagină, cât și direct pe răspunsul citit.
@@ -172,7 +213,15 @@ export function upgradeUrlFor(providerId: string): string | undefined {
 export function detectProviderError(
   rawText: string,
   providerId: string,
-  upgradeUrl?: string
+  upgradeUrl?: string,
+  /**
+   * v2.5.74 (FIX 3): semnalele din pagină. Când sunt furnizate, `plan_limit` /
+   * `rate_limit` se raportează doar dacă sunt confirmate de ≥2 din 3 semnale —
+   * altfel un banner de upsell („Upgrade for more") dintr-un cont Pro producea
+   * o eroare falsă. Fără semnale (detecția pe textul răspunsului) comportamentul
+   * rămâne cel de dinainte.
+   */
+  signals?: LimitSignals
 ): ProviderError | null {
   if (!rawText) return null;
 
@@ -214,8 +263,12 @@ export function detectProviderError(
   // „You've reached your free plan limit", „Quota exceeded", „Try again
   // later" nu erau recunoscute deloc, deci chatul se trunchia (tool calls
   // incomplete ⇒ edit_file eșua) iar utilizatorul nu afla care e cauza.
+  // v2.5.74 (FIX 3): textul de promo/chrome („Upgrade for more", „Dismiss",
+  // „Learn more") nu e o eroare de provider, iar limita se raportează doar
+  // când e confirmată de semnalele din pagină.
+  const limitConfirmed = !signals || confirmLimit(signals);
   const planHit = rawText.match(PLAN_LIMIT_RE);
-  if (planHit) {
+  if (planHit && !isProviderPromoNoise(planHit[0]) && limitConfirmed) {
     return {
       kind: 'plan_limit',
       message: planHit[0].trim(),
@@ -226,6 +279,7 @@ export function detectProviderError(
   // upgrade/plans/pricing din DOM și un cuvânt de limită, este.
   if (
     upgradeUrl &&
+    limitConfirmed &&
     /limit|quota|free plan|reached|out of|try again|too many|upgrade (?:your|to|now)/i.test(
       rawText
     )
@@ -242,8 +296,9 @@ export function detectProviderError(
     return { kind: 'login_required', message: 'You need to log in.' };
   }
 
-  // Rate limit
-  if (/rate limit|too many requests|try again in/i.test(rawText)) {
+  // Rate limit — v2.5.74 (FIX 3): aceeași confirmare ca la `plan_limit`.
+  const rateHit = rawText.match(/rate limit|too many requests|try again in/i);
+  if (rateHit && !isProviderPromoNoise(rateHit[0]) && limitConfirmed) {
     return { kind: 'rate_limit', message: 'Rate limit reached.', upgradeUrl };
   }
 

@@ -520,6 +520,19 @@ const HEALER_MAX_FUNCTIONAL_TRIES = 3;
  */
 const MIN_HEALER_SCORE = 10;
 
+/**
+ * v2.5.74 (FIX 1): pragul pentru `newChat` e mai mare — un buton de chat nou
+ * trebuie să poarte semnalul lui explicit („new chat"/„chat nou"), nu doar tag +
+ * poziție. Fără el, `button[aria-label="Dismiss upgrade banner"]` (Claude)
+ * câștiga scanul și era învățat ca buton de chat nou.
+ */
+const NEWCHAT_MIN_SCORE = 25;
+
+/** v2.5.74 (FIX 1): pragul de salvare al unui candidat, per slot. */
+function minHealerScore(slot: SlotName): number {
+  return slot === 'newChat' ? NEWCHAT_MIN_SCORE : MIN_HEALER_SCORE;
+}
+
 export class SelectorStore {
   private overrides = new Map<string, LearnedSelector>();
   /** v2.5.61 (FIX 4): eșecuri consecutive per slot (doar în sesiunea curentă). */
@@ -1237,6 +1250,9 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
     'hide',
     'mute'
   ];
+  // v2.5.74 (FIX 1): butoanele de banner / chrome (upgrade, dismiss, close,
+  // cancel) nu sunt butonul de chat nou — vezi scorul de `newChat`.
+  const NEWCHAT_CHROME_TOKENS = ['dismiss', 'close', 'upgrade', 'cancel'];
   // clasele/id-urile folosesc cratime (`new-chat-button`) — le tratăm ca spații la fraze
   const phraseHay = (s: string): string => s.replace(/[-_]+/g, ' ');
 
@@ -1724,10 +1740,21 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
       if (slot === 'newChat') {
         // v2.5.67 (FIX 1): bonus DOAR pe fraza completă de „chat nou" — tokenul
         // „chat" singur era suficient ca „Rename chat" să câștige scanul.
+        // v2.5.74 (FIX 1): bonusul urcă la +15 (pragul de newChat e 25) — un
+        // buton de chat nou trebuie să poarte fraza, nu doar iconița/poziția.
         const labelFlat = phraseHay(labelHay);
         if (NEW_CHAT_PHRASES.some((p) => labelFlat.indexOf(p) >= 0)) {
-          s += 4;
-          why.push('bonus:chat');
+          s += 15;
+          why.push('bonus:chat-new');
+        }
+        // v2.5.74 (FIX 1): butoanele de banner/promo („Dismiss upgrade banner",
+        // „Close", „Cancel", „Upgrade") NU sunt niciodată butonul de chat nou —
+        // healer-ul le alegea pentru că există în header, lângă butonul real.
+        for (const bad of NEWCHAT_CHROME_TOKENS) {
+          if (labelHay.indexOf(bad) >= 0) {
+            s -= 20;
+            why.push('penal:newchat-' + bad);
+          }
         }
         // v2.5.67 (FIX 1): acțiunile pe un chat EXISTENT nu sunt „chat nou".
         for (const bad of CHAT_ITEM_ACTIONS) {
@@ -2618,10 +2645,12 @@ export async function healSlot(
     // v2.5.61 (FIX 1): candidatul se TESTEAZĂ funcțional înainte de `learn()`.
     for (const candidate of ordered.slice(0, HEALER_MAX_FUNCTIONAL_TRIES)) {
       // v2.5.65 (FIX 2): un candidat slab nu se salvează (vezi MIN_HEALER_SCORE).
-      if (candidate.score < MIN_HEALER_SCORE) {
+      // v2.5.74 (FIX 1): pentru `newChat` pragul e mai mare (NEWCHAT_MIN_SCORE).
+      const minScore = minHealerScore(slot);
+      if (candidate.score < minScore) {
         healLog(
           'candidate rejected: ' + candidate.selector + ' (score ' + candidate.score +
-            ' < ' + MIN_HEALER_SCORE + ')'
+            ' < ' + minScore + ')'
         );
         continue;
       }

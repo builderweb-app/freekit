@@ -29,6 +29,9 @@ import {
   detectProviderError,
   isMemoryFullText,
   isPlanLimitText,
+  isProviderPromoNoise,
+  limitSignalCount,
+  LimitSignals,
   ProviderError
 } from '../providerErrors';
 
@@ -95,6 +98,21 @@ const STUCK_CHECKPOINTS = [15_000, 30_000, 60_000, 90_000];
  * (`freekit.providerTimeout` = 90s).
  */
 const STUCK_ABORT_MS = 90_000;
+
+/**
+ * v2.5.74 (FIX 5): plafon de așteptare per provider. Qwen rămâne mut pe
+ * mesaje simple („Salut!" → nimic, apoi switch pe Mistral), deci îl așteptăm
+ * doar 30s — dacă n-a început să răspundă până atunci, îl declarăm „fără
+ * răspuns" mai repede și reîncercăm/commutăm. Restul providerilor păstrează
+ * bugetul din setări.
+ */
+const PROVIDER_TIMEOUT_OVERRIDE_MS: Record<string, number> = {
+  qwen: 30_000
+};
+
+/** v2.5.74 (FIX 5): promptul SIMPLU pentru reîncercarea unui provider mut. */
+const SIMPLE_RETRY_PROMPT =
+  'Please reply with one short sentence.';
 
 /**
  * v2.5.70 (FIX 3): promptul de reîncercare automată după un timeout. Înainte de
@@ -549,7 +567,15 @@ export async function detectCaptcha(page: Page): Promise<boolean> {
  * Exclude codul și căsuța de input, ca o discuție despre „rate limit” să nu
  * fie confundată cu o eroare reală.
  */
-const scanProviderErrorText = (): string => {
+/**
+ * v2.5.74 (FIX 3): textul de eroare se citește DOAR din zona de chat — ultimele
+ * mesaje ale asistentului, containerul de răspuns și bannerele/alertele care
+ * apar PESTE zona de chat. Sidebar-ul, bannerele de upsell, tooltip-urile și
+ * cardurile de „Upgrade for more" NU mai intră în scan: un cont Pro cu un banner
+ * de upsell în sidebar producea un `plan_limit` fals („Mistral reached its
+ * temporary limit").
+ */
+export const scanProviderErrorText = (args: { responseSels: string[] }): string => {
   const parts: string[] = [];
   const visible = (el: Element): boolean => {
     const r = el.getBoundingClientRect();
@@ -559,18 +585,39 @@ const scanProviderErrorText = (): string => {
   };
   const usable = (el: Element): boolean =>
     !el.closest('pre, code, textarea, input, [contenteditable="true"]');
-  const sels = [
-    '[role="alert"]',
-    '[role="status"]',
-    '[class*="error" i]',
-    '[class*="alert" i]',
-    '[class*="toast" i]',
-    '[class*="banner" i]',
-    '[class*="limit" i]',
-    '[class*="upsell" i]',
-    '[class*="quota" i]',
-    '[class*="paywall" i]'
-  ];
+  // zonele de chrome excluse explicit (sidebar / upsell / tooltip / promo)
+  const chromeSel =
+    'aside, nav, [role="navigation"], [role="complementary"], header, [role="banner"], ' +
+    '[class*="sidebar" i], [class*="upsell" i], [class*="promo" i], ' +
+    '[class*="paywall" i], [class*="tooltip" i], [class*="upgrade" i], ' +
+    '[class*="banner" i]';
+  const inChrome = (el: Element): boolean => {
+    try {
+      return el.closest(chromeSel) !== null;
+    } catch {
+      return false;
+    }
+  };
+  const push = (el: Element, max = 600): void => {
+    if (!visible(el) || !usable(el) || inChrome(el)) return;
+    const t = String((el as HTMLElement).innerText || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (t && t.length <= max && parts.indexOf(t) < 0) parts.push(t);
+  };
+
+  // (a) mesajele de răspuns (ultimele două) — aici apare bannerul de limită
+  for (const sel of args.responseSels || []) {
+    let els: Element[] = [];
+    try {
+      els = Array.prototype.slice.call(document.querySelectorAll(sel));
+    } catch {
+      continue;
+    }
+    for (const el of els.slice(-2)) push(el, 2000);
+  }
+  // (b) alerte/toast-uri de eroare, doar dacă nu stau în chrome-ul paginii
+  const sels = ['[role="alert"]', '[role="status"]', '[class*="error" i]', '[class*="alert" i]'];
   for (const sel of sels) {
     if (parts.length >= 40) break;
     let els: Element[] = [];
@@ -579,18 +626,65 @@ const scanProviderErrorText = (): string => {
     } catch {
       continue;
     }
+    for (const el of els) push(el);
+  }
+  return parts.join('\n');
+};
+
+/**
+ * v2.5.74 (FIX 3): semnalele care confirmă o limită reală — input dezactivat și
+ * butonul de trimitere ascuns. Se citesc din zona de chat.
+ *
+ * Notă: textul e „în chat" prin construcție la ambele apeluri (scanul citește
+ * doar zona de chat, iar al doilea apel pornește de la răspunsul citit).
+ */
+export const scanLimitSignals = (): { inputDisabled: boolean; sendHidden: boolean } => {
+  const enabled = (el: Element): boolean => {
+    const node = el as HTMLElement;
+    if ((node as HTMLInputElement).disabled) return false;
+    if (node.getAttribute('aria-disabled') === 'true') return false;
+    if (node.getAttribute('readonly') !== null) return false;
+    const s = window.getComputedStyle(node);
+    return s.pointerEvents !== 'none' && s.display !== 'none' && s.visibility !== 'hidden';
+  };
+  let inputDisabled = false;
+  let sendHidden = true;
+  for (const sel of ['textarea', '[contenteditable="true"]', 'div[role="textbox"]']) {
+    let els: Element[] = [];
+    try {
+      els = Array.prototype.slice.call(document.querySelectorAll(sel));
+    } catch {
+      continue;
+    }
     for (const el of els) {
-      if (!visible(el) || !usable(el)) continue;
-      const t = String((el as HTMLElement).innerText || '')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (t && t.length <= 600 && parts.indexOf(t) < 0) parts.push(t);
+      const r = el.getBoundingClientRect();
+      if (r.width < 40 || r.height < 10) continue; // nu e căsuța de chat
+      if (!enabled(el)) inputDisabled = true;
     }
   }
-  const body = String(document.body ? document.body.innerText : '')
-    .replace(/\s+/g, ' ');
-  if (body) parts.push(body.slice(-2500));
-  return parts.join('\n');
+  const sendSels = [
+    'button[data-testid*="send" i]',
+    'button[aria-label*="send" i]',
+    'button[type="submit"]',
+    '[class*="send-button" i]'
+  ];
+  for (const sel of sendSels) {
+    let els: Element[] = [];
+    try {
+      els = Array.prototype.slice.call(document.querySelectorAll(sel));
+    } catch {
+      continue;
+    }
+    for (const el of els) {
+      const r = el.getBoundingClientRect();
+      if (r.width >= 8 && r.height >= 8) {
+        sendHidden = false;
+        break;
+      }
+    }
+    if (!sendHidden) break;
+  }
+  return { inputDisabled, sendHidden };
 };
 
 /**
@@ -655,16 +749,46 @@ async function detectProviderErrorOnPage(
   message: string
 ): Promise<ProviderError | null> {
   try {
-    const text = await page.evaluate<string>(scanProviderErrorText);
+    // v2.5.74 (FIX 3): scanul acoperă DOAR zona de chat (ultimele răspunsuri +
+    // alertele care nu stau în sidebar/upsell), nu toată pagina.
+    const responseSels = selectors.candidates(providerId, 'response');
+    const text = await page.evaluate<string, { responseSels: string[] }>(
+      scanProviderErrorText,
+      { responseSels }
+    );
     // v2.5.43 (bug #100): butonul de upgrade/plans/pricing din pagină — semn de
     // plan gratuit / cotă atinsă, și sursa URL-ului real de pe cardul din chat.
     const upgradeUrl = await readUpgradeLink(page);
-    const detected = detectProviderError(
-      stripEcho(text, message),
-      providerId,
-      upgradeUrl
-    );
-    if (!detected) return null;
+    // v2.5.74 (FIX 3): semnalele care confirmă limita (2 din 3).
+    const extra = await page
+      .evaluate<{ inputDisabled: boolean; sendHidden: boolean }>(scanLimitSignals)
+      .catch(() => ({ inputDisabled: false, sendHidden: false }));
+    const stripped = stripEcho(text, message);
+    const inChat = isPlanLimitText(stripped) || /rate limit|too many requests/i.test(stripped);
+    const signals: LimitSignals = {
+      textInChat: inChat,
+      inputDisabled: extra.inputDisabled,
+      sendHidden: extra.sendHidden
+    };
+    const detected = detectProviderError(stripped, providerId, upgradeUrl, signals);
+    if (!detected) {
+      // v2.5.74 (FIX 3): text de limită văzut, dar neconfirmat de celelalte
+      // semnale (banner/upsell într-un cont care funcționează normal) — nu
+      // raportăm eroare; utilizatorul cu cont Pro era blocat degeaba.
+      if (isProviderPromoNoise(stripped)) {
+        logLine(
+          'chat',
+          'noticed "limit" text in a banner/promo — ignoring (banner, not chat)'
+        );
+      } else if (inChat && limitSignalCount(signals) < 2) {
+        logLine(
+          'chat',
+          'noticed "limit" text but only ' + limitSignalCount(signals) +
+            '/3 signals — ignoring (banner, not chat)'
+        );
+      }
+      return null;
+    }
     if (isEchoOf(detected.message, message)) return null;
     return detected;
   } catch (e: any) {
@@ -1421,7 +1545,13 @@ export async function sendAndWait(
   // v2.5.35 (bug #86): bugetul de așteptare din setări, citit o dată per mesaj.
   // v2.5.60: `freekit.providerTimeout` (secunde, implicit 90) — iar detecția
   // adaptivă de mai jos oprește la 60s un provider fără niciun semn de viață.
-  const hardTimeoutMs = providerTimeoutMs();
+  // v2.5.74 (FIX 5): bugetul efectiv = setarea utilizatorului, plafonată de
+  // override-ul per provider (Qwen: 30s).
+  const configuredTimeoutMs = providerTimeoutMs();
+  const overrideMs = PROVIDER_TIMEOUT_OVERRIDE_MS[providerId];
+  const hardTimeoutMs = overrideMs ? Math.min(configuredTimeoutMs, overrideMs) : configuredTimeoutMs;
+  // pragul de „provider blocat" nu poate depăși bugetul efectiv
+  const stuckAbortMs = Math.min(STUCK_ABORT_MS, hardTimeoutMs);
   let started = Date.now();
   // v2.5.15 (bug #41): textul trimis efectiv în chat (poate include prefixul de
   // handoff după o continuare) — gardele de ecou se raportează la el.
@@ -1492,11 +1622,21 @@ export async function sendAndWait(
     log(
       label + ': ' + reason + ' — auto-retry 1/1 with a shorter-answer request'
     );
+    // v2.5.74 (FIX 5): providerii cu plafon propriu (Qwen) primesc un prompt
+    // SIMPLU, nu doar unul „mai scurt" — un model mut nu pornește deloc.
+    const simple = overrideMs !== undefined;
+    if (simple) {
+      logLine(
+        'chat',
+        providerId + ': no response after ' +
+          Math.round(hardTimeoutMs / 1000) + 's — retrying with simpler prompt'
+      );
+    }
     cfg.onNotice?.(
       '🔁 No response from ' + label + ' (' + reason +
         ') — retrying once: asking the model for a shorter answer.'
     );
-    sentText = TIMEOUT_RETRY_PROMPT;
+    sentText = simple ? SIMPLE_RETRY_PROMPT : TIMEOUT_RETRY_PROMPT;
     // buclă nouă: sentinelele repornesc, ca răspunsul reîncercării să fie
     // detectat ca răspuns NOU și checkpoint-urile să pornească de la zero
     try {
@@ -1680,7 +1820,7 @@ export async function sendAndWait(
       );
 
       if (
-        checkpoint >= STUCK_ABORT_MS &&
+        checkpoint >= stuckAbortMs &&
         isProviderStuck(generating, sawResponseText, urlChanged)
       ) {
         log(
@@ -1812,6 +1952,9 @@ export async function sendAndWait(
     // reached your free plan limit") — oprește imediat, cu card clar în chat.
     // Bannerul e SCURT, deci cerem și o limită de lungime: un răspuns normal
     // care doar pomenește „limit reached" nu trebuie confundat cu o eroare.
+    // v2.5.74 (FIX 3): textul vine din ZONA DE CHAT (răspunsul citit), deci
+    // rămâne o dovadă validă — spre deosebire de bannerul de upsell din sidebar,
+    // care nu mai intră deloc în scan (vezi scanProviderErrorText).
     if (isPlanLimitText(currentText) && currentText.length <= 500) {
       const planErr = detectProviderError(
         currentText,

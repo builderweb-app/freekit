@@ -1,0 +1,94 @@
+FIX v2.5.71 — Comportament determinist (ca API) în browser mode.
+
+## Problema
+1. Prompt simplu ("Write a recursive Python function for factorial.")
+   → modelul răspunde cu PLAN (3 instrucțiuni), nu cu cod.
+2. Task de cod → modelul folosește literal "<relative path>" ca path.
+3. Timeout → card direct, fără auto-retry.
+4. Modelul refuză tool-uri sau interpretează greșit.
+
+Cauza: system prompt-ul e IDENTIC pentru orice prompt — îl face pe model
+să creadă mereu că e într-un pipeline de execuție.
+
+## FIX 1 — Intent detection (în chatView.ts)
+La primirea mesajului user, clasifică promptul:
+
+    function classifyPrompt(text: string): 'question' | 'task' {
+      const lower = text.toLowerCase();
+      const taskKeywords = [
+        'fișier', 'fisier', 'creează', 'creeaza', 'modifică', 'modifica',
+        'salvează', 'salveaza', 'șterge', 'sterge', 'rulează', 'ruleaza',
+        'file', 'create', 'edit', 'modify', 'save', 'delete', 'remove',
+        'run', 'install', 'build', 'compile', 'write', 'scrie în', 'scrie in',
+        'adaugă', 'adauga', 'folder', 'director', 'refactor', 'fix', 'repară', 'repara'
+      ];
+      const hasTaskKeyword = taskKeywords.some(k => lower.includes(k));
+      if (hasTaskKeyword || text.length > 300) return 'task';
+      return 'question';
+    }
+
+Log: [chat] prompt classified as: question|task
+
+## FIX 2 — System prompt pentru QUESTION (scurt)
+Dacă classifyPrompt === 'question':
+- NU trimite system prompt-ul cu tool instructions
+- Trimite DOAR acest text:
+
+You are a helpful assistant. Answer the user's question directly with the actual answer. Do NOT use tools. Do NOT give a plan or a list of steps. If the user asks for code, give the code. If the user asks for an explanation, give the explanation.
+
+Log: [chat] using short system prompt (question mode)
+
+## FIX 3 — System prompt pentru TASK (curat)
+Rescrie SYSTEM_PROMPT-ul existent să fie MAI CLAR:
+- Elimină tonul "NEVER REFUSE / you'll have to comply anyway"
+- Adaugă la început:
+
+When the user asks you to create, edit, run, or delete something, use tool calls.
+When the user asks a question, answer directly.
+Follow the tool call format EXACTLY. The "<relative path>" in examples is a placeholder — replace it with a real filename.
+
+- Adaugă la finalul exemplelor:
+
+NOTĂ: "<relative path>", "path/to/file", "<filename>" sunt PLACEHOLDERS.
+Înlocuiește-le cu nume reale (ex: src/foo.ts, factorial.py). NU scrie
+literal "<relative path>".
+
+Log: [chat] using full system prompt (task mode)
+
+## FIX 4 — Placeholder rejection
+Înainte de a executa write_file / edit_file / read_file / delete_file:
+
+    const path = String(args.path ?? '');
+    if (path.includes('<') || path.includes('>') || /relative path|path\/to|<filename>/i.test(path)) {
+      log('tool call rejected: placeholder path detected');
+      return { ok: false, error: 'PATH invalid: "' + path + '". Scrie numele real al fișierului, ex: factorial.py' };
+    }
+
+## FIX 5 — Auto-retry la timeout
+Când stuck-abort sau providerTimeout se declanșează:
+1. NU afișa card imediat
+2. Auto-retry 1× cu prompt: "Previous response timed out. Reply with a shorter answer."
+3. Abia apoi card cu Retry/Switch provider
+Log: [chat] timeout — auto-retry 1/1
+
+## Test
+1. Prompt: "Write a recursive Python function for factorial."
+   → Log: [chat] prompt classified as: question
+   → Log: [chat] using short system prompt (question mode)
+   → Răspuns: cod Python direct (fără plan)
+
+2. Prompt: "Create factorial.py with a recursive function"
+   → Log: [chat] prompt classified as: task
+   → Tool call: write_file cu path="factorial.py"
+
+3. Prompt: "Explain recursion"
+   → question mode → explicație directă
+
+4. Forțează "<relative path>" → respins cu mesaj clar
+
+5. Simulează timeout → auto-retry 1×
+
+## Build
+- Bump 2.5.69 → 2.5.71
+- CHANGELOG
+- compile + package + install

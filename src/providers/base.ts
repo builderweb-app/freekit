@@ -80,18 +80,32 @@ export function providerTimeoutMs(): number {
 
 /**
  * v2.5.60 — DETECȚIE ADAPTIVĂ („providerul lucrează sau e blocat?").
- * La 15s/30s/60s de la trimitere (`STUCK_CHECKPOINTS`): butonul de Stop vizibil
- * (= generează), text de stare thinking/generating/reasoning/stop generating,
- * răspuns nou, URL schimbat (chat nou) — plus scanul de erori de pagină
- * (rate limit / limit reached). La 60s (`STUCK_ABORT_MS`), fără NICIUN semn de
- * viață, abandonăm cu eroare clară — nu se mai așteaptă bugetul întreg (era 300s).
+ * La 15s/30s/60s/90s de la trimitere (`STUCK_CHECKPOINTS`): butonul de Stop
+ * vizibil (= generează), text de stare thinking/generating/reasoning/stop
+ * generating, răspuns nou, URL schimbat (chat nou) — plus scanul de erori de
+ * pagină (rate limit / limit reached). La 90s (`STUCK_ABORT_MS`), fără NICIUN
+ * semn de viață, abandonăm cu eroare clară — nu se mai așteaptă bugetul întreg.
  */
-const STUCK_CHECKPOINTS = [15_000, 30_000, 60_000];
-/** v2.5.60: pragul de la care „zero activitate" = provider blocat. */
-const STUCK_ABORT_MS = 60_000;
+const STUCK_CHECKPOINTS = [15_000, 30_000, 60_000, 90_000];
+/**
+ * v2.5.60: pragul de la care „zero activitate" = provider blocat.
+ * v2.5.70 (FIX 2): 60s era prea agresiv — un model care „gândește" (fără buton
+ * de Stop și fără text de stare în pagină) era abandonat înainte de a apuca să
+ * răspundă. Pragul urcă la 90s, aliniat cu bugetul implicit
+ * (`freekit.providerTimeout` = 90s).
+ */
+const STUCK_ABORT_MS = 90_000;
 
 /**
- * v2.5.60: la 60s, fără buton de Stop / text de stare / răspuns nou și fără
+ * v2.5.70 (FIX 3): promptul de reîncercare automată după un timeout. Înainte de
+ * a arunca eroarea (și de a arăta cardul Retry/Switch) cerem o dată un răspuns
+ * mai scurt, ca modelul să nu mai „gândească" până la expirarea bugetului.
+ */
+const TIMEOUT_RETRY_PROMPT =
+  'Previous response timed out. Reply with a shorter answer.';
+
+/**
+ * v2.5.60: la 90s, fără buton de Stop / text de stare / răspuns nou și fără
  * URL schimbat → providerul e blocat.
  */
 export function isProviderStuck(
@@ -1376,10 +1390,10 @@ export async function sendAndWait(
   }
   /**
    * v2.5.60 — DETECȚIE ADAPTIVĂ („providerul lucrează sau e blocat?"):
-   * `stuckIndex` = următorul checkpoint (15s/30s/60s); `lastUrlSeen` = URL-ul
+   * `stuckIndex` = următorul checkpoint (15s/30s/60s/90s); `lastUrlSeen` = URL-ul
    * dinainte de Enter, actualizat la fiecare verificare (o schimbare între
    * verificări = chat/răspuns nou); `sawResponseText` = am citit deja text REAL
-   * de răspuns (post-ecou). La 60s, fără niciunul dintre semnale → eroare clară.
+   * de răspuns (post-ecou). La 90s, fără niciunul dintre semnale → eroare clară.
    */
   let stuckIndex = 0;
   let lastUrlSeen = page.url();
@@ -1461,6 +1475,61 @@ export async function sendAndWait(
   };
 
   /**
+   * v2.5.70 (FIX 3) — AUTO-RETRY după un timeout. Înainte de a arunca eroarea
+   * (și de a arăta cardul Retry/Switch), o SINGURĂ dată îi cerem modelului un
+   * răspuns mai scurt și așteptăm din nou bugetul întreg. Un chat rămas agățat
+   * sau un model care „gândește" peste buget primește astfel o a doua șansă
+   * fără intervenția utilizatorului. Întoarce `true` când am retrimis
+   * (apelantul face `continue` în buclă), `false` când reîncercarea a fost deja
+   * consumată.
+   */
+  let timeoutRetried = false;
+  const autoRetryAfterTimeout = async (reason: string): Promise<boolean> => {
+    if (timeoutRetried) return false;
+    timeoutRetried = true;
+    // v2.5.71 FIX 5: log-ul cerut de spec, în canalul chat.
+    logLine('chat', 'timeout — auto-retry 1/1');
+    log(
+      label + ': ' + reason + ' — auto-retry 1/1 with a shorter-answer request'
+    );
+    cfg.onNotice?.(
+      '🔁 No response from ' + label + ' (' + reason +
+        ') — retrying once: asking the model for a shorter answer.'
+    );
+    sentText = TIMEOUT_RETRY_PROMPT;
+    // buclă nouă: sentinelele repornesc, ca răspunsul reîncercării să fie
+    // detectat ca răspuns NOU și checkpoint-urile să pornească de la zero
+    try {
+      input = await composeAndSend(sentText);
+    } catch (e: any) {
+      if ((e?.message ?? String(e)) === '__ABORTED__') throw e;
+      // nu am putut nici măcar retrimite (input dispărut, Enter blocat) →
+      // lăsăm apelantul să raporteze timeout-ul original, nu o eroare nouă
+      log(
+        label + ': retry message could not be sent — ' +
+          (e?.message ?? String(e))
+      );
+      return false;
+    }
+    beforeText = await readResponse(responseSelectors);
+    beforeFallbackText = await readResponse(responseSelectors, true);
+    beforeCount = await countAssistantResponses(page, responseSelectors);
+    previousText = '';
+    lastChangeAt = Date.now();
+    sawNewResponse = false;
+    sawResponseText = false;
+    stuckIndex = 0;
+    lastUrlSeen = page.url();
+    healIndex = 0;
+    lastErrorCheckpoint = 0;
+    enterRetried = false;
+    lastStreamAt = 0;
+    started = Date.now();
+    log(label + ': retry message sent, waiting for the response...');
+    return true;
+  };
+
+  /**
    * v2.5.60: RESCUE — ultima șansă înainte de timeout/abort: extragere
    * generică (fallback) a ultimului răspuns; întoarce textul doar dacă arată
    * ca un răspuns real (nu ecou, suficient de lung, diferit de starea dinainte
@@ -1523,6 +1592,36 @@ export async function sendAndWait(
       }
       if (pageError) throwProviderError(providerId, pageError, page);
 
+      // v2.5.70 (FIX 3): înainte de a renunța, o singură reîncercare automată
+      // cu cerere de răspuns mai scurt — cardul Retry/Switch vine abia după ea.
+      if (await autoRetryAfterTimeout('no response within the budget')) continue;
+
+      // v2.5.70 (FIX 2): bugetul s-a consumat. Cu pragul de „stuck" urcat la
+      // 90s (= bugetul implicit), checkpoint-ul nu mai apucă să ruleze înaintea
+      // acestei ramuri — dacă pagina nu arată NICIUN semn de activitate,
+      // raportăm „provider stuck" (card Retry/Switch) în loc de un timeout sec.
+      if (
+        isProviderStuck(
+          await providerWorking(page, providerId),
+          sawResponseText,
+          page.url() !== lastUrlSeen
+        )
+      ) {
+        log(
+          label +
+            ': no activity at the end of the budget — reporting provider stuck'
+        );
+        throwProviderError(
+          providerId,
+          {
+            kind: 'no_response',
+            message:
+              'no response after ' + Math.round(hardTimeoutMs / 1000) + 's'
+          },
+          page
+        );
+      }
+
       throw new Error(
         'Timeout: no stable response from ' + label + ' after ' +
           Math.round(hardTimeoutMs / 1000) + 's.'
@@ -1543,13 +1642,14 @@ export async function sendAndWait(
 
     const elapsed = Date.now() - started;
 
-    // v2.5.60 — DETECȚIE ADAPTIVĂ: la 15s/30s/60s verificăm dacă providerul dă
-    // vreun semn de viață (buton de Stop vizibil, text de stare
+    // v2.5.60 — DETECȚIE ADAPTIVĂ: la 15s/30s/60s/90s verificăm dacă providerul
+    // dă vreun semn de viață (buton de Stop vizibil, text de stare
     // thinking/generating/reasoning/stop generating, răspuns nou sau URL
-    // schimbat) ori afișează un banner de „rate limit”/„limit reached”. La 60s
-    // fără NIMIC: rescue (poate răspunsul există dar nu e selectat) și apoi
-    // eroare clară de „provider stuck” — nu mai așteptăm bugetul întreg (era
-    // 300s; testul din 8 Oct: 5 minute pierdute).
+    // schimbat) ori afișează un banner de „rate limit”/„limit reached”. La 90s
+    // (v2.5.70: era 60s) fără NIMIC: rescue (poate răspunsul există dar nu e
+    // selectat), o reîncercare automată și apoi eroare clară de „provider
+    // stuck” — nu mai așteptăm bugetul întreg (era 300s; testul din 8 Oct:
+    // 5 minute pierdute).
     if (
       stuckIndex < STUCK_CHECKPOINTS.length &&
       elapsed >= STUCK_CHECKPOINTS[stuckIndex]
@@ -1590,9 +1690,13 @@ export async function sendAndWait(
         const rescued = await rescueRead();
         if (rescued.kind === 'restart') continue;
         if (rescued.kind === 'reply') return rescued.text;
+        // v2.5.70 (FIX 3): o singură reîncercare automată înainte de card.
+        if (await autoRetryAfterTimeout('no activity for ' + seconds + 's')) {
+          continue;
+        }
         throwProviderError(
           providerId,
-          { kind: 'no_response', message: 'no response after 60s' },
+          { kind: 'no_response', message: 'no response after ' + seconds + 's' },
           page
         );
       }

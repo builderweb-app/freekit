@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.5.69",
+  "version": "2.5.71",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -234,7 +234,7 @@
           "default": 90,
           "minimum": 10,
           "maximum": 1800,
-          "markdownDescription": "How long (seconds, 10–1800) to wait for one response from the web chat (ChatGPT/Claude/Gemini/DeepSeek/Mistral/Qwen). Default **90** (replaces the old `freekit.responseTimeoutMs`, which waited 300s; there is no backwards compatibility). While the provider shows it is working (Stop button, thinking/generating/reasoning/stop generating text, a new/growing answer, or a changed URL) the wait continues up to this budget; at 60s with **no sign of activity at all** Freekit stops early with `[<provider>] no response after 60s — provider stuck, try again or switch.` At expiry it still makes a last-chance read of the assistant bubble and returns it when it looks like a real answer; long answers that contain a whole file can take minutes — raise this only if you see such timeouts."
+          "markdownDescription": "How long (seconds, 10–1800) to wait for one response from the web chat (ChatGPT/Claude/Gemini/DeepSeek/Mistral/Qwen). Default **90** (replaces the old `freekit.responseTimeoutMs`, which waited 300s; there is no backwards compatibility). While the provider shows it is working (Stop button, thinking/generating/reasoning/stop generating text, a new/growing answer, or a changed URL) the wait continues up to this budget; at 90s with **no sign of activity at all** Freekit first retries **once** with `Previous response timed out. Reply with a shorter answer.` and, if that also gets nothing, stops with `[<provider>] no response after 90s — provider stuck, try again or switch.` At expiry it still makes a last-chance read of the assistant bubble and returns it when it looks like a real answer; long answers that contain a whole file can take minutes — raise this only if you see such timeouts."
         },
         "freekit.cdpPort": {
           "type": "number",

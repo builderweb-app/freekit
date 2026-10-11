@@ -181,6 +181,77 @@ const log = (msg: string) => logLine('chat', msg);
 // FAZA III (E): bucla agentică — 40 de pași per mesaj
 const MAX_ITERATIONS = 40;
 
+/* =========================================================================
+ * v2.5.71 FIX 1/2 — INTENT DETECTION (comportament determinist, „ca un API")
+ * System prompt-ul era IDENTIC pentru orice prompt, deci modelul credea mereu
+ * că e într-un pipeline de execuție: la „Write a recursive Python function for
+ * factorial." răspundea cu un PLAN de 3 instrucțiuni în loc de cod. Clasificăm
+ * promptul (question = vrei un răspuns în chat, task = vrei ceva pe disc) și
+ * trimitem promptul potrivit.
+ * ========================================================================= */
+
+/** v2.5.71 FIX 1: cuvinte care semnalează o ACȚIUNE pe disc (nu o întrebare). */
+const TASK_KEYWORDS = [
+  'fișier', 'fisier', 'creează', 'creeaza', 'modifică', 'modifica',
+  'salvează', 'salveaza', 'șterge', 'sterge', 'rulează', 'ruleaza',
+  'file', 'create', 'edit', 'modify', 'save', 'delete', 'remove',
+  'run', 'install', 'build', 'compile', 'scrie în', 'scrie in',
+  'adaugă', 'adauga', 'folder', 'director', 'refactor', 'fix', 'repară', 'repara'
+];
+
+/**
+ * v2.5.71 FIX 1: „write" / „scrie" SINGURE nu fac dintr-un prompt un task —
+ * „Write a recursive Python function for factorial." cere cod ÎN CHAT, nu un
+ * fișier scris. Devenin task doar împreună cu o țintă de tip fișier/cale.
+ */
+const WRITE_VERBS = ['write', 'scrie'];
+
+/** v2.5.71 FIX 1: o cale, un nume cu extensie cunoscută sau un fișier/folder. */
+const FILE_TARGET_RE = new RegExp(
+  '(?:[^\\s/\\\\]+[\\\\/][^\\s]*)' +
+    '|\\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|txt|py|rb|go|rs|java|kt|cs|cpp|c|h|hpp|css|scss|html|htm|xml|yml|yaml|toml|ini|sh|ps1|bat|sql|php|astro|vue|svelte|csv|log)\\b' +
+    '|\\b(?:fișier|fisier|file|folder|director|directory)\\b',
+  'i'
+);
+
+/**
+ * v2.5.71 FIX 1: potrivire doar la început de cuvânt — `includes` simplu (cum
+ * era în schița spec-ului) declanșa pe „prefix" („fix"), „profile" („file").
+ */
+function matchKeyword(lower: string, keyword: string): boolean {
+  const at = lower.indexOf(keyword);
+  if (at < 0) return false;
+  return at === 0 || !/[\p{L}\p{N}_]/u.test(lower[at - 1]);
+}
+
+/**
+ * v2.5.71 FIX 1: clasifică promptul utilizatorului.
+ *  - `task`     = vrea ceva FĂCUT (fișier scris, comandă rulată, cod modificat);
+ *  - `question` = vrea un RĂSPUNS în chat (cod, explicație, opinie).
+ * Prompturile lungi (> 300 de caractere) sunt considerate task (ca în spec).
+ */
+export function classifyPrompt(text: string): 'question' | 'task' {
+  const lower = text.toLowerCase();
+  const hasTaskKeyword = TASK_KEYWORDS.some((k) => matchKeyword(lower, k));
+  const hasWriteVerb = WRITE_VERBS.some((k) => matchKeyword(lower, k));
+  if (hasTaskKeyword || (hasWriteVerb && FILE_TARGET_RE.test(text))) {
+    return 'task';
+  }
+  if (text.length > 300) return 'task';
+  return 'question';
+}
+
+/**
+ * v2.5.71 FIX 2: promptul SCURT folosit în question mode — fără instrucțiuni de
+ * unelte, fără plan, fără exemplul de marker (acelea fac modelul să creadă că
+ * trebuie să emită acțiuni în loc să răspundă la întrebare).
+ */
+export const QUESTION_SYSTEM_PROMPT =
+  "You are a helpful assistant. Answer the user's question directly with " +
+  'the actual answer. Do NOT use tools. Do NOT give a plan or a list of steps. ' +
+  'If the user asks for code, give the code. ' +
+  'If the user asks for an explanation, give the explanation.';
+
 /**
  * v2.5.48: câte rezultate de unealtă se lipesc în ACELAȘI chat web înainte de a
  * porni proactiv un chat nou (cu handoff). Fiecare rezultat e un paste mare;
@@ -1854,6 +1925,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ? msg.msgId
         : 'auto' + Date.now().toString(36);
     log((isRetry ? 'retry message: ' : 'user message: ') + userText.slice(0, 60));
+    // v2.5.71 FIX 1/2: question (răspuns direct, prompt scurt, fără unelte) vs
+    // task (pipeline-ul cu unelte, ca înainte). Classificarea se face o singură
+    // dată per mesaj; un Retry retrimite același text, deci aceeași clasă.
+    const promptKind = classifyPrompt(userText);
+    log('prompt classified as: ' + promptKind);
+    log(
+      promptKind === 'question'
+        ? 'using short system prompt (question mode)'
+        : 'using full system prompt (task mode)'
+    );
 
     // v2.4.1: Restricted Mode nu mai blochează tot chat-ul — modelul poate citi
     // și răspunde; doar uneltele care scriu/rulează sunt refuzate la execuție
@@ -2056,8 +2137,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       // v1.1.0: uneltele MCP disponibile se adaugă la prompt (listă dinamică,
       // mai scurtă pentru modelele locale)
       // v2.5.49 (FIX 3): plan înainte de execuție (se cere o dată per mesaj)
-      const planSection = this.planFirstEnabled() ? this.planPromptSection() : '';
+      const planSection =
+        this.planFirstEnabled() && promptKind === 'task'
+          ? this.planPromptSection()
+          : '';
+      /**
+       * v2.5.71 FIX 2: în question mode NU trimitem nimic din partea de unelte
+       * (PROJECT INFO / PROJECT STRUCTURE, MCP, exemplul de marker, plan) — doar
+       * atașamentele (dacă există), handoff-ul de provider și mesajul userului.
+       */
+      const questionBlock = () =>
+        (attachBlock ? '\n\n---\nATTACHMENTS:\n' + attachBlock : '') +
+        (crossProviderHandoff
+          ? '\n\n---\nTASK HANDOFF (provider switch):\n' + crossProviderHandoff
+          : '') +
+        '\n\n---\nUSER MESSAGE:\n' + userText;
       const messageFor = (p: AIProvider) => {
+        // v2.5.71 FIX 2: întrebare simplă → DOAR promptul scurt (modelul
+        // răspunde direct, nu încearcă să emită unelte / un plan).
+        if (promptKind === 'question') {
+          return QUESTION_SYSTEM_PROMPT + questionBlock();
+        }
         const mcpSection = mcp.promptSection(!!p.local);
         let prompt = p.local ? SYSTEM_PROMPT_LOCAL : SYSTEM_PROMPT;
         if (
@@ -2250,8 +2350,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       /**
        * v2.5.49 (FIX 3): planul se cere o singură dată per mesaj (la început);
        * `planHandled` = planul a fost deja afișat și aprobat.
+       * v2.5.71 FIX 2: în question mode planul nu se cere deloc — utilizatorul
+       * vrea răspunsul, nu un plan de execuție.
        */
-      let planRequested = this.planFirstEnabled();
+      let planRequested = this.planFirstEnabled() && promptKind === 'task';
       let planHandled = false;
       /**
        * v2.5.48: când un `write_file` / `write_files` chiar a reușit dar a
@@ -2390,7 +2492,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           // specified are not available in this session", „I can't access the
           // workspace") — de obicei providerul nu era complet logat la
           // trimitere. NU e răspuns final: o singură reluare cu nudge explicit.
-          if (refusalRetries < MAX_REFUSAL_RETRIES && looksLikeToolRefusal(aiReply)) {
+          // v2.5.71 FIX 2: în question mode răspunsul direct e RĂSPUNSUL — nu-l
+          // transformăm în tool call prin nudge-uri de protocol (plan, refuz,
+          // text-în-loc-de-tool, tool call malformat).
+          if (
+            promptKind === 'task' &&
+            refusalRetries < MAX_REFUSAL_RETRIES &&
+            looksLikeToolRefusal(aiReply)
+          ) {
             refusalRetries++;
             log(
               'tool refusal — auto-retry ' +
@@ -2419,6 +2528,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           // nudge-ul „răspunde cu JSON" (care repeta exact formatul eșuat) —
           // merge direct pe nudge-ul de format marker (ramura de mai jos).
           if (
+            promptKind === 'task' &&
             textRetries < MAX_TEXT_RETRIES &&
             looksLikeIntentOnly(aiReply) &&
             !looksLikeToolCallAttempt(aiReply)
@@ -2451,7 +2561,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           // v2.4.8: răspunsul e o ÎNCERCARE de tool call pe care extractorul
           // n-o poate recupera (JSON trunchiat, ghilimele neescapate) — în loc
           // să afișăm JSON-ul brut ca răspuns final, dăm o eroare clară.
-          if (looksLikeToolCallAttempt(aiReply)) {
+          if (promptKind === 'task' && looksLikeToolCallAttempt(aiReply)) {
             // v2.5.3 FIX 7: mai întâi o reluare cu un nudge explicit
             // (DeepSeek ecouază promptul și strivește conținutul pe o linie) —
             // abia dacă și următoarele încercări sunt malformate afișăm eroarea.

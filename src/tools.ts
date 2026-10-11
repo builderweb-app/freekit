@@ -1266,6 +1266,13 @@ export function isDivergentFromPrompt(
  * few-shot cu replicile clientului. Parserul acceptă AMBELE forme
  * (`ACTION:` / `TOOL:`, `{"action":...}` / `{"tool":...}`) — vezi
  * src/toolCallParser.ts.
+ * v2.5.71 (FIX 3): blocul „CRITICAL: NEVER REFUSE" a fost ELIMINAT — tonul
+ * („you'll have to comply anyway") făcea modelul să creadă că e obligat să
+ * emită acțiuni pentru ORICE prompt. În locul lui, o instrucțiune neutră de tip
+ * API (tool calls pentru acțiuni, răspuns direct pentru întrebări) plus
+ * avertismentul că „<relative path>"/"<filename>" din exemple sunt PLACEHOLDERS
+ * care trebuie înlocuite cu nume reale. Refuzurile rămase sunt prinse de
+ * auto-retry-ul „tool refusal" din chatView (MAX_REFUSAL_RETRIES).
  * ========================================================================= */
 
 /**
@@ -1301,14 +1308,9 @@ you emit an action, Freekit executes it and returns the result. This
 is a standard function-calling pattern (like OpenAI function calling
 API).
 
-CRITICAL: NEVER REFUSE
-- NEVER say "I don't have tools"
-- NEVER say "the tools aren't available"
-- NEVER say "I can't access the workspace"
-- NEVER say "I'm just a chatbot"
-- NEVER say "the files are not exposed"
-You ARE in a pipeline. The client executes your output.
-If you refuse, Freekit will nudge you and you'll have to comply anyway.
+When the user asks you to create, edit, run, or delete something, use tool calls.
+When the user asks a question, answer directly.
+Follow the tool call format EXACTLY. The "<relative path>" in examples is a placeholder — replace it with a real filename.
 ${ENV_SECTION}
 Format:
 For READS (read_file, list_files, search_files, run_command, run_npm):
@@ -1551,6 +1553,10 @@ END_NEW_TEXT
 
 USER: "run the tests"
 YOU: {"action":"run_npm","args":{"action":"script","script":"test"}}
+
+NOTĂ: "<relative path>", "path/to/file", "<filename>" sunt PLACEHOLDERS.
+Înlocuiește-le cu nume reale (ex: src/foo.ts, factorial.py). NU scrie
+literal "<relative path>".
 
 ## STRICT RULES
 - Your first response to an action request is ALWAYS an action (marker format for file writes, JSON otherwise).
@@ -1857,6 +1863,63 @@ export function isToolTrustRequired(tool: string, args?: Record<string, any>): b
   return false;
 }
 
+/* =========================================================================
+ * v2.5.70 FIX 1 — PLACEHOLDER PATH în argumentele uneltelor de fișiere
+ * Un model „blocat" își scrie calea ca placeholder literal („<relative path>",
+ * „path/to/file.ts") în loc de numele real al fișierului. Apelul ajungea la
+ * aprobare, auto-approve-ul îl bloca (cale în afara scope-ului task-ului), iar
+ * modelul rămânea în așteptare până la timeout. Îl respingem ÎNAINTE de
+ * execuție și îi spunem exact ce cale să scrie.
+ * ========================================================================= */
+const PLACEHOLDER_PATH_TOOLS = new Set([
+  'read_file',
+  'read_files',
+  'write_file',
+  'write_files',
+  'edit_file',
+  'delete_file'
+]);
+
+/**
+ * v2.5.71 FIX 4: orice `<…>` plus placeholder-ele din exemplele promptului
+ * („relative path", „path/to", „<filename>") — modelul le copiază literal.
+ */
+const PLACEHOLDER_PATH_RE = /[<>]|relative path|path\/to|<filename>/i;
+
+/** Căile declarate de un apel: `path`, `paths[]` (read_files) sau `files[].path` (write_files). */
+function declaredPaths(call: ToolCall): string[] {
+  const args = (call.args ?? {}) as Record<string, any>;
+  if (call.tool === 'read_files') {
+    return Array.isArray(args.paths) ? args.paths.map((p: any) => String(p)) : [];
+  }
+  if (call.tool === 'write_files') {
+    return Array.isArray(args.files)
+      ? args.files.map((f: any) => String(f?.path ?? ''))
+      : [];
+  }
+  return [String(args.path ?? '')];
+}
+
+/**
+ * v2.5.70 FIX 1: mesajul trimis modelului dacă unul dintre argumentele de cale
+ * e un placeholder (conține `<`/`>` ori textele „relative path" / „path/to").
+ * `null` = nicio problemă, apelul poate fi executat.
+ */
+export function placeholderPathError(call: ToolCall): string | null {
+  if (!PLACEHOLDER_PATH_TOOLS.has(String(call.tool ?? ''))) return null;
+  for (const raw of declaredPaths(call)) {
+    const p = raw.trim();
+    if (!p) continue;
+    if (PLACEHOLDER_PATH_RE.test(p)) {
+      return (
+        'PATH invalid: "' + p +
+        '". Scrie numele real al fișierului, ex: factorial.py'
+      );
+    }
+  }
+  return null;
+}
+
 export async function executeTool(
   call: ToolCall,
   workspaceRoot: string,
@@ -1869,6 +1932,21 @@ export async function executeTool(
    *  necesare doar pentru `screenshot` / `compare_visual`. */
   visual?: VisualToolContext
 ): Promise<ToolResult> {
+  // v2.5.70 FIX 1 (v2.5.71 FIX 4): cale-placeholder („<relative path>") →
+  // respingem apelul înainte de aprobare / diff / execuție, ca modelul să fie
+  // corectat, nu blocat.
+  const badPath = placeholderPathError(call);
+  if (badPath) {
+    log('tool call rejected: placeholder path detected');
+    return {
+      ok: false,
+      error: badPath,
+      // fără el, refuzul s-ar vedea doar în Output → Freekit
+      userNotice:
+        '🚫 ' + call.tool +
+        ' rejected: the model sent a placeholder path — asking it for the real file name.'
+    };
+  }
   log('executing tool: ' + call.tool);
   // v2.5.27 (bug #63): dacă AI-ul trimite calea-alias `.ts.txt` (cea pe care a
   // văzut-o la citire), o traducem înapoi în calea reală ÎNAINTE de aprobare,

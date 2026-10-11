@@ -108,7 +108,8 @@ Freekit connects to your **existing web AI sessions** via browser automation:
 2. You log in **once** to each provider (session is saved)
 3. Freekit types messages with **human-like keystrokes** (real keydown/keyup, random delays)
 4. It reads the AI response and renders it in the VS Code sidebar
-5. File changes appear as **native VS Code diffs** — accept or reject each one from the card in the chat
+5. Every message is **classified before it is sent** → a **question** gets a direct answer (short prompt: *no tools, no plan*), a **task** gets the agentic tool pipeline (log: `[chat] prompt classified as: question|task`)
+6. File changes appear as **native VS Code diffs** — accept or reject each one from the card in the chat
 
 Everything is local. No middle server. No data sent to third parties.
 
@@ -174,7 +175,7 @@ Additional safeguards:
 | `freekit.cdpPort` | `9222` | CDP port used to launch / connect Chrome |
 | `freekit.chromePath` | *(empty)* | Manual Chrome/Edge path (empty = auto-detect) |
 | `freekit.messageTimeoutMinutes` | `20` | Total time budget for one agentic message |
-| `freekit.providerTimeout` | `90` | Seconds to wait for one response from the web chat (10–1800 s; replaces the old `freekit.responseTimeoutMs`, default 300 s — no backwards compatibility). The page is probed at 15 s / 30 s / 60 s — while the provider shows it is working (Stop button, thinking/generating/reasoning/stop generating text, a new answer, a changed URL) the wait continues up to this budget; at 60 s with no sign of activity Freekit stops early with `[<provider>] no response after 60s — provider stuck, try again or switch.` Each check logs `[stuck-check] <Provider> @15s: generating=…, response=…, urlChanged=…` |
+| `freekit.providerTimeout` | `90` | Seconds to wait for one response from the web chat (10–1800 s; replaces the old `freekit.responseTimeoutMs`, default 300 s — no backwards compatibility). The page is probed at 15 s / 30 s / 60 s / 90 s — while the provider shows it is working (Stop button, thinking/generating/reasoning/stop generating text, a new answer, a changed URL) the wait continues up to this budget; at 90 s with no sign of activity Freekit retries **once** with `Previous response timed out. Reply with a shorter answer.` and only then stops with `[<provider>] no response after 90s — provider stuck, try again or switch.` Each check logs `[stuck-check] <Provider> @15s: generating=…, response=…, urlChanged=…` |
 | `freekit.autoVerify` | `true` | Check the project after every file write (`astro check` / `tsc --noEmit` / `build`); failures are parsed and root-caused, the AI gets a compact diagnostic + the exact fix and must answer with one `edit_file` (band-aids like `?.` on `.map()`, `|| []`, `if (!x) return` are rejected). Up to 3 repair cycles, then an automatic rollback to the last verified state. Every session is reported to `docs/diagnostics/<timestamp>.md` |
 | `freekit.screenshotOpenMode` | `preview` | How a `screenshot` / `compare_visual` capture is opened (`preview` = preview tab, `beside` = new editor column, `none` = only saved). `compare_visual` always opens the two PNGs side by side. Chrome is always returned to the background after a capture |
 | `freekit.promptCheckpoints` | `true` | Create a git checkpoint before every prompt and show the ⟲ restore button on each user message |

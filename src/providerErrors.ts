@@ -26,10 +26,12 @@ export interface ProviderError {
     /** v2.5.31 (bug #73): providerul (local) a căzut în timpul sesiunii. */
     | 'provider_down'
     /**
-     * v2.5.60: providerul e BLOCAT — la 60s de la trimitere nu există niciun
+     * v2.5.60: providerul e BLOCAT — la 90s de la trimitere nu există niciun
      * semn de activitate (fără thinking/generating/spinner, fără răspuns nou,
      * fără schimbare de URL). Detecția adaptivă din `sendAndWait` abandonează
      * devreme, în loc să aștepte tot bugetul (era 300s).
+     * v2.5.70 (FIX 2): pragul urcă de la 60s la 90s — 60s era prea agresiv
+     * pentru un model care încă „gândește".
      */
     | 'no_response'
     | 'unknown';
@@ -320,8 +322,10 @@ export function providerErrorMessage(
       );
     case 'no_response':
       // v2.5.60: mesajul cerut de spec — diagnostice clare, nu un timeout sec.
+      // v2.5.70 (FIX 2): pragul de „provider blocat" urcă de la 60s la 90s,
+      // aliniat cu bugetul implicit (`freekit.providerTimeout`).
       return (
-        '[' + name + '] no response after 60s — provider stuck, try again or switch.'
+        '[' + name + '] no response after 90s — provider stuck, try again or switch.'
       );
     case 'model_missing':
       return (

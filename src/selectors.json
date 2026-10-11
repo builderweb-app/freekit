@@ -160,8 +160,15 @@
         }
       },
       "newChat": {
-        "primary": "button[aria-label*='new chat' i]",
-        "alternatives": ["a[href='/new']", "button[aria-label*='chat nou' i]"],
+        "primary": "a[href='/new']",
+        "alternatives": [
+          "nav a[href='/new']",
+          "aside a[href='/new']",
+          "[data-testid='new-chat-button']",
+          "button:has(svg[aria-label='New chat'])",
+          "button[aria-label*='new chat' i]",
+          "button[aria-label*='chat nou' i]"
+        ],
         "fingerprint": {
           "tags": ["button", "a"],
           "nearbyText": ["New chat", "Chat nou"],

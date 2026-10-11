@@ -130,7 +130,16 @@ export const INTERACTIVE_FILTER = [
   '[aria-label*="message" i]',
   '[aria-label*="chat" i]',
   '[aria-label*="prompt" i]',
-  '[aria-label*="input" i]'
+  '[aria-label*="input" i]',
+  // v2.5.75 (FIX 3): butonul „New chat" al Claude e un LINK din sidebar
+  // (<a href="/new">) — fără ancorele din nav/aside/header (v2.5.75 FIX 1:
+  // „Claude nu are selector stabil pentru butonul New chat"), AI Finder-ul nu-l
+  // vedea deloc în snapshot.
+  'nav a[href]',
+  'aside a[href]',
+  'header a[href]',
+  '[role="navigation"] a[href]',
+  '[role="complementary"] a[href]'
 ].join(', ');
 
 /** Câți candidați interacți încăpem în prompt (restul e zgomot). */
@@ -455,6 +464,9 @@ async function probeInputCandidates(
         'name',
         'type',
         'role',
+        // v2.5.75 (FIX 3): href-ul e atributul stabil al linkurilor din sidebar
+        // (Claude „New chat" → a[href="/new"])
+        'href',
         'aria-label',
         'placeholder',
         'data-testid',
@@ -647,6 +659,12 @@ export interface DomCaptureOptions {
    * paginii. Analiza AI nu îl folosește niciodată.
    */
   full?: boolean;
+  /**
+   * v2.5.75 (FIX 3): adaugă lista linkurilor/butoanelor din nav/aside/header
+   * (sidebar-ul), cu selectorul stabil sugerat — folosit când se caută
+   * `newChat`, unde butonul e adesea un link de navigație.
+   */
+  sidebarHints?: boolean;
 }
 
 /**
@@ -682,9 +700,58 @@ export async function captureCleanDom(page: Page, opts: DomCaptureOptions = {}):
     ', in DOM order):\n' +
     (lines.join('\n') || '(none)');
 
-  const budget = Math.max(2000, DOM_MAX_CHARS - candidates.length);
+  // v2.5.75 (FIX 3): pentru `newChat` trimitem EXPLICIT sidebar-ul/navul — la
+  // Claude butonul e un link (<a href="/new">) ascuns între zeci de linkuri de
+  // conversații, iar modelul îl rata. Lista de mai jos e scurtă și conține doar
+  // linkuri/botoane din nav/aside/header, cu selectorul stabil sugerat.
+  let sidebar = '';
+  if (opts.sidebarHints) {
+    try {
+      const hints = await page.evaluate(() => {
+        const out: string[] = [];
+        const nodes = Array.prototype.slice.call(
+          document.querySelectorAll(
+            'nav a[href], aside a[href], header a[href], [role="navigation"] a[href], ' +
+              'nav button, aside button, header button'
+          )
+        ) as Element[];
+        for (const el of nodes) {
+          if (out.length >= 12) break;
+          const r = el.getBoundingClientRect();
+          if (r.width < 8 || r.height < 8) continue;
+          const tag = el.tagName.toLowerCase();
+          const href = el.getAttribute('href') || '';
+          const aria = el.getAttribute('aria-label') || '';
+          const testid = el.getAttribute('data-testid') || '';
+          const text = ((el as HTMLElement).innerText || '').replace(/\s+/g, ' ').trim();
+          const suggestions: string[] = [];
+          if (href && href.length <= 120) suggestions.push(tag + '[href="' + href + '"]');
+          if (aria) suggestions.push(tag + '[aria-label="' + aria + '"]');
+          if (testid) suggestions.push(tag + '[data-testid="' + testid + '"]');
+          if (!suggestions.length) continue;
+          out.push(
+            '-' + tag + (href ? ' href="' + href.slice(0, 60) + '"' : '') +
+              (aria ? ' aria-label="' + aria.slice(0, 60) + '"' : '') +
+              (text ? ' text="' + text.slice(0, 60) + '"' : '') +
+              ' => ' + suggestions.join(' | ')
+          );
+        }
+        return out;
+      });
+      if (hints.length) {
+        sidebar =
+          '\n\nSIDEBAR / NAV LINKS (navigation chrome, in DOM order — the "new chat" ' +
+          'button of a SPA is usually one of these):\n' + hints.join('\n');
+      }
+    } catch {
+      /* fără hint-uri — promptul rămâne cel normal */
+    }
+  }
+
+  const budget = Math.max(2000, DOM_MAX_CHARS - candidates.length - sidebar.length);
   let out =
     candidates +
+    sidebar +
     '\n\nFILTERED DOM (only those candidates, their ancestors' +
     (includeText ? ' and text blocks' : '') +
     '; noise removed):\n' +
@@ -1457,7 +1524,12 @@ async function runFindSelectorsWithAI(
   try {
     // v2.5.41 (bug #96): textul conversației se păstrează doar când căutăm
     // containerul de răspuns — la input/butoane e exact zgomotul care strică.
-    dom = await captureCleanDom(page, { includeText: wanted.indexOf('response') >= 0 });
+    // v2.5.75 (FIX 3): pentru `newChat` adăugăm explicit sidebar-ul (linkul
+    // „New chat" al Claude stă acolo, între linkurile de conversații).
+    dom = await captureCleanDom(page, {
+      includeText: wanted.indexOf('response') >= 0,
+      sidebarHints: wanted.indexOf('newChat') >= 0
+    });
   } catch (e: any) {
     log('captura DOM a eșuat: ' + (e?.message ?? String(e)));
     return null;
@@ -3004,14 +3076,18 @@ export function saveUserSelectors(): void {
     // v2.5.65 (FIX 4): și reparațiile prin fingerprint ajung în fișier — altfel
     // un selector găsit de „deferred repair" trăia doar în memorie/globalState
     // și dispărea din `selectors-user.json` (deși funcționa).
-    if (item.how !== 'ai' && item.how !== 'fingerprint') continue;
+    // v2.5.75 (FIX 2): fallback-urile fragile (poziționale) se persistă separat
+    // (`fragile: true`), ca să nu fie confundate cu o reparație stabilă și să
+    // rămână la coada candidaților la reîncărcare.
+    if (item.how !== 'ai' && item.how !== 'fingerprint' && item.how !== 'fragile') continue;
     if (!providers[item.provider]) providers[item.provider] = {};
     providers[item.provider][item.slot] = {
       selector: item.selector,
       how: item.how,
       at: item.at,
       confidence: item.confidence,
-      reasoning: item.reasoning
+      reasoning: item.reasoning,
+      ...(item.how === 'fragile' ? { fragile: true } : {})
     };
     count++;
   }
@@ -3158,6 +3234,15 @@ function loadUserSelectorsFromDisk(): void {
           if (selectors.learnLocked(pid, slot, sel)) loaded++;
           continue;
         }
+        // v2.5.75 (FIX 2): fallback-urile fragile se reîncarcă prin learnFallback()
+        // (nu prin `learn()`, care respinge intenționat selectorii poziționali)
+        if (entry && typeof entry === 'object' && entry.fragile === true) {
+          if (selectors.learnFallback(pid, slot, sel.trim())) {
+            loaded++;
+            auto++; // e o intrare automată (nu o selecție manuală) — vezi logul de mai jos
+          }
+          continue;
+        }
         const meta2 =
           entry && typeof entry === 'object'
             ? { confidence: Number(entry.confidence), reasoning: String(entry.reasoning || '') }
@@ -3285,7 +3370,15 @@ function runSelectorMigration(version: string): void {
     for (const slot of SLOTS) {
       const learned = selectors.learned(pid, slot);
       if (!learned || learned.locked) continue;
-      if (!force && !looksLikeInvalidAutoSelector(slot, learned.selector)) continue;
+      // v2.5.75 (FIX 2): un fallback FRAGIL e ultima plasă de siguranță a
+      // slotului (ex: butonul „New chat" al Claude fără href/aria-label) —
+      // „resetarea forțată" la update de versiune l-ar lăsa iar fără selector.
+      // Rămâne totuși la coada candidaților, iar dacă e structural invalid cade.
+      if (learned.how === 'fragile') {
+        if (!looksLikeInvalidAutoSelector(slot, learned.selector)) continue;
+      } else if (!force && !looksLikeInvalidAutoSelector(slot, learned.selector)) {
+        continue;
+      }
       if (selectors.forget(pid, slot)) {
         count++;
         (removed[pid] = removed[pid] || []).push(slot);

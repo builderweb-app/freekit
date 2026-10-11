@@ -93,7 +93,7 @@ export interface SelectorConfig {
   providers: Record<string, ProviderConfig>;
 }
 
-export type LearnHow = 'alternative' | 'fingerprint' | 'ai' | 'server' | 'user';
+export type LearnHow = 'alternative' | 'fingerprint' | 'ai' | 'server' | 'user' | 'fragile';
 
 export interface LearnedSelector {
   provider: string;
@@ -710,11 +710,19 @@ export class SelectorStore {
     return [cfg.primary, ...(cfg.alternatives ?? [])].filter(Boolean);
   }
 
-  /** Ordinea de încercare: override învățat -> primary -> alternatives. */
+  /**
+   * Ordinea de încercare: override învățat -> primary -> alternatives.
+   * v2.5.75 (FIX 2): un selector-fallback FRAGIL (pozițional) are un singur rost —
+   * să prindă elementul când nimic stabil nu mai există — deci stă la COADĂ, ca
+   * să nu umbrească selectorii statici (buni) de dinaintea lui.
+   */
   candidates(providerId: string, slot: SlotName): string[] {
-    const learned = this.overrides.get(this.key(providerId, slot))?.selector;
+    const learned = this.overrides.get(this.key(providerId, slot));
     const list = [...this.staticCandidates(providerId, slot)];
-    if (learned && !list.includes(learned)) list.unshift(learned);
+    if (learned && !list.includes(learned.selector)) {
+      if (learned.how === 'fragile') list.push(learned.selector);
+      else list.unshift(learned.selector);
+    }
     return list;
   }
 
@@ -940,6 +948,40 @@ export class SelectorStore {
     } catch (e: any) {
       log('notifier failed: ' + (e?.message ?? String(e)));
     }
+    return true;
+  }
+
+  /**
+   * v2.5.75 (FIX 2): salvează un selector pozițional („fragil") ca FALLBACK de
+   * ultimă instanță. Se folosește doar când healer-ul nu a putut compune niciun
+   * selector stabil (ex: un <a> fără href/aria-label în sidebar-ul Claude), iar
+   * elementul chiar funcționează în pagină. E marcat `how: 'fragile'`, deci:
+   *   - stă la coada `candidates()` (nu umbrește selectorii statici);
+   *   - nu trece prin filtrele obișnuite (altfel ar fi respins ca fragil);
+   *   - se poate șterge oricând cu „Reset Repaired Selectors".
+   */
+  learnFallback(providerId: string, slot: SlotName, selector: string): boolean {
+    const sel = String(selector || '').trim();
+    if (!sel || sel.length > 400) return false;
+    if (!isUsableSelector(sel)) return false;
+    // chiar și ca fallback, un disclaimer/cookie/UI chrome e interzis
+    if (isPersistBlocked(slot, sel)) return false;
+    const key = this.key(providerId, slot);
+    const existing = this.overrides.get(key);
+    if (existing?.locked) return false;
+    if (existing?.selector === sel) return true;
+    this.overrides.set(key, {
+      provider: providerId,
+      slot,
+      selector: sel,
+      how: 'fragile',
+      at: Date.now()
+    });
+    this.failures.delete(key);
+    this.unlockedUserLocks.delete(key);
+    // fallback-ul nu e o „reparare" — nu anunțăm în chat (vezi `notifier`)
+    log('saved fragile fallback: ' + key + ' -> ' + sel);
+    void this.persist();
     return true;
   }
 
@@ -1376,6 +1418,15 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
       const v = el.getAttribute(a);
       if (!v) continue;
       list.push(tag + '[' + a + '="' + v.replace(/"/g, '\\"') + '"]');
+    }
+
+    // v2.5.75 (FIX 2): `href` — butonul „New chat" al Claude e un <a href="/new">
+    // cu doar clase utilitare (underline-offset-2), deci fără asta singurul
+    // selector propus era lanțul pozițional (fragil, ignorat la salvare).
+    // Acceptăm doar href-uri relative sau absolute scurte (fără query lung).
+    const href = el.tagName === 'A' ? String((el as HTMLAnchorElement).getAttribute('href') || '') : '';
+    if (href && href.length <= 120 && !/\s/.test(href) && !/^javascript:/i.test(href)) {
+      list.push(tag + '[href="' + href.replace(/"/g, '\\"') + '"]');
     }
 
     const classes = String((el as HTMLElement).className || '')
@@ -2682,7 +2733,20 @@ export async function healSlot(
           ')'
       );
       selectors.recordSuccess(providerId, slot);
-      selectors.learn(providerId, slot, candidate.selector, 'fingerprint');
+      // v2.5.75 (FIX 2): un selector pozițional (fragil) nu trece prin `learn()`
+      // — dar dacă e singurul care a trecut testul funcțional, îl păstrăm ca
+      // FALLBACK (la coada candidaților), nu îl aruncăm. Altfel slotul rămânea
+      // fără niciun selector până la următoarea rulare.
+      if (isFragileSelector(candidate.selector)) {
+        if (selectors.learnFallback(providerId, slot, candidate.selector)) {
+          log(
+            'keeping fragile fallback for ' + slotKey + ' -> ' + candidate.selector +
+              ' (no stable selector available)'
+          );
+        }
+      } else {
+        selectors.learn(providerId, slot, candidate.selector, 'fingerprint');
+      }
       return candidate.selector;
     }
     if (ordered.length) {

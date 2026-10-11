@@ -277,8 +277,12 @@ export async function findInput(
   );
 }
 
-/** Check bundled selectors quickly; only missing slots enter the healer path. */
-async function validateConnectSelectors(
+/**
+ * Check bundled selectors quickly; only missing slots enter the healer path.
+ * v2.5.75 (FIX 1): verifică TOȚI candidații slotului (nu doar `primary`) — vezi
+ * comentariul de mai jos. Exportată pentru testele de integrare.
+ */
+export async function validateConnectSelectors(
   page: Page,
   providerId: string,
   label: string
@@ -288,20 +292,27 @@ async function validateConnectSelectors(
   const slots: SlotName[] = ['input', 'newChat'];
   const missing = await Promise.all(
     slots.map(async (slot) => {
-      const primary = selectors.primary(providerId, slot);
-      if (!primary) return { slot, present: false };
-      const locator = page.locator(primary).first();
-      try {
-        return {
-          slot,
-          present:
+      // v2.5.75 (FIX 1): verificăm TOȚI candidații slotului, nu doar `primary`.
+      // La Claude, `newChat` e un <a href="/new"> (o alternativă), în timp ce
+      // `primary` era butonul cu aria-label — dacă lipsea, healer-ul rula degeaba
+      // și rezultatul lui se pierdea, deși un candidat cunoscut funcționa.
+      const candidates = selectors.candidates(providerId, slot);
+      if (!candidates.length) return { slot, present: false };
+      for (const sel of candidates) {
+        const locator = page.locator(sel).first();
+        try {
+          if (
             (await locator.count()) > 0 &&
             (await locator.isVisible()) &&
             (await locator.isEnabled())
-        };
-      } catch {
-        return { slot, present: false };
+          ) {
+            return { slot, present: true };
+          }
+        } catch {
+          /* selector invalid / tranziție — încercăm următorul */
+        }
       }
+      return { slot, present: false };
     })
   );
   if (missing.every((item) => item.present)) {

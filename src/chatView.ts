@@ -18,6 +18,7 @@ import {
   ollamaInstallState,
   ProviderStatusInfo
 } from './providers';
+import { pickProjectFolder } from './openFolder';
 import { pullOllamaModel, startOllamaServer } from './providers/ollama';
 import {
   detectHardware,
@@ -505,6 +506,20 @@ const REPAIR_PROMPTS = {
 // v1.4.0: checkpoint-uri git per prompt (persistate în globalState)
 const CHECKPOINTS_KEY = 'freekit.checkpoints';
 const CHECKPOINTS_MAX = 50;
+
+// v2.6.0 (FIX 2): task-ul întrerupt de cardul „You need an open folder" —
+// persistat în globalState, ca să fie reluat automat după ce VS Code se
+// redeschide cu folderul ales (extension host-ul repornește la openFolder).
+export const PENDING_TASK_KEY = 'freekit.pendingTaskAfterFolderOpen';
+
+// v2.6.0 (FIX 4): cardul de bun venit se afișează o singură dată (prima
+// deschidere, fără conversații); „Got it" sau primul mesaj trimis îl închid.
+export const ONBOARDING_KEY = 'freekit.onboardingSeen';
+
+// v2.6.0 (FIX 1): linia discretă de la finalul răspunsului în question mode
+// fără folder — codicon + italics gri (randată de webview, nu markdown).
+export const FOLDER_HINT_TEXT =
+  '$(lightbulb) Open a folder if you want to save code to files';
 
 // v1.9.0: id-uri sigure de mesaj (leagă mesajul de checkpoint / conversație)
 const MSG_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -1628,6 +1643,37 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    // v2.6.0 (FIX 2): cardul „You need an open folder" — deschide dialogul de
+    // folder (întâi proiectele recente, apoi dialogul nativ) și anulează task-ul.
+    if (msg.type === 'open_folder_dialog') {
+      await this.handleOpenFolderDialog();
+      return;
+    }
+    if (msg.type === 'cancel_folder_task') {
+      log('task cancelled — no folder');
+      await this.state.update(PENDING_TASK_KEY, undefined);
+      return;
+    }
+
+    // v2.6.0 (FIX 4): cardul de bun venit — „Got it" (persistă flag-ul) sau
+    // tutorialul (link extern, prin handler-ul open_link existent).
+    if (msg.type === 'onboarding_seen') {
+      await this.state.update(ONBOARDING_KEY, true);
+      log('onboarding card dismissed');
+      return;
+    }
+
+    // v2.6.0 (FIX 5): „Repair now" din cardul de selectori — deblochează
+    // selectorii user-locked ai providerului (comanda existentă) și reîncearcă.
+    if (msg.type === 'unlock_selectors') {
+      const id = String(msg.providerId || '') || this.currentProviderId();
+      const known = BROWSER_PROVIDER_IDS.includes(id);
+      const suffix = known ? id.charAt(0).toUpperCase() + id.slice(1) : '';
+      log('selector repair requested from the chat card (' + (known ? id : 'all') + ')');
+      await vscode.commands.executeCommand('freekit.unlockBrokenSelectors' + suffix);
+      return;
+    }
+
     // v2.5.54 (FIX 13): click pe un thumbnail din chat → deschide PNG-ul mare
     if (msg.type === 'open_visual_file') {
       const rel = String(msg.path ?? '').trim();
@@ -1815,6 +1861,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       });
       // v1.9.0: lista de conversații (dropdown-ul de comutare)
       this.postConversations();
+      // v2.6.0 (FIX 2): un task întrerupt de „Open a folder" se reia automat
+      // după ce VS Code s-a redeschis cu folderul ales (extension host nou).
+      const resumed = await this.resumeTaskAfterFolderOpen();
+      // v2.6.0 (FIX 4): cardul de bun venit — doar la prima deschidere, când nu
+      // există nicio conversație și utilizatorul nu l-a închis deja.
+      if (
+        !resumed &&
+        !this.state.get<boolean>(ONBOARDING_KEY, false) &&
+        this.conversations.list().length === 0
+      ) {
+        log('onboarding card shown (first open, no conversations)');
+        this.post('onboarding', {});
+      }
       // v2.0.2: sincronizează starea de generare (webview reîncărcat în timpul
       // unui răspuns → butonul Stop trebuie să fie vizibil)
       this.post('busy', this.abortController ? '1' : '0');
@@ -2018,6 +2077,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       logLine('handoff', 'skipped — simple question, no handoff needed');
     }
 
+    // v2.6.0 (FIX 1/2): folderul e opțional pentru ÎNTREBĂRI. Verificarea stă
+    // după clasificare (înainte, orice mesaj fără folder era respins cu eroarea
+    // tehnică „You have no folder open in VS Code." — ~30% dintre utilizatorii
+    // noi deschid VS Code fără folder). Doar task-urile (scriere de fișiere,
+    // editare, comenzi) au nevoie de un proiect deschis: primesc cardul
+    // „You need an open folder", cu buton de deschidere și reluare automată.
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+    const directWrite = detectDirectWrite(userText);
+    if (!root && (promptKind === 'task' || directWrite)) {
+      log('task mode without folder — asking the user to open one');
+      await this.state.update(PENDING_TASK_KEY, { prompt: userText, ts: Date.now() });
+      this.post('busy', '0');
+      this.post('folder_required', { prompt: userText });
+      return;
+    }
+    if (!root) {
+      log('question mode — no folder needed');
+    }
+
     // v2.4.1: Restricted Mode nu mai blochează tot chat-ul — modelul poate citi
     // și răspunde; doar uneltele care scriu/rulează sunt refuzate la execuție
     // (vezi executeTool + blocarea MCP din bucla de mai jos). Utilizatorul e
@@ -2073,14 +2151,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.tsconfigRewrites.reset();
 
     try {
-      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-      if (!root) throw new Error('You have no folder open in VS Code.');
+      // v2.6.0 (FIX 1/2): `root` (calculat mai sus) poate fi gol în question
+      // mode — pașii care depind de un folder sunt săriți; restul răspunsului
+      // curge normal către provider.
 
       // v2.5.7 (bug #13): direct write mode — dacă promptul cere explicit
       // „fișierul X cu EXACT acest conținut: ```…```”, scriem fișierul direct
       // din prompt și NU mai apelăm providerul (AI-ul poate improviza, ignora
       // sau trunchia conținutul cerut).
-      const directWrite = detectDirectWrite(userText);
       if (directWrite) {
         log('direct write mode: ' + directWrite.path);
         this.post(
@@ -2103,7 +2181,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             ' written exactly as provided.'
           : 'Direct write failed: ' + (result.error || 'unknown error');
         log('direct write result ok=' + result.ok);
-        this.post(result.ok ? 'notice' : 'error', summary);
+        // v2.6.0 (FIX 5): eșecul scrierii directe → card cu acțiuni, nu text brut
+        if (result.ok) {
+          this.post('notice', summary);
+        } else {
+          this.post('action_error', {
+            kind: 'generic',
+            title: '$(warning) Writing the file failed',
+            message: summary
+          });
+        }
         await this.appendHistory('assistant', summary);
         // v2.5.8.1 (bug #14): direct write postează doar 'notice'/'error' și iese
         // din try, așa că webview-ul nu primea niciodată semnalul de „gata" —
@@ -2122,7 +2209,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
 
       // v1.4.0: checkpoint git ÎNAINTE de prompt (rollback manual, un click)
-      await this.createCheckpoint(root, msgId, userText);
+      // v2.6.0 (FIX 1): fără folder deschis nu există proiect git — se sare.
+      if (root) await this.createCheckpoint(root, msgId, userText);
 
       // v0.4.0: 'auto' = lanț de fallback (provider web → Ollama); restul =
       // providerul ales direct. Achiziția propriu-zisă are loc înainte de
@@ -2771,7 +2859,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               text: failText,
               status: 'done'
             });
-            this.post('error', failText);
+            // v2.6.0 (FIX 5): eroare tehnică → card cu acțiuni (Retry / Switch /
+            // Diagnostics), nu text brut în bula de răspuns
+            this.post('action_error', {
+              kind: 'generic',
+              title: tooLarge
+                ? '$(warning) The reply was too large to apply'
+                : '$(warning) The reply could not be applied',
+              message: failText
+            });
             await this.appendHistory('assistant', failText);
             break;
           }
@@ -2877,7 +2973,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               editLoop.count(repeated),
               lastToolError
             );
-            this.post('error', loopMessage);
+            this.post('action_error', {
+              kind: 'generic',
+              title: '$(warning) Stuck editing the same file',
+              message: loopMessage
+            });
             await this.appendHistory('assistant', loopMessage);
             break; // iese din bucla agentică, fără să mai execute editarea
           }
@@ -3009,7 +3109,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             toolCall.tool,
             result.error
           );
-          this.post('error', message);
+          this.post('action_error', {
+            kind: 'generic',
+            title: '$(warning) The task stopped — a tool failed repeatedly',
+            message
+          });
           await this.appendHistory('assistant', message);
           break; // iese din bucla agentică
         }
@@ -3407,6 +3511,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // anula tot ce scrisese mai devreme în mesaj).
         const lvf = this.getLastVerifyFailure();
         if (
+          !!root &&
           this.autoVerifyEnabled(root) &&
           this.verifyRepairs > 0 &&
           lvf &&
@@ -3428,7 +3533,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           recordProviderSuccess(this.globalStorageRoot, provider.name);
           // v2.5.53 (FIX 8): dacă verificarea e încă pe roșu, NU prezentăm
           // „gata, funcționează" al modelului ca adevăr — spunem exact ce e.
-          const stillRed = this.autoVerifyEnabled(root) && this.verifyRepairs > 0 && !!lvf;
+          const stillRed =
+            !!root && this.autoVerifyEnabled(root) && this.verifyRepairs > 0 && !!lvf;
           if (stillRed && lvf) {
             log(
               'auto-verify: verification is still red (' + lvf.command +
@@ -3450,9 +3556,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.appendHistory('assistant', finalText);
           // v2.5.27 (bug #63): în chat calea rămâne cea originală (`.ts`)
           this.post('reply', finalText);
+          // v2.6.0 (FIX 1): întrebare fără folder → linia discretă cu codicon
+          // la finalul răspunsului (italics gri, randată de webview).
+          if (promptKind === 'question' && !root) {
+            this.post('folder_hint', FOLDER_HINT_TEXT);
+          }
           // v2.5.39 (bug #91): AI-ul a declarat task-ul terminat — verificăm
           // dacă un cleanup cerut de utilizator chiar s-a făcut (doar avertizare)
-          this.postTaskTruthCheck(root, aiReply);
+          if (root) this.postTaskTruthCheck(root, aiReply);
         }
       }
     } catch (e: any) {
@@ -3545,15 +3656,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // v2.0.4: login UX — în loc de o eroare seacă, aducem Chrome în față
         // (ca utilizatorul să se poată autentifica) și oferim în chat cardul
         // „login required" cu butonul Retry, care reia ultimul prompt.
+        // v2.6.0 (FIX 5): cardul are acum titlu explicit („session expired") și
+        // acțiuni pe codiconi: Log in again / Retry / Switch provider / Diagnostics.
         log('login required: ' + (e?.message ?? String(e)));
         await this.showChrome().catch(() => {});
         // v2.0.5: reținem că fereastra e vizibilă din cauza login-ului, ca s-o
         // ducem înapoi în fundal la reluarea mesajului (după autentificare).
         this.chromeShownForLogin = true;
-        this.post('login_required', e?.message ?? String(e));
+        const loginProviderId = String((e as any)?.providerId ?? '');
+        this.post('login_required', {
+          text: e?.message ?? String(e),
+          providerId: loginProviderId,
+          providerName: PROVIDER_LABELS[loginProviderId] ?? ''
+        });
       } else {
-        log('error: ' + (e?.message ?? String(e)));
-        this.post('error', e?.message ?? String(e));
+        const messageText = e?.message ? String(e.message) : String(e);
+        log('error: ' + messageText);
+        // v2.6.0 (FIX 5): erorile tehnice devin carduri cu acțiuni (codiconi),
+        // nu text brut — utilizatorul are mereu o ieșire la un click
+        // (Retry / Switch provider / Diagnostics).
+        const timeout = /timed out|timeout|took too long/i.test(messageText);
+        this.post('action_error', {
+          kind: timeout ? 'timeout' : 'generic',
+          title: timeout
+            ? '$(warning) Response took too long'
+            : '$(warning) Something went wrong',
+          message: messageText
+        });
       }
     } finally {
       // v1.10.3: plasă de siguranță — cardul „Thinking" nu rămâne deschis
@@ -5424,6 +5553,72 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /** Creează checkpoint-ul git al promptului curent (fail-open). */
+  /**
+   * v2.6.0 (FIX 2/3): „Open a folder" din cardul de task fără folder. Întâi
+   * proiectele recente (quick pick cu codiconi, vezi openFolder.ts), apoi
+   * dialogul nativ VS Code. Folderul ales se deschide cu `vscode.openFolder`
+   * (extension host-ul repornește), iar task-ul original rămâne în globalState
+   * ca să fie reluat automat după redeschidere (vezi resumeTaskAfterFolderOpen).
+   */
+  private async handleOpenFolderDialog(): Promise<void> {
+    log('folder dialog opened');
+    try {
+      const pick = await pickProjectFolder();
+      if (pick.kind === 'cancelled') {
+        log('task cancelled — no folder');
+        await this.state.update(PENDING_TASK_KEY, undefined);
+        return;
+      }
+      let uri: vscode.Uri | undefined;
+      if (pick.kind === 'picked') {
+        uri = pick.uri;
+      } else {
+        const selected = await vscode.window.showOpenDialog({
+          canSelectFolders: true,
+          canSelectFiles: false,
+          canSelectMany: false,
+          openLabel: 'Open as project'
+        });
+        uri = selected?.[0];
+      }
+      if (!uri) {
+        log('task cancelled — no folder');
+        await this.state.update(PENDING_TASK_KEY, undefined);
+        return;
+      }
+      log('folder selected: ' + uri.fsPath);
+      // forceNewWindow: false → folderul se deschide în aceeași fereastră
+      // (extension host-ul repornește și găsește task-ul salvat mai sus).
+      await vscode.commands.executeCommand('vscode.openFolder', uri, {
+        forceNewWindow: false
+      });
+    } catch (e: any) {
+      log('opening the folder failed: ' + (e?.message ?? String(e)));
+    }
+  }
+
+  /**
+   * v2.6.0 (FIX 2): reia automat task-ul salvat când s-a deschis un folder.
+   * Webview-ul randază mesajul utilizatorului și pornește fluxul normal de
+   * trimitere (`send`), deci task-ul intră în istoric o singură dată.
+   * Întoarce true dacă un task a fost reluat (cardul de bun venit nu mai apare).
+   */
+  private async resumeTaskAfterFolderOpen(): Promise<boolean> {
+    const pending = this.state.get<{ prompt?: string } | undefined>(PENDING_TASK_KEY);
+    const prompt = String(pending?.prompt ?? '').trim();
+    if (!prompt) return false;
+    if (!vscode.workspace.workspaceFolders?.length) {
+      // folderul nu e (încă) deschis — cardul se reafișează, fluxul poate relua
+      log('pending task waiting for a folder — card shown again');
+      this.post('folder_required', { prompt });
+      return false;
+    }
+    await this.state.update(PENDING_TASK_KEY, undefined);
+    log('resuming task after folder open: "' + prompt + '"');
+    this.post('resume_task', prompt);
+    return true;
+  }
+
   private async createCheckpoint(
     root: string,
     messageId: string,
@@ -5736,6 +5931,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const wasActive = this.conversations.getActiveId() === target.id;
     await this.conversations.deleteConversation(target.id);
     log('conversation deleted: ' + target.id);
+    // v2.6.0 (FIX 4): lista de conversații rămasă goală = început nou — cardul
+    // de bun venit poate reapărea (utilizatorul a „resetat" chatul).
+    if (this.conversations.list().length === 0) {
+      await this.state.update(ONBOARDING_KEY, false);
+    }
     this.post('heal', '🗑 The conversation "' + target.title + '" was deleted.');
     this.postConversations();
     // doar conversația activă schimbă ce se vede în chat

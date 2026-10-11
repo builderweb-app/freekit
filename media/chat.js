@@ -139,6 +139,10 @@ let pendingEl = null;
 let guestCardEl = null;
 // v2.5.15 (bug #41): cardul „chat memory full" activ (contextul s-a epuizat)
 let memoryFullCardEl = null;
+// v2.6.0 (FIX 2): cardul „You need an open folder" activ (task fără folder)
+let folderCardEl = null;
+// v2.6.0 (FIX 4): cardul de bun venit (prima deschidere)
+let onboardingCardEl = null;
 let busy = false;
 let stick = true; // true = suntem lipiți de capătul listei
 
@@ -515,19 +519,41 @@ function addHeal(text) {
 
 // v2.0.4: cardul „login required" — Chrome e adus automat în față, iar
 // butoanele permit reluarea promptului (Retry) sau re-afișarea ferestrei Chrome.
-function addLoginRequiredCard(text) {
+// v2.6.0 (FIX 5): titlu explicit („session expired") + acțiuni pe codiconi:
+// Log in again / Retry / Switch provider / Diagnostics.
+function addLoginRequiredCard(msg) {
+  const data = msg && typeof msg === 'object' ? msg : { text: String(msg || '') };
+  const name =
+    data.providerName || PROVIDER_NAMES[data.providerId] || 'The provider';
+
   const card = document.createElement('div');
   card.className = 'notice login-required';
 
+  const title = document.createElement('b');
+  setRichText(title, '$(sign-in) ' + name + ' is not responding — session expired');
+
   const msgEl = document.createElement('div');
   msgEl.className = 'login-required-text';
-  msgEl.textContent = text || 'Login required.';
+  const lead = document.createElement('div');
+  lead.textContent = 'Most likely you need to log in again.';
+  msgEl.appendChild(lead);
+  if (data.text) {
+    const detail = document.createElement('div');
+    detail.className = 'login-required-detail';
+    detail.textContent = data.text;
+    msgEl.appendChild(detail);
+  }
 
   const row = document.createElement('div');
   row.className = 'login-required-actions';
 
+  const login = document.createElement('button');
+  login.className = 'retry-btn';
+  setRichText(login, '$(sign-in) Log in again');
+  login.onclick = () => vscode.postMessage({ type: 'show_chrome' });
+
   const retry = document.createElement('button');
-  retry.className = 'retry-btn';
+  retry.className = 'show-chrome-btn';
   setRichText(retry, '$(refresh) Retry');
   retry.onclick = () => {
     card.remove();
@@ -537,15 +563,207 @@ function addLoginRequiredCard(text) {
     vscode.postMessage({ type: 'retry_last' });
   };
 
-  const show = document.createElement('button');
-  show.className = 'show-chrome-btn';
-  setRichText(show, '$(globe) Show Browser');
-  show.onclick = () => vscode.postMessage({ type: 'show_chrome' });
+  const switchBtn = document.createElement('button');
+  switchBtn.className = 'show-chrome-btn';
+  setRichText(switchBtn, '$(sync) Switch provider');
+  switchBtn.onclick = () => vscode.postMessage({ type: 'open_model_menu' });
 
+  const diag = document.createElement('button');
+  diag.className = 'show-chrome-btn';
+  setRichText(diag, '$(info) Diagnostics');
+  diag.onclick = () => vscode.postMessage({ type: 'run_diagnostics' });
+
+  row.appendChild(login);
   row.appendChild(retry);
-  row.appendChild(show);
+  row.appendChild(switchBtn);
+  row.appendChild(diag);
+  card.appendChild(title);
   card.appendChild(msgEl);
   card.appendChild(row);
+  messages.appendChild(card);
+  scrollAfterAppend();
+}
+
+// v2.6.0 (FIX 2): cardul „You need an open folder" pentru task-urile trimise
+// fără folder deschis — o întrebare simplă funcționează fără folder, un task
+// (fișiere / editare / comenzi) are nevoie de un proiect. Butoanele deschid
+// dialogul de folder (host) sau anulează task-ul.
+function addFolderRequiredCard(msg) {
+  const prompt = String((msg && msg.prompt) || '');
+  const card = document.createElement('div');
+  card.className = 'notice folder-required';
+
+  const title = document.createElement('b');
+  setRichText(title, '$(folder-opened) You need an open folder');
+
+  const body = document.createElement('div');
+  body.className = 'folder-required-text';
+  body.textContent =
+    'Freekit can only write files inside an open project. A simple question ' +
+    'works without a folder, but tasks (creating files, editing, running ' +
+    'commands) need one.';
+  if (prompt) {
+    const quoted = document.createElement('div');
+    quoted.className = 'folder-required-prompt';
+    quoted.textContent = prompt;
+    body.appendChild(quoted);
+  }
+
+  const row = document.createElement('div');
+  row.className = 'folder-required-actions';
+
+  const open = document.createElement('button');
+  open.className = 'retry-btn';
+  setRichText(open, '$(folder-opened) Open a folder');
+  open.onclick = () => {
+    open.disabled = true;
+    setRichText(open, '$(folder-opened) Opening…');
+    vscode.postMessage({ type: 'open_folder_dialog' });
+  };
+
+  const cancel = document.createElement('button');
+  cancel.className = 'guest-cancel-btn';
+  setRichText(cancel, '$(close) Cancel');
+  cancel.onclick = () => {
+    card.remove();
+    vscode.postMessage({ type: 'cancel_folder_task' });
+  };
+
+  row.appendChild(open);
+  row.appendChild(cancel);
+  card.appendChild(title);
+  card.appendChild(body);
+  card.appendChild(row);
+  messages.appendChild(card);
+  scrollAfterAppend();
+  folderCardEl = card;
+}
+
+/** v2.6.0 (FIX 2): scoate cardul „You need an open folder" (ex: la reluare). */
+function removeFolderRequiredCard() {
+  if (folderCardEl) {
+    folderCardEl.remove();
+    folderCardEl = null;
+  }
+}
+
+// v2.6.0 (FIX 1): linia discretă de la finalul răspunsului în question mode
+// fără folder — italics gri, cu codicon randat (nu text „$(lightbulb)").
+function addFolderHint(text) {
+  const el = document.createElement('div');
+  el.className = 'folder-hint';
+  setRichText(el, text || '$(lightbulb) Open a folder if you want to save code to files');
+  messages.appendChild(el);
+  scrollAfterAppend();
+}
+
+// v2.6.0 (FIX 4): cardul de bun venit (prima deschidere, fără conversații) —
+// persistent, nu mesaj AI; „Got it" salvează flag-ul, tutorialul deschide linkul.
+function removeOnboardingCard() {
+  if (onboardingCardEl) {
+    onboardingCardEl.remove();
+    onboardingCardEl = null;
+  }
+}
+
+function addOnboardingCard() {
+  removeOnboardingCard();
+  const card = document.createElement('div');
+  card.className = 'notice onboarding-card';
+
+  const title = document.createElement('b');
+  setRichText(title, '$(sparkle) Welcome to Freekit!');
+
+  const body = document.createElement('div');
+  body.className = 'onboarding-text';
+  const intro = document.createElement('div');
+  intro.textContent =
+    'Freekit uses your web accounts (ChatGPT, Claude, DeepSeek, Gemini, ' +
+    'Mistral, Qwen) — no API key, no cost.';
+  body.appendChild(intro);
+
+  const steps = document.createElement('div');
+  steps.className = 'onboarding-steps';
+  steps.textContent =
+    'Quick steps:\n' +
+    '1. Click the model chip (bottom) → pick\n' +
+    '2. Chrome opens → log in once\n' +
+    '3. Write your first message';
+  body.appendChild(steps);
+
+  const tip = document.createElement('div');
+  tip.className = 'onboarding-tip';
+  setRichText(tip, '$(lightbulb) To write files, open a folder in VS Code.');
+  body.appendChild(tip);
+
+  const row = document.createElement('div');
+  row.className = 'onboarding-actions';
+
+  const gotIt = document.createElement('button');
+  gotIt.className = 'retry-btn';
+  setRichText(gotIt, '$(check) Got it');
+  gotIt.onclick = () => {
+    removeOnboardingCard();
+    vscode.postMessage({ type: 'onboarding_seen' });
+  };
+
+  const tutorial = document.createElement('button');
+  tutorial.className = 'show-chrome-btn';
+  setRichText(tutorial, '$(arrow-right) See tutorial');
+  tutorial.onclick = () =>
+    vscode.postMessage({
+      type: 'open_link',
+      url: 'https://github.com/builderweb-app/freekit#quick-start'
+    });
+
+  row.appendChild(gotIt);
+  row.appendChild(tutorial);
+  card.appendChild(title);
+  card.appendChild(body);
+  card.appendChild(row);
+  messages.appendChild(card);
+  onboardingCardEl = card;
+  scrollAfterAppend();
+}
+
+// v2.6.0 (FIX 5): card de eroare cu acțiuni (timeout / eroare generică) —
+// aceleași butoane pe codiconi ca restul cardurilor.
+function addActionErrorCard(msg) {
+  const isTimeout = msg.kind === 'timeout';
+  const card = document.createElement('div');
+  card.className = 'provider-error-card action-card';
+
+  const title = document.createElement('b');
+  setRichText(
+    title,
+    msg.title || (isTimeout ? '$(warning) Response took too long' : '$(warning) Something went wrong')
+  );
+
+  const text = document.createElement('div');
+  text.className = 'pe-msg';
+  text.textContent = msg.message || '';
+
+  const actions = document.createElement('div');
+  actions.className = 'pe-actions';
+  const makeBtn = (label, action, payload) => {
+    const b = document.createElement('button');
+    b.className = 'pe-btn';
+    setRichText(b, label);
+    b.addEventListener('click', () => {
+      b.disabled = true;
+      vscode.postMessage(Object.assign({ type: action }, payload || {}));
+    });
+    return b;
+  };
+  actions.appendChild(makeBtn('$(refresh) Retry', 'retry_message'));
+  if (isTimeout) {
+    actions.appendChild(makeBtn('$(sync) Switch provider', 'open_model_menu'));
+  }
+  actions.appendChild(makeBtn('$(info) Diagnostics', 'run_diagnostics'));
+
+  card.appendChild(title);
+  card.appendChild(text);
+  card.appendChild(actions);
   messages.appendChild(card);
   scrollAfterAppend();
 }
@@ -683,7 +901,7 @@ function addProviderErrorCard(msg) {
   setRichText(
     title,
     isSelectors
-      ? '⚠️ I can not continue'
+      ? '$(warning) Broken selector for ' + providerName
       : isModelMissing
         ? '$(warning) Ollama — model not installed'
         : isDown
@@ -696,7 +914,8 @@ function addProviderErrorCard(msg) {
   const text = document.createElement('div');
   text.className = 'pe-msg';
   text.textContent = isSelectors
-    ? 'Check that you are logged in to Chrome.'
+    ? 'Freekit repairs it automatically. If it persists:' +
+      (msg.message ? '\n' + msg.message : '')
     : isModelMissing
       ? (modelId ? 'Model "' + modelId + '" is not installed.' : 'The selected model is not installed.') +
         (available.length ? ' Available: ' + available.join(', ') + '.' : '')
@@ -718,8 +937,11 @@ function addProviderErrorCard(msg) {
 
   if (isSelectors) {
     // v2.5.61 (FIX 7): exact cele două ieșiri cerute de spec
-    actions.appendChild(makeBtn('Retry', 'retry_message'));
-    actions.appendChild(makeBtn('Switch provider', 'open_model_menu'));
+    // v2.6.0 (FIX 5): + „Repair now" (unlockBrokenSelectors) și Diagnostics
+    actions.appendChild(makeBtn('$(tools) Repair now', 'unlock_selectors', { providerId: msg.providerId }));
+    actions.appendChild(makeBtn('$(refresh) Retry', 'retry_message'));
+    actions.appendChild(makeBtn('$(sync) Switch provider', 'open_model_menu'));
+    actions.appendChild(makeBtn('$(info) Diagnostics', 'run_diagnostics'));
   } else if (isModelMissing) {
     // v2.5.11 (bug #24): descarcă exact modelul care lipsește (fluxul existent)
     if (modelId) {
@@ -737,9 +959,9 @@ function addProviderErrorCard(msg) {
     actions.appendChild(makeBtn('Switch provider', 'open_model_menu'));
     actions.appendChild(makeBtn('Retry', 'retry_message'));
   } else {
-    actions.appendChild(makeBtn('Show Browser', 'show_chrome'));
-    actions.appendChild(makeBtn('Retry', 'retry_message'));
-    actions.appendChild(makeBtn('Switch provider', 'open_model_menu'));
+    actions.appendChild(makeBtn('$(globe) Show Browser', 'show_chrome'));
+    actions.appendChild(makeBtn('$(refresh) Retry', 'retry_message'));
+    actions.appendChild(makeBtn('$(sync) Switch provider', 'open_model_menu'));
   }
   if (msg.upgradeUrl) {
     const a = document.createElement('a');
@@ -1640,13 +1862,20 @@ function addDiffReviewCard(payload) {
   messages.scrollTop = messages.scrollHeight;
 }
 
-function send() {
-  if (busy) return;
-  const text = input.value.trim();
-  if (!text && !attachments.length) return;
-
-  const shown = text || 'See the attached files.';
-  const attsSnapshot = attachments.slice();
+/**
+ * v2.6.0: trimiterea propriu-zisă (composer sau reluarea unui task salvat după
+ * deschiderea folderului) — același flux: bula userului, bula „typing", `send`.
+ */
+function sendPrompt(text, attsSnapshot) {
+  const shown = String(text || '').trim() || 'See the attached files.';
+  const atts = attsSnapshot || [];
+  // v2.6.0 (FIX 4): primul mesaj trimis închide cardul de bun venit
+  if (onboardingCardEl) {
+    removeOnboardingCard();
+    vscode.postMessage({ type: 'onboarding_seen' });
+  }
+  // v2.6.0 (FIX 2): task reluat → cardul „You need an open folder" dispare
+  removeFolderRequiredCard();
 
   // v1.4.0: id stabil al mesajului (leagă mesajul de checkpoint-ul git);
   // v1.5.0: id-ul se pasează direct în add() (setat acolo în dataset)
@@ -1657,17 +1886,28 @@ function send() {
   // v1.6.0/v1.7.3: oprește și dictarea la trimitere (captarea e în extensie)
   if (sttState === 'recording' || sttState === 'starting') stopDictation();
   stick = true; // mesajul trimis de tine te duce mereu la capătul listei
-  add('user', shown, undefined, attsSnapshot, msgId);
-  input.value = '';
-  input.style.height = 'auto';
-  input.focus();
-  syncSendState();
+  add('user', shown, undefined, atts, msgId);
 
   setBusy(true);
   pendingEl = add('assistant', '', Date.now());
   showTyping(pendingEl);
 
   vscode.postMessage({ type: 'send', text: shown, msgId });
+}
+
+function send() {
+  if (busy) return;
+  const text = input.value.trim();
+  if (!text && !attachments.length) return;
+
+  const attsSnapshot = attachments.slice();
+
+  input.value = '';
+  input.style.height = 'auto';
+  input.focus();
+  syncSendState();
+
+  sendPrompt(text, attsSnapshot);
 }
 
 sendBtn.addEventListener('click', send);
@@ -1702,6 +1942,8 @@ function resetChatUi() {
   pendingEl = null;
   guestCardEl = null; // v2.5.12 (bug #35)
   memoryFullCardEl = null; // v2.5.15 (bug #41)
+  folderCardEl = null; // v2.6.0 (FIX 2)
+  onboardingCardEl = null; // v2.6.0 (FIX 4)
   verboseSteps.clear(); // v1.7.1
   fileRows.clear(); // v2.0.1
   setBusy(false);
@@ -2398,13 +2640,42 @@ window.addEventListener('message', (event) => {
     if (!stick) jumpBtn.hidden = false;
   } else if (msg.type === 'login_required') {
     // v2.0.4: Chrome a fost adus în față pentru login → card cu buton Retry
+    // v2.6.0 (FIX 5): payload structurat (provider + mesaj) → card cu titlu clar
     if (pendingEl) {
       pendingEl.remove();
       pendingEl = null;
     }
-    addLoginRequiredCard(msg.text || '');
+    addLoginRequiredCard(msg);
     setBusy(false);
     if (!stick) jumpBtn.hidden = false;
+  } else if (msg.type === 'folder_required') {
+    // v2.6.0 (FIX 2): task fără folder → card cu „Open a folder" / Cancel
+    if (pendingEl) {
+      pendingEl.remove();
+      pendingEl = null;
+    }
+    setBusy(false);
+    addFolderRequiredCard(msg);
+    if (!stick) jumpBtn.hidden = false;
+  } else if (msg.type === 'resume_task') {
+    // v2.6.0 (FIX 2): task-ul întrerupt se reia automat după deschiderea folderului
+    removeFolderRequiredCard();
+    sendPrompt(String(msg.text || ''), []);
+  } else if (msg.type === 'folder_hint') {
+    // v2.6.0 (FIX 1): linia discretă de la finalul răspunsului (fără folder)
+    addFolderHint(msg.text || '');
+  } else if (msg.type === 'action_error') {
+    // v2.6.0 (FIX 5): eroare tehnică → card cu acțiuni (Retry / Switch / Diagnostics)
+    if (pendingEl) {
+      pendingEl.remove();
+      pendingEl = null;
+    }
+    setBusy(false);
+    addActionErrorCard(msg);
+    if (!stick) jumpBtn.hidden = false;
+  } else if (msg.type === 'onboarding') {
+    // v2.6.0 (FIX 4): cardul de bun venit (prima deschidere)
+    addOnboardingCard();
   } else if (msg.type === 'guest_mode') {
     // v2.5.12 (bug #35): sesiune neautentificată, dar composerul funcționează
     // (ChatGPT guest mode) → card cu 3 opțiuni; trimiterea așteaptă decizia.

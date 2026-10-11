@@ -169,6 +169,16 @@ Additional safeguards:
 
 ---
 
+## Known limitations
+
+- **A folder is optional for questions, required for tasks.** You can open VS Code with no folder and just ask something — the chat works and the answer comes back normally, with a discreet reminder at the end (`Open a folder if you want to save code to files`). Tasks (creating/editing files, running commands) need an open project: Freekit shows a card with **Open a folder** — pick a recent project (Home / Desktop / Documents are scanned for `.git`, `package.json`, `pyproject.toml`, `composer.json`, `Cargo.toml`, `go.mod`) or browse for one. The folder opens in the same window and the original task **resumes automatically**.
+- **The welcome card is shown once.** On the very first open (no conversations yet) the chat shows a quick-start card; **Got it** or sending your first message dismisses it for good. It only comes back if you delete every conversation.
+- **Web providers change their UI.** Selectors can break when a provider ships a redesign. Freekit repairs them automatically (bundled → learned → AI Finder) and falls back to a card with **Repair now** / **Switch provider** / **Diagnostics** only when everything else failed.
+- **A provider chat can hit its context limit** ("Chat memory full"). Freekit asks whether to start a new chat and continue the task there instead of failing silently.
+- **Login sessions expire.** If a provider is logged out, Freekit brings the Chrome window to the front and offers **Log in again** / **Retry** / **Switch provider** / **Diagnostics** right in the chat.
+
+---
+
 ## Commands
 
 | Command | What it does |

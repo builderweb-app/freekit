@@ -661,6 +661,72 @@ pre.code code {
 .provider-error-card .pe-btn:hover {
   background: var(--vscode-button-hoverBackground, #1177bb);
 }
+.provider-error-card .pe-msg { white-space: pre-line; }
+
+/* ===== v2.6.0 — carduri de acțiune (folder lipsă / onboarding / erori) ===== */
+.notice.folder-required,
+.notice.onboarding-card {
+  border-style: solid;
+  border-left: 3px solid var(--vscode-focusBorder, #3b82f6);
+  color: var(--vscode-foreground);
+  align-self: stretch;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.folder-required-text,
+.onboarding-text {
+  white-space: pre-line;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+}
+
+.folder-required-prompt {
+  margin-top: 6px;
+  font-style: italic;
+}
+
+.folder-required-actions,
+.onboarding-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.onboarding-steps { margin-top: 6px; }
+
+.onboarding-tip {
+  margin-top: 8px;
+  font-style: italic;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+}
+
+/* v2.6.0 (FIX 1): linia discretă de la finalul răspunsului (fără folder) */
+.folder-hint {
+  align-self: flex-start;
+  margin: 2px 0 6px;
+  font-size: 11px;
+  font-style: italic;
+  opacity: 0.85;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+}
+
+.folder-hint .codicon { margin-right: 4px; }
+
+/* v2.6.0 (FIX 5): card de eroare cu acțiuni + detaliul cardului de login */
+.provider-error-card.action-card {
+  border-color: var(--vscode-editorWidget-border, #555);
+  background: var(--vscode-editorWidget-background, rgba(255, 255, 255, 0.04));
+}
+
+.login-required-detail {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+}
 
 /* ===== Carduri de aprobare (fallback clasic) ===== */
 .msg.approval {

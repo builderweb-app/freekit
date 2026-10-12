@@ -1295,6 +1295,17 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
   // v2.5.74 (FIX 1): butoanele de banner / chrome (upgrade, dismiss, close,
   // cancel) nu sunt butonul de chat nou — vezi scorul de `newChat`.
   const NEWCHAT_CHROME_TOKENS = ['dismiss', 'close', 'upgrade', 'cancel'];
+  // v2.8 (FIX 1/4): SCORUL SEMANTIC de `newChat` — potrivirea pe FUNCȚIE, nu
+  // doar pe frază. (a) orice semnal de „chat nou" din aria-label/title/testid/
+  // id/clase (ex: `data-testid="create-new-chat-button"`) primește un bonus
+  // mare; (b) tokenii altei FUNCȚII (trimite, oprește, atașează, setări, cont,
+  // căutare, temă) sunt penalizați puternic. Fără (b), un buton de chrome
+  // („Search", „Settings") aflat în header câștiga doar prin poziție.
+  const NEWCHAT_SEMANTIC_BONUS = 35;
+  const NEWCHAT_SEMANTIC_RE =
+    /(?:^|[^a-z0-9])(?:(?:new|nou|create|start|compose)[\s]{0,2}(?:chat|conversation|convo)|(?:chat|conversation|convo)[\s]{0,2}nou)(?:[^a-z0-9]|$)/;
+  const NEWCHAT_WRONG_SLOT_RE =
+    /(?:^|[^a-z0-9])(send|submit|stop|abort|attach|upload|mic|voice|settings|theme|help|search|login|sign[\s_-]?in|sign[\s_-]?out|account|profile|logout|pricing|subscription|language)(?:[^a-z0-9]|$)/;
   // clasele/id-urile folosesc cratime (`new-chat-button`) — le tratăm ca spații la fraze
   const phraseHay = (s: string): string => s.replace(/[-_]+/g, ' ');
 
@@ -1813,6 +1824,18 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
             s -= 40;
             why.push('penal:' + bad);
           }
+        }
+        // v2.8 (FIX 1/4): semantic — bonus pentru semnalul de „chat nou" din
+        // ORICE atribut (inclusiv data-testid/id/clase, unde cratimele devin
+        // spații), penalizare pentru tokenii altei funcții.
+        if (NEWCHAT_SEMANTIC_RE.test(labelFlat)) {
+          s += NEWCHAT_SEMANTIC_BONUS;
+          why.push('semantic:new-chat');
+        }
+        const wrongSlot = NEWCHAT_WRONG_SLOT_RE.exec(labelFlat);
+        if (wrongSlot) {
+          s -= 25;
+          why.push('penal:not-newchat-' + wrongSlot[1]);
         }
         try {
           if (el.closest('header, [role="banner"], aside, nav, [class*="sidebar" i]')) {
@@ -2688,23 +2711,37 @@ export async function healSlot(
     const usable = (found || []).filter(
       (c) => isUsableSelector(c.selector) && !isPersistBlocked(slot, c.selector)
     );
+    // v2.8 (FIX 1/4 — audit M1): pragul de scor se aplică ÎNAINTE de partiția
+    // stable/fragile și de bugetul de `HEALER_MAX_FUNCTIONAL_TRIES` încercări.
+    // Înainte, ordinea din DOM rupea sortarea pe scor (scanCandidates întoarce
+    // descrescător): trei candidați stabili sub prag consumau tot bugetul și un
+    // candidat fragil dar VALID nu era niciodată examinat („tier 3 (healer)
+    // found no candidate that passed the score/functional test", deși exista).
+    const minScore = minHealerScore(slot);
+    const eligible = usable.filter((c) => c.score >= minScore);
+    const belowScore = usable.filter((c) => c.score < minScore);
+    for (const c of belowScore.slice(0, HEALER_MAX_FUNCTIONAL_TRIES)) {
+      // v2.5.65 (FIX 2): un candidat slab nu se salvează (vezi MIN_HEALER_SCORE).
+      // v2.5.74 (FIX 1): pentru `newChat` pragul e mai mare (NEWCHAT_MIN_SCORE).
+      healLog('candidate rejected: ' + c.selector + ' (score ' + c.score + ' < ' + minScore + ')');
+    }
+    if (belowScore.length > HEALER_MAX_FUNCTIONAL_TRIES) {
+      healLog(
+        belowScore.length - HEALER_MAX_FUNCTIONAL_TRIES + ' more candidate(s) below score ' + minScore
+      );
+    }
     // FIX v2: preferăm selectorii stabili; nth-of-type doar ca ultimă variantă.
-    const stable = usable.filter((c) => !isFragileSelector(c.selector));
-    const ordered = [...stable, ...usable.filter((c) => isFragileSelector(c.selector))];
+    // v2.8: ordinea pe scor se păstrează ÎN INTERIORUL fiecărei partiții, deci
+    // cel mai bine cotat candidat (semantic) e testat primul.
+    const byScore = [...eligible].sort((a, b) => b.score - a.score);
+    const ordered = [
+      ...byScore.filter((c) => !isFragileSelector(c.selector)),
+      ...byScore.filter((c) => isFragileSelector(c.selector))
+    ];
     log('tier 3 (healer) trying for ' + slotKey + ' (' + ordered.length + ' candidate(s))');
 
     // v2.5.61 (FIX 1): candidatul se TESTEAZĂ funcțional înainte de `learn()`.
     for (const candidate of ordered.slice(0, HEALER_MAX_FUNCTIONAL_TRIES)) {
-      // v2.5.65 (FIX 2): un candidat slab nu se salvează (vezi MIN_HEALER_SCORE).
-      // v2.5.74 (FIX 1): pentru `newChat` pragul e mai mare (NEWCHAT_MIN_SCORE).
-      const minScore = minHealerScore(slot);
-      if (candidate.score < minScore) {
-        healLog(
-          'candidate rejected: ' + candidate.selector + ' (score ' + candidate.score +
-            ' < ' + minScore + ')'
-        );
-        continue;
-      }
       if (functionalValidatorFn) {
         let ok = false;
         try {

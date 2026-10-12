@@ -1300,10 +1300,11 @@ async function checkRequestedSlots(
     }
     if (slot === 'newChat') {
       // v2.6.1 (FIX 2): propunerea de `newChat` se verifică ÎN PAGINĂ (există,
-      // nu e prea generică, e vizibilă, nu e buton de cont/marketing). Înainte
-      // trecea necontrolată: un selector inventat ajungea la `learn()` și
-      // healer-ul raporta „salvat", deși butonul nu era acela.
-      const probe = await probeActionSelector(page, sel);
+      // nu e prea generică, nu e buton de cont/marketing). Înainte trecea
+      // necontrolată: un selector inventat ajungea la `learn()` și healer-ul
+      // raporta „salvat", deși butonul nu era acela. v2.8 (FIX 3): un buton
+      // ascuns (sidebar îngust) dar PREZENT și cu semnalul „chat nou" se acceptă.
+      const probe = await probeActionSelector(page, sel, slot);
       if (probe.ok) continue;
       if (required.indexOf(slot) < 0) {
         // slot opțional (descoperirea proactivă): un candidat prost nu are voie
@@ -1765,6 +1766,14 @@ async function runFindSelectorsWithAI(
 interface SlotProbe {
   count: number;
   visible?: boolean;
+  /**
+   * v2.8 (FIX 3): tag-ul, rolul și semnalele primului element (aria-label,
+   * title, data-testid, id, clase, text) — un `newChat` ascuns se acceptă pe
+   * baza lor (vezi NEWCHAT_PRESENT_RE).
+   */
+  tag?: string;
+  role?: string | null;
+  label?: string;
 }
 
 /**
@@ -1775,17 +1784,38 @@ interface SlotProbe {
 type ActionProbe = { ok: true; count: number } | { ok: false; log: string; reason: string };
 
 /**
- * v2.6.1 (FIX 2): un selector de acțiune (`newChat`/`stopButton`) trebuie să
- * existe în pagină, să nu fie prea generic (>20 potriviri), să fie vizibil și
- * să nu poarte eticheta unui buton de cont/marketing (login/upgrade/download/…).
- * Regulile erau aplicate doar la descoperirea proactivă (validateSelectors);
- * acum sunt folosite și pe drumul healer-ului (checkRequestedSlots), unde
- * propunerea de `newChat` era acceptată fără nicio verificare.
+ * v2.8 (FIX 3): semnalul de „chat nou" din SEMNALELE elementului (nu din șirul
+ * selectorului). `new-chat`/`new_chat`/`newchat` devin „new chat" înainte de
+ * potrivire, deci prinde `data-testid="create-new-chat-button"` ca și
+ * `aria-label="New chat"`.
  */
-async function probeActionSelector(page: Page, selector: string): Promise<ActionProbe> {
-  let probe: SlotProbe | null = null;
+const NEWCHAT_PRESENT_RE =
+  /(?:^|[^a-z])(new chat|chat nou|nou chat|new conversation|new convo|create new|start new)(?:[^a-z]|$)/;
+
+/**
+ * v2.8 (FIX 3): elementul e un control de acțiune valid (<button>/<a> ori
+ * role=button/link) care POARTĂ semnalul de „chat nou". Vizibilitatea nu se
+ * cere: sidebar-ul îngust / submeniul colapsat ascunde un buton corect.
+ */
+function isNewChatControl(probe: SlotProbe): boolean {
+  const tag = String(probe.tag || '').toLowerCase();
+  const role = String(probe.role || '').toLowerCase();
+  if (tag !== 'button' && tag !== 'a' && role !== 'button' && role !== 'link') return false;
+  const flat = String(probe.label || '')
+    .replace(/[-_]+/g, ' ')
+    .toLowerCase();
+  return NEWCHAT_PRESENT_RE.test(flat);
+}
+
+/**
+ * v2.8 (FIX 3): citește primul element al unui selector de acțiune — există?
+ * e vizibil? ce tag/rol/semnale poartă? Rulează ÎN PAGINĂ (`page.evaluate`),
+ * deci fără referințe la variabile din afara funcției. `count: -1` = selector
+ * invalid, `null` = verificarea a eșuat.
+ */
+async function probeActionElement(page: Page, selector: string): Promise<SlotProbe | null> {
   try {
-    probe = await page.evaluate<SlotProbe, { s: string }>(
+    return await page.evaluate<SlotProbe, { s: string }>(
       (args) => {
         let nodes: NodeListOf<Element>;
         try {
@@ -1800,15 +1830,51 @@ async function probeActionSelector(page: Page, selector: string): Promise<Action
         const st = window.getComputedStyle(el);
         const visible =
           r.width >= 6 && r.height >= 6 && st.visibility !== 'hidden' && st.display !== 'none';
-        return { count, visible };
+        const parts: string[] = [];
+        for (const a of ['aria-label', 'title', 'data-testid', 'data-test-id', 'name', 'id']) {
+          const v = el.getAttribute(a);
+          if (v) parts.push(v);
+        }
+        const cls = el.className;
+        if (typeof cls === 'string' && cls) parts.push(cls);
+        const role = el.getAttribute('role');
+        if (role) parts.push(role);
+        parts.push(el.innerText || el.textContent || '');
+        return { count, visible, tag: el.tagName.toLowerCase(), role, label: parts.join(' ') };
       },
       { s: selector }
     );
-  } catch (e: any) {
-    const detail = e?.message ?? String(e);
-    return { ok: false, log: detail, reason: 'the proposed selector could not be checked (' + detail + ')' };
+  } catch {
+    return null;
   }
-  if (!probe || probe.count === -1) {
+}
+
+/**
+ * v2.6.1 (FIX 2): un selector de acțiune (`newChat`/`stopButton`) trebuie să
+ * existe în pagină, să nu fie prea generic (>20 potriviri), să fie vizibil și
+ * să nu poarte eticheta unui buton de cont/marketing (login/upgrade/download/…).
+ * Regulile erau aplicate doar la descoperirea proactivă (validateSelectors);
+ * acum sunt folosite și pe drumul healer-ului (checkRequestedSlots), unde
+ * propunerea de `newChat` era acceptată fără nicio verificare.
+ *
+ * v2.8 (FIX 3): pentru `newChat` vizibilitatea nu mai e obligatorie — un buton
+ * corect poate fi ascuns de un sidebar îngust / submeniu colapsat (vezi
+ * isNewChatControl). `stopButton` păstrează regula strictă.
+ */
+async function probeActionSelector(
+  page: Page,
+  selector: string,
+  slot: SlotName = 'newChat'
+): Promise<ActionProbe> {
+  const probe = await probeActionElement(page, selector);
+  if (!probe) {
+    return {
+      ok: false,
+      log: 'nu a putut fi verificat',
+      reason: 'the proposed selector could not be checked on the page'
+    };
+  }
+  if (probe.count === -1) {
     return { ok: false, log: 'selector invalid', reason: 'the proposed selector is not valid CSS' };
   }
   if (probe.count === 0) {
@@ -1828,9 +1894,6 @@ async function probeActionSelector(page: Page, selector: string): Promise<Action
         ' matches) — use the attributes of the element itself'
     };
   }
-  if (!probe.visible) {
-    return { ok: false, log: 'invizibil', reason: 'the proposed element is not visible on the page' };
-  }
   if (NON_ACTION_RE.test(selector)) {
     return {
       ok: false,
@@ -1838,6 +1901,17 @@ async function probeActionSelector(page: Page, selector: string): Promise<Action
       reason:
         'the proposed element is an account/marketing action button (login/upgrade/download/…), not the element requested'
     };
+  }
+  if (!probe.visible) {
+    // v2.8 (FIX 3): `newChat` nu mai cere vizibilitate absolută. Log-ul real era
+    // `respins newChat (invizibil): button[aria-label="New chat"]` — selectorul
+    // CORECT, respins pentru că sidebar-ul îngust ascunde butonul. Se respinge
+    // doar dacă elementul nu există deloc (mai sus, count === 0).
+    if (slot === 'newChat' && isNewChatControl(probe)) {
+      log('newChat accepted (hidden but present): ' + selector);
+      return { ok: true, count: probe.count };
+    }
+    return { ok: false, log: 'invizibil', reason: 'the proposed element is not visible on the page' };
   }
   return { ok: true, count: probe.count };
 }
@@ -2019,7 +2093,9 @@ export async function validateChatInputSelector(
  *
  * Reguli (toate măsurate cu reader-ul real — getLastResponseText, care scoate
  * și blocurile de thinking, vezi scanResponses):
- *  1. selectorul trebuie să dea ≥ RESPONSE_MIN_CHARS (200) caractere de text;
+ *  1. selectorul trebuie să dea text de răspuns REAL — v2.8 (FIX 2): ≥ 30 de
+ *     caractere (nul nu mai e 200), SAU peste 3 cuvinte, SAU element existent +
+ *     text non-gol + vizibil; se respinge doar textul gol/doar spații (< 10);
  *  2. dacă în pagină există un tool call (ACTION:/TOOL:/```/---FILE---) pe care
  *     selectorul nu-l citește, selectorul e respins (Fix 2);
  *  3. un selector prea specific urcă la părintele cu de 2x mai mult text (Fix 3);
@@ -2030,8 +2106,39 @@ export async function validateChatInputSelector(
  *     răspuns real de măsurat (vezi și deferral-ul din findSelectorsWithAI).
  * ------------------------------------------------------------------------- */
 
-/** Sub atâtea caractere de text real, „răspunsul" e doar un fragment. */
-export const RESPONSE_MIN_CHARS = 200;
+/**
+ * v2.8 (FIX 2): sub atâtea caractere de text real nu mai vorbim de un „răspuns
+ * complet". Pragul era 200 (v2.5.47, bug #106) — dar răspunsurile SCURTE sunt
+ * valide, iar log-ul real arăta exact opusul:
+ *   [ai-finder] response selector rejected: only 60 chars (need >200)
+ *   [ai-finder] functional test failed for response div.DilRenderer...: only 60 chars
+ * Un salut („Salut! Cu ce te pot ajuta?") are ~60 de caractere ⇒ validatorul
+ * respingea selectorul CORECT. Vezi și RESPONSE_MIN_WORDS / RESPONSE_MIN_ABS_CHARS.
+ */
+export const RESPONSE_MIN_CHARS = 30;
+
+/**
+ * v2.8 (FIX 2): regula adaptivă — un text cu mai mult de atâtea cuvinte e un
+ * răspuns chiar dacă e scurt („Am terminat treaba acum." = 23 caractere,
+ * 4 cuvinte). Se aplică împreună cu RESPONSE_MIN_CHARS (OR).
+ */
+export const RESPONSE_MIN_WORDS = 3;
+
+/**
+ * v2.8 (FIX 2): pragul absolut. Sub el textul e gol sau doar spații — SINGURUL
+ * caz în care propunerea AI se respinge pe lungime.
+ */
+export const RESPONSE_MIN_ABS_CHARS = 10;
+
+/**
+ * v2.8 (FIX 2): pragul pentru PĂRINȚI / fallback-uri rămâne cel de dinainte
+ * (200 caractere). Acolo selectorul nu vine de la AI, ci e ghicit de noi
+ * (bug #106: `div.chat-response-message` → fragment de 67 de caractere), iar un
+ * bloc generic scurt poate fi orice etichetă de UI. Pragul adaptiv se aplică
+ * doar propunerii AI, care e verificată structural (nu input, nu bulă de user,
+ * vizibilă) și are deja citirea reală a răspunsului.
+ */
+export const RESPONSE_FALLBACK_MIN_CHARS = 200;
 
 /** Markerii unui tool call: dacă sunt în pagină, selectorul trebuie să-i prindă. */
 export const RESPONSE_TOOL_MARKERS = ['ACTION:', 'TOOL:', '```', '---FILE---'];
@@ -2050,8 +2157,9 @@ const RESPONSE_MAX_ANCESTORS = 3;
  * v2.5.47 (bug #106): mare intenționat — un selector de răspuns CORECT prinde
  * sute de noduri într-o conversație lungă (`[data-message-author-role="assistant"]`
  * e chiar selectorul static de la ChatGPT, iar citirea ia oricum ULTIMUL nod).
- * Plasa de siguranță pentru `response` e CONȚINUTUL (≥ 200 caractere, tool call
- * prins, fără promo/ecou), nu numărul de potriviri.
+ * Plasa de siguranță pentru `response` e CONȚINUTUL (v2.8: text real, nu gol —
+ * vezi RESPONSE_MIN_ABS_CHARS — tool call prins, fără promo/ecou), nu numărul de
+ * potriviri.
  */
 const RESPONSE_MAX_MATCHES = 500;
 
@@ -2387,6 +2495,34 @@ function hasToolMarker(text: string): boolean {
   return false;
 }
 
+/** v2.8 (FIX 2): câte cuvinte are textul de răspuns (regula adaptivă + log). */
+function countResponseWords(text: string): number {
+  return String(text || '')
+    .split(/\s+/)
+    .filter(Boolean).length;
+}
+
+/** v2.8 (FIX 2): o singură linie, cu AMBELE măsurători — vezi testul din spec. */
+function logResponseAccepted(chars: number, words: number): void {
+  log('response selector accepted (' + chars + ' chars, ' + words + ' words)');
+}
+
+/**
+ * v2.8 (FIX 2): textul unei propuneri AI e un răspuns valid? Regula din spec,
+ * ca „sau" de condiții:
+ *   - se respinge DOAR textul gol / doar spații (sub RESPONSE_MIN_ABS_CHARS);
+ *   - ≥ RESPONSE_MIN_CHARS (30) caractere ⇒ valid;
+ *   - peste RESPONSE_MIN_WORDS (3) cuvinte ⇒ valid (răspuns scurt dar real);
+ *   - altfel ⇒ valid: elementul există (count > 0), e vizibil și textul e
+ *     non-gol — verificările structurale de dinainte au dovedit deja asta.
+ */
+function responseTextAccepted(chars: number, words: number): boolean {
+  if (chars < RESPONSE_MIN_ABS_CHARS) return false;
+  if (chars >= RESPONSE_MIN_CHARS) return true;
+  if (words > RESPONSE_MIN_WORDS) return true;
+  return true;
+}
+
 /** Textul pe care îl dă un selector azi, cu ACELAȘI reader ca la rulare. */
 async function readResponseText(page: Page, selector: string): Promise<string> {
   try {
@@ -2418,7 +2554,7 @@ export async function validateResponseSelector(
   if (want) {
     try {
       probe = await probeResponseElement(page, want, {
-        minChars: RESPONSE_MIN_CHARS,
+        minChars: RESPONSE_FALLBACK_MIN_CHARS,
         maxChars: RESPONSE_MAX_CHARS,
         maxAncestors: RESPONSE_MAX_ANCESTORS,
         maxMatches: RESPONSE_MAX_MATCHES,
@@ -2434,10 +2570,6 @@ export async function validateResponseSelector(
   let chars = 0;
   let bestChars = 0;
   let needMarker = false;
-  /** Propunerea AI a trecut de verificările structurale (nu e input/bulă/etc.). */
-  let structurallyOk = false;
-  /** Cel mai mult text dat de părinți/fallback-uri (baza excepției de mai jos). */
-  let bestOther = 0;
 
   if (want && probe) {
     let structural: string | null = null;
@@ -2466,7 +2598,6 @@ export async function validateResponseSelector(
         }
       }
     } else {
-      structurallyOk = true;
       const text = await readResponseText(page, want);
       chars = text.length;
       bestChars = chars;
@@ -2483,19 +2614,21 @@ export async function validateResponseSelector(
         needMarker = true;
         log('response selector missed tool call markers');
         reason = 'response selector missed tool call markers';
-      } else if (chars < RESPONSE_MIN_CHARS) {
-        // Fix 1: fragment de răspuns, nu răspunsul întreg.
-        log('response selector rejected: only ' + chars + ' chars (need >' + RESPONSE_MIN_CHARS + ')');
-        reason = 'only ' + chars + ' chars (need >' + RESPONSE_MIN_CHARS + ')';
       } else {
         const phrase = promoPhraseHit(text);
-        if (phrase) {
+        const words = countResponseWords(text);
+        if (!responseTextAccepted(chars, words)) {
+          // v2.8 (FIX 2): singurul eșec pe lungime — răspuns gol / doar spații.
+          log('response selector rejected: only ' + chars + ' chars (empty reply)');
+          reason = 'only ' + chars + ' chars (empty reply)';
+        } else if (phrase) {
           log('response selector rejected (promo text „' + phrase + '"): ' + want);
           reason = 'the text is a promo card ("' + phrase + '")';
         } else if (opts.echoText && echoContains(text, opts.echoText)) {
           log('response selector rejected (it contains the message we just sent): ' + want);
           reason = 'it contains the message we just sent';
         } else {
+          logResponseAccepted(chars, words);
           return {
             ok: true,
             reason: 'ok',
@@ -2518,8 +2651,8 @@ export async function validateResponseSelector(
   for (const f of RESPONSE_FALLBACK_SELECTORS) candidates.push({ selector: f, source: 'fallback' });
   // Fix 4b doar când știm că tocmai s-a trimis un mesaj (ancora = mesajul
   // nostru, deci „text nou"): la descoperirea proactivă, de pe un ecran de
-  // bun-venit, un bloc generic de 200+ caractere poate fi marketing sau
-  // istoric, nu răspuns (Fix 5: mai bine amânăm decât să învățăm ceva greșit).
+  // bun-venit, un bloc generic lung poate fi marketing sau istoric, nu răspuns
+  // (Fix 5: mai bine amânăm decât să învățăm ceva greșit).
   if (probe && opts.echoText) {
     for (const g of probe.genericCandidates) candidates.push({ selector: g, source: 'fallback' });
   }
@@ -2531,12 +2664,13 @@ export async function validateResponseSelector(
     const text = await readResponseText(page, c.selector);
     const n = text.length;
     if (n > bestChars) bestChars = n;
-    if (n > bestOther) bestOther = n;
     if (containsThinkingMarkers(text)) {
       log('response rejected: contains thinking markers');
       continue;
     }
-    if (n < RESPONSE_MIN_CHARS) continue;
+    // v2.8 (FIX 2): pragul adaptiv se aplică DOAR propunerii AI; aici (părinți /
+    // fallback-uri ghicite de noi) rămâne pragul de 200 de caractere.
+    if (n < RESPONSE_FALLBACK_MIN_CHARS) continue;
     if (c.source === 'parent' && n <= Math.max(chars, 1) * RESPONSE_PARENT_TEXT_RATIO) continue;
     if (needMarker && !hasToolMarker(text)) continue;
     if (promoPhraseHit(text)) continue;
@@ -2546,38 +2680,13 @@ export async function validateResponseSelector(
         ? 'response selector upgraded to parent: '
         : 'response selector fallback: ') + c.selector
     );
+    logResponseAccepted(n, countResponseWords(text));
     return {
       ok: true,
       reason: 'ok',
       selector: c.selector,
       source: c.source,
       chars: n,
-      bestChars,
-      retryable: false
-    };
-  }
-
-  // Fix 1 (excepție): un răspuns CHIAR scurt (sub 200 de caractere) nu e un
-  // fragment. Dacă propunerea a trecut verificările structurale, nu pierde
-  // niciun tool call și în pagină nu există text semnificativ mai mare, e cea
-  // mai bună variantă — altfel am refuza orice răspuns scurt („Ok, gata.")
-  // exact când selectorul static e rupt. Doar în reparația reactivă: `echoText`
-  // e mesajul tocmai trimis, deci știm că un răspuns există.
-  if (
-    structurallyOk &&
-    chars > 0 &&
-    chars < RESPONSE_MIN_CHARS &&
-    !needMarker &&
-    opts.echoText &&
-    bestOther < Math.max(chars * RESPONSE_PARENT_TEXT_RATIO, RESPONSE_MIN_CHARS)
-  ) {
-    log('response selector accepted as-is (short reply, ' + chars + ' chars)');
-    return {
-      ok: true,
-      reason: 'ok',
-      selector: want,
-      source: 'ai',
-      chars,
       bestChars,
       retryable: false
     };
@@ -2592,7 +2701,7 @@ export async function validateResponseSelector(
     source: 'none',
     chars,
     bestChars,
-    retryable: bestChars >= RESPONSE_MIN_CHARS
+    retryable: bestChars >= RESPONSE_FALLBACK_MIN_CHARS
   };
 }
 
@@ -2604,9 +2713,12 @@ export async function validateResponseSelector(
  * există, e vizibil, dar NU e butonul de chat nou. Înainte de `learn()`, Freekit
  * TESTEAZĂ candidatul în pagină:
  *   - newChat : click → URL schimbat SAU conversația s-a golit; etichetele de
- *               acțiune (retry/regenerate/edit/delete) sunt respinse din start;
+ *               acțiune (retry/regenerate/edit/delete) sunt respinse din start.
+ *               v2.8 (FIX 3): un control de „chat nou" prezent în DOM e acceptat
+ *               fără click (poate fi ascuns într-un sidebar îngust);
  *   - input   : type „x" → textul apare în căsuță → șterge; altfel respins;
- *   - response: citirea dă >RESPONSE_MIN_CHARS caractere; altfel respins.
+ *   - response: citirea dă un răspuns REAL (v2.8: ≥ 30 de caractere sau peste
+ *               3 cuvinte, non-gol și vizibil); altfel respins.
  * Eșecul se loghează cu `[healer] candidate rejected: <selector> (functional
  * test failed)` și candidatul NU se salvează.
  * ------------------------------------------------------------------------- */
@@ -2665,6 +2777,11 @@ async function nonNewChatLabelHit(page: Page, selector: string): Promise<string 
 /**
  * Click pe un candidat de newChat și măsurarea efectului.
  *
+ * v2.8 (FIX 3): înainte de click, un candidat care EXISTĂ în DOM și poartă
+ * semnalul de „chat nou" (button/a cu aria-label ori text) e acceptat direct —
+ * butonul real poate fi ascuns de un sidebar îngust, iar click-ul pe un element
+ * ascuns expiră și respingea un selector corect.
+ *
  * Testul se face DOAR pe un chat gol: click-ul e atunci ne-distructiv, iar
  * butonul corect lasă conversația goală (sau schimbă URL-ul). Pe o conversație
  * cu răspunsuri NU apăsăm nimic — un candidat greșit (ex. „retry") ar putea
@@ -2681,6 +2798,19 @@ async function functionallyValidateNewChat(
   if (badLabel) {
     log('functional test failed for newChat ' + selector + ': action label (' + badLabel + ')');
     return false;
+  }
+  // v2.8 (FIX 3): un control de „chat nou" PREZENT în DOM e acceptat fără
+  // click — poate fi ascuns (sidebar îngust / submeniu colapsat), iar click-ul
+  // pe un element ascuns așteaptă 5 s și pica. Se respinge doar dacă elementul
+  // nu există deloc (count === 0).
+  const probe = await probeActionElement(page, selector);
+  if (probe && probe.count === 0) {
+    log('functional test failed for newChat ' + selector + ': no element matches');
+    return false;
+  }
+  if (probe && probe.count > 0 && probe.count <= 20 && isNewChatControl(probe)) {
+    log('newChat accepted (hidden but present): ' + selector);
+    return true;
   }
   const responseSelectors = selectors.candidates(providerId, 'response');
   let replies = 0;
@@ -2806,8 +2936,8 @@ export async function validateSelectors(
     }
     if (slot === 'response') {
       // v2.5.47 (bug #106): conținutul, nu doar existența — vezi
-      // validateResponseSelector (≥200 caractere, tool call prins, părinte,
-      // fallback generic).
+      // validateResponseSelector (v2.8: text de răspuns real, tool call prins,
+      // părinte, fallback generic).
       const check = await validateResponseSelector(page, sel, { echoText: opts.echoText });
       if (!check.ok) {
         log('respins response (' + check.reason + '): ' + sel);
@@ -2820,7 +2950,7 @@ export async function validateSelectors(
     try {
       // v2.5.47 (bug #106): aici rămân doar `newChat`/`stopButton` — `response`
       // are propriul drum, cu validare de conținut (validateResponseSelector).
-      const probe = await probeActionSelector(page, sel);
+      const probe = await probeActionSelector(page, sel, slot);
       if (!probe.ok) {
         log('respins ' + slot + ' (' + probe.log + '): ' + sel);
         continue;

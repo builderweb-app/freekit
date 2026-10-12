@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.8.7.1
+
+**La ChatGPT, mesajul nu mai e lipit cu `keyboard.insertText` (trunchiază la ~12k caractere), ci printr-un `ClipboardEvent('paste')` REAL — ProseMirror ia tot textul dintr-o dată: 18.579 de caractere ajung în composer întregi (nu 12.278), iar și bucățile din split trec prin paste real.**
+
+- **Lipire prin ClipboardEvent, doar la ChatGPT (FIX 1).** `fastPasteVerified()` din [src/providers/base.ts](./src/providers/base.ts) lipea cu `page.keyboard.insertText()` (CDP `Input.insertText`) la toți providerii; log v2.8.7: 18.579 de caractere trimise → composer 12.278, iar split-ul în 7 bucăți nu repara nimic (tot 12.278) → promptul trunchiat pleca mai departe, iar ChatGPT răspundea fără `ACTION:`/`PATH:`. Acum, la ChatGPT, textul se lipește ca un paste de om: un `ClipboardEvent('paste')` cu `text/plain` în `clipboardData`, aruncat pe composerul din `composerLocator()` (`#prompt-textarea`), pe care ProseMirror îl preia nativ, cu TOT textul.
+- **Rezerve în lanț + tastarea de dinainte (FIX 2).** Verificarea de lungime rămâne singura autoritate: dacă eventul nu ajunge, încercarea următoare folosește `document.execCommand('insertText')`, apoi `view.pasteText()` direct în view-ul ProseMirror (`el.pmViewDesc.view`) și, la urmă, `keyboard.insertText`. Fiecare cădere e logată (`execCommand(insertText) unavailable — falling back to typing`, `ProseMirror view not reachable — falling back to typing`), iar metoda fiecărei încercări e logată (`chatgpt paste attempt 2/4 via exec-command`).
+- **Chunk-urile trec prin aceeași lipire (FIX 3).** După cele 4 încercări, split-ul de ~3.000 de caractere lipește fiecare bucată tot prin ClipboardEvent (nu prin `insertText`, care trunchia ȘI acolo — de aceea 7 bucăți ajungeau la 12.278), apoi verifică lungimea cumulată exact ca înainte.
+- **Ceilalți provideri: neschimbat.** DeepSeek, Claude, Gemini, Mistral, Qwen și Ollama rămân pe `keyboard.insertText` (le funcționează) — singura condiție e `providerId === 'chatgpt'`.
+- Verificat în Chromium (Playwright, DOM de test tip composer ChatGPT/ProseMirror, cu tastarea blocată prin `beforeinput` ca pe site): 18.579 de caractere lipite dintr-o mișcare → `paste attempt 1: 18579 chars → composer has 18579 — ok`, o singură lipire; mesaj de 37 de caractere → `composer has 37`; paste ignorat de editor → `chatgpt paste attempt 2/4 via exec-command` → 18.579; execCommand indisponibil → cădere pe tastare, tot 18.579; nicio metodă nu poate scrie → `false`, fără excepție; composer care trunchiază FIECARE lipire la 3.000 de caractere (ca site-ul real) → `splitting into 7 chunks` → 7×`ok` → `composer verified: 18579 chars`; textarea altui provider → zero ClipboardEvent și comportamentul de dinainte.
+- Build: version **2.8.7 → 2.8.8** (build etichetat v2.8.7.1 — numerotarea cu 4 părți nu e semver; identic cu precedentul v2.8.6.1 → 2.8.7).
+
 ## v2.8.6.1
 
 **La ChatGPT, golirea composerului (ProseMirror) chiar golește — verificat la 0 caractere —, iar verificarea de paste are AMBELE limite: un composer mai LUNG decât mesajul (draft vechi rămas sub paste) e tratat ca eșec, golit și relipit, nu ca „ok" (înainte, 19.109 de caractere „confirmau" un mesaj de 37).**

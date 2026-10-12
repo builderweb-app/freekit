@@ -1522,6 +1522,8 @@ export async function ensureComposerHasMessage(
  * mesajul (draft vechi rămas sub paste) nu mai trece ca „ok"; e golit și
  * relipit (înainte era verificată doar limita de jos, deci 19.109 caractere
  * „confirmau" un mesaj de 37).
+ * v2.8.8: la ChatGPT lipirea trece prin ClipboardEvent (nu prin
+ * `keyboard.insertText`) — vezi secțiunea „LIPIRE REALĂ PENTRU CHATGPT".
  * ========================================================================= */
 
 /** v2.8.5: sub această diferență (caractere) mesajul din composer e „întreg". */
@@ -1558,6 +1560,92 @@ export function splitIntoChunks(text: string, size: number): string[] {
   return chunks;
 }
 
+/* =========================================================================
+ * v2.8.8 — LIPIRE REALĂ PENTRU CHATGPT (ClipboardEvent)
+ * `keyboard.insertText` (CDP `Input.insertText`) trunchiază la ~12k caractere
+ * pe composerul ProseMirror al ChatGPT: log v2.8.7 — 18.579 de caractere
+ * trimise → composer 12.278, iar împărțirea în 7 chunk-uri nu a reparat nimic
+ * (tot 12.278) → promptul trunchiat pleca mai departe, iar modelul răspundea
+ * fără ACTION:/PATH:. Aici lipim ca un om: un `ClipboardEvent('paste')` real
+ * (cu `text/plain` în `clipboardData`), pe care ProseMirror îl preia nativ și
+ * ia TOT textul dintr-o dată. Dacă evenimentul nu ajunge, cădem, în ordine, pe
+ * `document.execCommand('insertText')`, pe `view.pasteText()` direct în
+ * ProseMirror și, la urmă, pe tastarea de dinainte. Ceilalți provideri rămân
+ * pe `keyboard.insertText` (le funcționează — nemodificat).
+ * ========================================================================= */
+
+/** v2.8.8: metodele de lipire la ChatGPT, în ordinea încercării. */
+const CHATGPT_PASTE_METHODS = [
+  'clipboard-event',
+  'exec-command',
+  'prosemirror',
+  'keyboard'
+] as const;
+
+type PasteMethod = (typeof CHATGPT_PASTE_METHODS)[number];
+
+/**
+ * v2.8.8: lipește `text` în composerul `target` prin metoda dată (vezi
+ * `CHATGPT_PASTE_METHODS`); dacă metoda nu e disponibilă pe DOM-ul curent, cade
+ * pe `page.keyboard.insertText` — comportamentul de dinainte de v2.8.8.
+ */
+async function pasteIntoComposer(
+  page: Page,
+  target: Locator,
+  text: string,
+  method: PasteMethod
+): Promise<void> {
+  try {
+    if (method === 'clipboard-event') {
+      await target.evaluate((el, txt) => {
+        const node = el as HTMLElement;
+        node.focus();
+        const data = new DataTransfer();
+        data.setData('text/plain', txt);
+        node.dispatchEvent(
+          new ClipboardEvent('paste', {
+            clipboardData: data,
+            bubbles: true,
+            cancelable: true
+          })
+        );
+      }, text);
+      return;
+    }
+    if (method === 'exec-command') {
+      const inserted = await target.evaluate((el, txt) => {
+        const node = el as HTMLElement;
+        node.focus();
+        try {
+          return document.execCommand('insertText', false, txt);
+        } catch {
+          return false;
+        }
+      }, text);
+      if (inserted) return;
+      logLine('human', 'execCommand(insertText) unavailable — falling back to typing');
+    }
+    if (method === 'prosemirror') {
+      const pasted = await target.evaluate((el, txt) => {
+        const node = el as HTMLElement & { pmViewDesc?: { view?: any } };
+        const view = node.pmViewDesc?.view;
+        if (!view || typeof view.pasteText !== 'function') return false;
+        node.focus();
+        view.pasteText(txt);
+        return true;
+      }, text);
+      if (pasted) return;
+      logLine('human', 'ProseMirror view not reachable — falling back to typing');
+    }
+  } catch (e: any) {
+    logLine(
+      'human',
+      method + ' paste failed (' + (e?.message ?? String(e)) + ') — falling back to typing'
+    );
+  }
+  await page.keyboard.insertText(text);
+}
+
 /**
  * v2.8.5: lipește `text` în căsuța dată, verifică LUNGIMEA din composer și —
  * dacă site-ul trunchiază — reîncearcă o dată, apoi împarte mesajul în chunk-uri.
@@ -1570,6 +1658,11 @@ export function splitIntoChunks(text: string, size: number): string[] {
  * v2.8.6.1 (FIX 2): verificarea are AMBELE limite — un composer mai LUNG decât
  * mesajul (draft vechi sub paste) e tratat ca eșec („composer has leftover") și
  * golit, nu ca „ok".
+ *
+ * v2.8.8: la ChatGPT lipirea nu mai folosește `keyboard.insertText` (trunchiază
+ * la ~12k caractere) — fiecare încercare de dinainte de împărțire folosește o
+ * metodă din `CHATGPT_PASTE_METHODS` (ClipboardEvent real → execCommand →
+ * ProseMirror → tastare); ceilalți provideri rămân pe tastare.
  */
 export async function fastPasteVerified(
   page: Page,
@@ -1586,8 +1679,20 @@ export async function fastPasteVerified(
     actual.length <= len + FAST_PASTE_LEFTOVER_TOLERANCE;
   const verified = (actual: string | null): boolean => withinBounds(actual, expected);
 
-  for (let attempt = 1; attempt <= FAST_PASTE_ATTEMPTS; attempt++) {
-    await page.keyboard.insertText(text);
+  // v2.8.8: doar ChatGPT schimbă metoda de lipire (composer ProseMirror);
+  // la ceilalți provideri `keyboard.insertText` funcționează — neschimbat.
+  const chatgpt = providerId === 'chatgpt';
+  const target = chatgpt ? await composerLocator(page, providerId ?? '', input) : input;
+  const attempts = chatgpt ? CHATGPT_PASTE_METHODS.length : FAST_PASTE_ATTEMPTS;
+  const pasteMethod = (attempt: number): PasteMethod =>
+    chatgpt ? CHATGPT_PASTE_METHODS[attempt - 1] : 'keyboard';
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const method = pasteMethod(attempt);
+    if (chatgpt) {
+      logLine('human', 'chatgpt paste attempt ' + attempt + '/' + attempts + ' via ' + method);
+    }
+    await pasteIntoComposer(page, target, text, method);
     await sleep(400);
     const actual = await read();
     if (actual === null) {
@@ -1616,7 +1721,7 @@ export async function fastPasteVerified(
         'paste attempt ' + attempt + ': ' + expected + ' chars → composer has ' + actual.length
       );
     }
-    if (attempt === FAST_PASTE_ATTEMPTS) break;
+    if (attempt === attempts) break;
     if (!leftover) {
       logLine('human', 'paste truncated — clearing and re-pasting the whole message');
     }
@@ -1627,13 +1732,17 @@ export async function fastPasteVerified(
   logLine('human', 'paste truncated — splitting into ' + chunks.length + ' chunks');
   await clearComposer(page, input, label, providerId);
 
+  // v2.8.8: la ChatGPT și bucățile trec prin lipirea reală — `insertText`
+  // trunchiază ȘI în chunk-uri (log v2.8.7: 7 bucăți → tot 12.278 din 18.579).
+  const chunkMethod: PasteMethod = chatgpt ? 'clipboard-event' : 'keyboard';
+
   let done = 0;
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
     // Cursorul trebuie să fie la FINALUL textului, altfel chunk-ul următor intră
     // la mijloc (după un paste, caretul nu rămâne garantat la capăt).
     if (i > 0) await page.keyboard.press('ControlOrMeta+End').catch(() => {});
-    await page.keyboard.insertText(chunk);
+    await pasteIntoComposer(page, target, chunk, chunkMethod);
     await sleep(250);
     done += chunk.length;
     let actual = await read();
@@ -1644,7 +1753,7 @@ export async function fastPasteVerified(
     if (!ok && (actual === null || actual.length < done - FAST_PASTE_TOLERANCE)) {
       // un chunk pierdut (focus/caret) — o singură reîncercare, apoi mergem mai departe
       await page.keyboard.press('ControlOrMeta+End').catch(() => {});
-      await page.keyboard.insertText(chunk);
+      await pasteIntoComposer(page, target, chunk, chunkMethod);
       await sleep(250);
       actual = await read();
       ok = withinBounds(actual, done);

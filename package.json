@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.8.1",
+  "version": "2.8.2",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -319,16 +319,6 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Splits large files into chunks so a browser chat (≈8k tokens per reply) does not truncate them. When a written file ends with a continuation marker (`// CONTINUARE`, `<!-- CONTINUARE -->`, `/* CONTINUARE */` or `# CONTINUARE`), Freekit automatically asks the model to continue with an `edit_file` that replaces the marker — repeating until the marker is gone (max **10** parts per file, logged as `[write] file <path> part K/10`)."
-        },
-        "freekit.planFirst": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "For complex tasks, asks the model for a numbered **plan** before it executes anything. The plan is shown in the chat and counted in Output as `[plan] generated N steps`. With `freekit.autoApprovePlan` on (default) the plan is executed immediately; turn that setting off to review and accept/reject each plan first."
-        },
-        "freekit.autoApprovePlan": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "When on, a generated plan is shown in the chat and executed **without waiting** for approval. Turn it off to keep the plan card and approve (or reject) it manually before the AI starts writing files."
         },
         "freekit.autoVerify": {
           "type": "boolean",

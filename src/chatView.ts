@@ -59,6 +59,9 @@ import {
   readDirectoryEntries,
   MAX_TEXT_RETRIES,
   TEXT_RETRY_NUDGE,
+  MAX_ECHO_RETRIES,
+  ECHO_NUDGE,
+  looksLikePromptEcho,
   MAX_REFUSAL_RETRIES,
   TOOL_REFUSAL_NUDGE,
   looksLikeIntentOnly,
@@ -2310,14 +2313,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         '\n\n---\nUSER MESSAGE:\n' + userText;
       // v1.1.0: uneltele MCP disponibile se adaugă la prompt (listă dinamică,
       // mai scurtă pentru modelele locale)
-      // v2.5.49 (FIX 3): plan înainte de execuție (se cere o dată per mesaj)
-      const planSection =
-        this.planFirstEnabled() && promptKind === 'task'
-          ? this.planPromptSection()
-          : '';
       /**
        * v2.5.71 FIX 2: în question mode NU trimitem nimic din partea de unelte
-       * (PROJECT INFO / PROJECT STRUCTURE, MCP, exemplul de marker, plan) — doar
+       * (PROJECT INFO / PROJECT STRUCTURE, MCP, exemplul de marker) — doar
        * atașamentele (dacă există), handoff-ul de provider și mesajul userului.
        */
       const questionBlock = () =>
@@ -2349,7 +2347,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           (p.local ? '' : '\n\n' + MARKER_FORMAT_EXAMPLE) +
           (p.local ? '' : this.chunkedWritePromptSection()) +
           (mcpSection ? '\n\n---\n' + mcpSection : '') +
-          planSection +
           contextBlock()
         );
       };
@@ -2522,13 +2519,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       /** v2.5.31 (bug #74): ultima eroare a unei unelte (mesajul de buclă). */
       let lastToolError = '';
       /**
-       * v2.5.49 (FIX 3): planul se cere o singură dată per mesaj (la început);
-       * `planHandled` = planul a fost deja afișat și aprobat.
-       * v2.5.71 FIX 2: în question mode planul nu se cere deloc — utilizatorul
-       * vrea răspunsul, nu un plan de execuție.
+       * v2.8.2 (FIX 2): câte nudge-uri „ai ecouat system prompt-ul" am trimis
+       * (max 1). Modelul care repetă instrucțiunile interne în loc să emită un
+       * tool call nu execută nimic — îl reluăm o singură dată, explicit.
        */
-      let planRequested = this.planFirstEnabled() && promptKind === 'task';
-      let planHandled = false;
+      let echoRetries = 0;
       /**
        * v2.5.48: când un `write_file` / `write_files` chiar a reușit dar a
        * depășit `LARGE_OUTPUT_CHARS`, atașăm sugestia de împărțire la mesajul
@@ -2621,54 +2616,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
 
         if (!toolCall) {
-          // v2.5.49 (FIX 3): plan înainte de execuție. Modelul a răspuns cu un
-          // plan (listă numerotată) în loc de un tool call: îl arătăm în chat,
-          // cerem aprobarea (card) dacă `autoApprovePlan` e oprit, apoi îi
-          // cerem să execute pasul 1. Se întâmplă O SINGURĂ dată per mesaj.
-          if (planRequested && !planHandled) {
-            const steps = this.planStepCount(aiReply);
-            if (steps >= 2) {
-              planHandled = true;
-              planRequested = false;
-              const planText = aiReply.trim();
-              log('plan generated (' + steps + ' steps) — waiting for the decision');
-              this.postVerboseStep({
-                kind: 'decision',
-                title: 'Plan (' + steps + ' steps)',
-                text: planText,
-                status: 'done'
-              });
-              const ok = await this.approvePlan(planText, steps);
-              if (!ok) {
-                planHandled = false; // poate veni un plan revizuit
-                planRequested = true;
-                logLine('plan', 'rejected by the user — asking for a revised plan');
-                this.post('notice', '📋 Plan rejected — asking for a revised plan.');
-                aiReply = await provider.send(
-                  page,
-                  'The user REJECTED the plan above. Reply with a REVISED numbered plan only (no tool calls, no files written), taking the rejection into account.',
-                  signal,
-                  followUpOpts
-                );
-                continue;
-              }
-              logLine('plan', 'approved — executing step 1');
-              aiReply = await provider.send(
-                page,
-                'Plan approved. Execute step 1 now (one tool call), then continue with the remaining steps.',
-                signal,
-                followUpOpts
-              );
-              continue;
-            }
+          // v2.8.2 (FIX 2): modelul a ECOUAT system prompt-ul („Before
+          // executing, generate a numbered plan of steps…") în loc să emită un
+          // tool call. Textul intern i-a ajuns în răspuns, deci task-ul nu
+          // avansează: O SINGURĂ reluare, cu instrucțiune explicită.
+          if (
+            promptKind === 'task' &&
+            echoRetries < MAX_ECHO_RETRIES &&
+            looksLikePromptEcho(aiReply)
+          ) {
+            echoRetries++;
+            log('model echoed system prompt — retrying with explicit instruction');
+            this.post(
+              'heal',
+              '🔁 Auto-retry ' + echoRetries + '/' + MAX_ECHO_RETRIES +
+                ': the model echoed the system prompt instead of executing — asking for ONE tool call.'
+            );
+            this.postVerboseStep({
+              kind: 'decision',
+              title:
+                'Auto-retry ' + echoRetries + '/' + MAX_ECHO_RETRIES + ' (system prompt echo)',
+              text:
+                'The model repeated system-prompt text instead of emitting a tool call — re-asking for exactly ONE tool call and nothing else.',
+              status: 'done'
+            });
+            aiReply = await provider.send(page, ECHO_NUDGE, signal, followUpOpts);
+            continue;
           }
           // v2.5.14 (bug #38): refuz al protocolului de unelte („the tools you
           // specified are not available in this session", „I can't access the
           // workspace") — de obicei providerul nu era complet logat la
           // trimitere. NU e răspuns final: o singură reluare cu nudge explicit.
           // v2.5.71 FIX 2: în question mode răspunsul direct e RĂSPUNSUL — nu-l
-          // transformăm în tool call prin nudge-uri de protocol (plan, refuz,
-          // text-în-loc-de-tool, tool call malformat).
+          // transformăm în tool call prin nudge-uri de protocol (ecou de prompt,
+          // refuz, text-în-loc-de-tool, tool call malformat).
           if (
             promptKind === 'task' &&
             refusalRetries < MAX_REFUSAL_RETRIES &&
@@ -4996,63 +4977,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         .getConfiguration('freekit')
         .get<boolean>('chunkedWrites', true) !== false
     );
-  }
-
-  /** v2.5.49 (FIX 3): setarea `freekit.planFirst` (implicit pornită). */
-  private planFirstEnabled(): boolean {
-    return (
-      vscode.workspace
-        .getConfiguration('freekit')
-        .get<boolean>('planFirst', true) !== false
-    );
-  }
-
-  /** v2.5.49 (FIX 3): setarea `freekit.autoApprovePlan` (implicit pornită). */
-  private autoApprovePlanEnabled(): boolean {
-    return (
-      vscode.workspace
-        .getConfiguration('freekit')
-        .get<boolean>('autoApprovePlan', true) !== false
-    );
-  }
-
-  /**
-   * v2.5.49 (FIX 3): numărul de pași dintr-un plan numerotat, sau 0 dacă
-   * răspunsul nu e un plan. Generic: orice listă numerotată (`1.`/`1)`), cu
-   * minim 2 pași — chiar dacă modelul nu scrie cuvântul „plan".
-   */
-  private planStepCount(reply: string): number {
-    const lines = String(reply ?? '').split(/\r?\n/);
-    const steps = lines.filter((l) => /^\s{0,4}(?:\d{1,2}[.)]|[-*]\s+\*\*)/.test(l));
-    const numbered = lines.filter((l) => /^\s{0,4}\d{1,2}[.)]\s+\S/.test(l));
-    if (numbered.length >= 2) return numbered.length;
-    if (/\bplan\b/i.test(reply) && steps.length >= 2) return steps.length;
-    return 0;
-  }
-
-  /** v2.5.49 (FIX 3): instrucțiunea de plan, atașată la promptul principal. */
-  private planPromptSection(): string {
-    return (
-      '\n\n---\nPLAN FIRST:\nBefore executing, generate a numbered plan of steps. ' +
-      (this.autoApprovePlanEnabled()
-        ? 'Ask for as many steps as the task needs; after the plan, start immediately with step 1 — no approval is needed.'
-        : 'Wait for user approval before executing the first step (the user accepts or rejects the plan in the chat).')
-    );
-  }
-
-  /**
-   * v2.5.49 (FIX 3): cere aprobarea planului (cardul Accept/Reject din chat).
-   * `autoApprovePlan` (implicit pornit) sare peste card.
-   */
-  private async approvePlan(planText: string, steps: number): Promise<boolean> {
-    this.post('notice', '📋 Plan (' + steps + ' steps) — ' + planText.split(/\r?\n/)[0]);
-    if (this.autoApprovePlanEnabled()) {
-      logLine('plan', 'generated ' + steps + ' steps — auto-approved');
-      this.post('notice', '📋 Plan auto-approved — executing step 1.');
-      return true;
-    }
-    logLine('plan', 'generated ' + steps + ' steps — waiting for user approval');
-    return this.askApproval('plan', 'Plan (' + steps + ' steps)', planText);
   }
 
   /** v2.5.49 (FIX 2): setarea `freekit.chunkedWrites` — secțiunea de prompt. */

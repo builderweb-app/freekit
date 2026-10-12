@@ -1308,7 +1308,8 @@ you emit an action, Freekit executes it and returns the result. This
 is a standard function-calling pattern (like OpenAI function calling
 API).
 
-When the user asks you to create, edit, run, or delete something, use tool calls.
+When the user asks you to do something, emit a tool call immediately.
+Do not describe what you will do — do it. Do not ask for a plan or approval.
 When the user asks a question, answer directly.
 Follow the tool call format EXACTLY. The "<relative path>" in examples is a placeholder — replace it with a real filename.
 ${ENV_SECTION}
@@ -1589,6 +1590,7 @@ literal "<relative path>".
  * ========================================================================= */
 
 export const SYSTEM_PROMPT_LOCAL = `AI coding assistant in VS Code. You are a LOCAL model (small context): follow the rules EXACTLY and be concise.
+Do the task NOW: emit the tool call immediately — never reply with a plan and never ask for approval.
 ${LOCAL_ENV_NOTE}
 To use a tool, respond with ONLY this JSON (single line, nothing else):
 {"tool": "NAME", "args": {...}}
@@ -1684,6 +1686,38 @@ export function looksLikeIntentOnly(reply: string): boolean {
   const head = text.slice(0, 240);
   if (RETRY_EXPLAIN_RE.test(head)) return false;
   return RETRY_INTENT_RE.test(head);
+}
+
+/* =========================================================================
+ * v2.8.2 (FIX 2) — ECOUL SYSTEM PROMPT-ULUI
+ * v2.8.2 nu mai trimite instrucțiunea de plan (PLAN FIRST a fost eliminată),
+ * dar un model poate returna în continuare TEXT DIN PROMPTUL DE SISTEM în
+ * loc să execute — logul real: răspuns de 164 de caractere („Before
+ * executing, generate a numbered plan of steps…"), ZERO tool calls, task-ul
+ * se închidea cu „no valid tool call, final answer". chatView detectează
+ * ecoul și reia O SINGURĂ dată cu ECHO_NUDGE, care cere explicit UN tool call.
+ * ========================================================================= */
+
+export const MAX_ECHO_RETRIES = 1;
+
+/** Nudge trimis modelului când răspunsul e un ecou al system prompt-ului. */
+export const ECHO_NUDGE = `IMPORTANT: Do not describe a plan. Do not ask for approval.
+Emit ONE tool call now. Nothing else.`;
+
+/**
+ * Fraze care există DOAR în prompturile de sistem (instrucțiunile de plan din
+ * versiunile vechi, păstrate și ca gardă). Dacă apar în răspuns, modelul a
+ * ecouat instrucțiunile în loc să execute task-ul.
+ */
+const PROMPT_ECHO_RE =
+  /before executing|generate a (?:numbered\s+)?plan|numbered plan of steps|a plan of steps|ask for as many steps|no approval is needed|after the plan, start immediately/i;
+
+/**
+ * true când răspunsul conține fraze din system prompt (ecou) — merită un retry
+ * cu ECHO_NUDGE înainte de a-l trata ca răspuns final.
+ */
+export function looksLikePromptEcho(reply: string): boolean {
+  return PROMPT_ECHO_RE.test(String(reply ?? ''));
 }
 
 /* =========================================================================

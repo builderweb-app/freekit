@@ -108,8 +108,12 @@ const AI_FINDER_GLOBAL_TIMEOUT_MS = 60_000;
  * în pagină a selectorilor propuși), deci plafonul global e mai mare.
  */
 const AI_FINDER_BROWSER_GLOBAL_TIMEOUT_MS = 75_000;
-/** Proxy-ul are 30s, cu până la 45s suplimentare pentru fallback-ul browser. */
-const AI_FINDER_PROXY_GLOBAL_TIMEOUT_MS = 75_000;
+/**
+ * v2.6.1 (FIX 1): proxy-ul are 30s + până la 2 reîncercări de 10s pe răspuns
+ * trunchiat (vezi proxyAi.ts), plus până la 45s pentru fallback-ul browser —
+ * plafonul vechi de 75s ar tăia exact fallback-ul care salvează reparația.
+ */
+const AI_FINDER_PROXY_GLOBAL_TIMEOUT_MS = 100_000;
 
 /**
  * v2.5.41 (bug #96): ce ajunge în snapshot. HTML-ul complet al unui chat
@@ -201,15 +205,61 @@ interface FinderSettings {
   timeoutMs: number;
 }
 
-/** v2.5.61 (FIX 2): citește `freekit.aiSelectorFinder.mode`. */
+/** v2.7 (FIX 1): „setarea veche a dezactivat finder-ul" se loghează o dată. */
+let legacyAiFinderOffLogged = false;
+
+/**
+ * v2.7 (FIX 1 — audit C1): `true` dacă `inspect()` arată o valoare SCRISĂ de
+ * utilizator (global / workspace / folder / per-limbă) — nu doar default-ul
+ * declarat în package.json. E singurul mod de a distinge „nesetat" de „setat
+ * exact pe default", iar pentru vechiul `freekit.aiSelectorFinder` (default
+ * `false`) distincția e totul: doar un `false` scris explicit e un opt-out.
+ */
+function hasUserValue(info: unknown): boolean {
+  if (!info || typeof info !== 'object') return false;
+  const i = info as Record<string, unknown>;
+  return [
+    i.globalValue,
+    i.workspaceValue,
+    i.workspaceFolderValue,
+    i.globalLanguageValue,
+    i.workspaceLanguageValue,
+    i.workspaceFolderLanguageValue
+  ].some((value) => value !== undefined);
+}
+
+/**
+ * v2.5.61 (FIX 2): citește `freekit.aiSelectorFinder.mode`.
+ *
+ * v2.7 (FIX 1 — audit C1): onorează și cheia DEPRECATĂ
+ * `freekit.aiSelectorFinder` (boolean). Era declarată în package.json „ca să
+ * funcționeze setările vechi", dar niciun cod nu o citea: cine o setase pe
+ * `false` (opt-out explicit) primea `mode = api-proxy`, deci DOM-ul paginii
+ * pleca la proxy în ciuda opt-out-ului. `mode` are prioritate; vechiul boolean
+ * contează doar când `mode` nu e setat explicit.
+ */
 function aiFinderMode(): AiFinderMode {
   try {
     // require lazy — în teste Node modulul 'vscode' poate lipsi
     const v = require('vscode') as typeof import('vscode');
+    const cfg = v.workspace.getConfiguration('freekit');
+
+    if (!hasUserValue(cfg.inspect('aiSelectorFinder.mode'))) {
+      const legacySet = hasUserValue(cfg.inspect('aiSelectorFinder'));
+      if (legacySet && cfg.get<boolean>('aiSelectorFinder', false) === false) {
+        if (!legacyAiFinderOffLogged) {
+          legacyAiFinderOffLogged = true;
+          log(
+            'AI finder disabled by the deprecated freekit.aiSelectorFinder=false ' +
+              '— treating it as freekit.aiSelectorFinder.mode=off'
+          );
+        }
+        return 'off';
+      }
+    }
+
     const raw = String(
-      v.workspace
-        .getConfiguration('freekit')
-        .get<string>('aiSelectorFinder.mode', AI_FINDER_DEFAULT_MODE) ?? ''
+      cfg.get<string>('aiSelectorFinder.mode', AI_FINDER_DEFAULT_MODE) ?? ''
     )
       .trim()
       .toLowerCase();
@@ -1248,6 +1298,22 @@ async function checkRequestedSlots(
       delete discovered.response;
       continue;
     }
+    if (slot === 'newChat') {
+      // v2.6.1 (FIX 2): propunerea de `newChat` se verifică ÎN PAGINĂ (există,
+      // nu e prea generică, e vizibilă, nu e buton de cont/marketing). Înainte
+      // trecea necontrolată: un selector inventat ajungea la `learn()` și
+      // healer-ul raporta „salvat", deși butonul nu era acela.
+      const probe = await probeActionSelector(page, sel);
+      if (probe.ok) continue;
+      if (required.indexOf(slot) < 0) {
+        // slot opțional (descoperirea proactivă): un candidat prost nu are voie
+        // să blocheze restul sloturilor găsite — îl scoatem din propunere
+        log('respins newChat (' + probe.log + '): ' + sel);
+        delete discovered.newChat;
+        continue;
+      }
+      return { ok: false, reason: probe.reason, selector: sel };
+    }
   }
   return { ok: true };
 }
@@ -1699,6 +1765,81 @@ async function runFindSelectorsWithAI(
 interface SlotProbe {
   count: number;
   visible?: boolean;
+}
+
+/**
+ * v2.6.1 (FIX 2): rezultatul verificării ÎN PAGINĂ a unui selector de acțiune.
+ * `log` = fragmentul românesc din Output, `reason` = motivul în engleză trimis
+ * înapoi modelului ca reîncercarea să nu mai propună același element.
+ */
+type ActionProbe = { ok: true; count: number } | { ok: false; log: string; reason: string };
+
+/**
+ * v2.6.1 (FIX 2): un selector de acțiune (`newChat`/`stopButton`) trebuie să
+ * existe în pagină, să nu fie prea generic (>20 potriviri), să fie vizibil și
+ * să nu poarte eticheta unui buton de cont/marketing (login/upgrade/download/…).
+ * Regulile erau aplicate doar la descoperirea proactivă (validateSelectors);
+ * acum sunt folosite și pe drumul healer-ului (checkRequestedSlots), unde
+ * propunerea de `newChat` era acceptată fără nicio verificare.
+ */
+async function probeActionSelector(page: Page, selector: string): Promise<ActionProbe> {
+  let probe: SlotProbe | null = null;
+  try {
+    probe = await page.evaluate<SlotProbe, { s: string }>(
+      (args) => {
+        let nodes: NodeListOf<Element>;
+        try {
+          nodes = document.querySelectorAll(args.s);
+        } catch {
+          return { count: -1 };
+        }
+        const count = nodes.length;
+        if (count === 0 || count > 20) return { count };
+        const el = nodes[0] as HTMLElement;
+        const r = el.getBoundingClientRect();
+        const st = window.getComputedStyle(el);
+        const visible =
+          r.width >= 6 && r.height >= 6 && st.visibility !== 'hidden' && st.display !== 'none';
+        return { count, visible };
+      },
+      { s: selector }
+    );
+  } catch (e: any) {
+    const detail = e?.message ?? String(e);
+    return { ok: false, log: detail, reason: 'the proposed selector could not be checked (' + detail + ')' };
+  }
+  if (!probe || probe.count === -1) {
+    return { ok: false, log: 'selector invalid', reason: 'the proposed selector is not valid CSS' };
+  }
+  if (probe.count === 0) {
+    return {
+      ok: false,
+      log: '0 potriviri',
+      reason: 'the proposed selector matches nothing in the page'
+    };
+  }
+  if (probe.count > 20) {
+    return {
+      ok: false,
+      log: 'prea generic, ' + probe.count + ' potriviri',
+      reason:
+        'the proposed selector is too generic (' +
+        probe.count +
+        ' matches) — use the attributes of the element itself'
+    };
+  }
+  if (!probe.visible) {
+    return { ok: false, log: 'invizibil', reason: 'the proposed element is not visible on the page' };
+  }
+  if (NON_ACTION_RE.test(selector)) {
+    return {
+      ok: false,
+      log: 'buton non-acțiune',
+      reason:
+        'the proposed element is an account/marketing action button (login/upgrade/download/…), not the element requested'
+    };
+  }
+  return { ok: true, count: probe.count };
 }
 
 export interface ValidateOptions {
@@ -2475,8 +2616,51 @@ export async function validateResponseSelector(
  * v2.5.74 (FIX 1): + butoanele de banner/chrome — healer-ul alegea
  * `button[aria-label="Dismiss upgrade banner"]` pentru `claude.newChat` (există,
  * e vizibil, dar închide un banner de upsell).
+ *
+ * v2.7 (FIX 3 — audit H2): gardă de TOKEN întreg, nu substring — același
+ * principiu ca `guardedHit`/`NON_ACTION_RE` ('auth' ≠ 'author', 'earn' ≠
+ * 'learn'). Fără ea, `editor`, `closable`, `removed` sau `highlight` respingeau
+ * candidați CORECȚI; iar cum validatorul funcțional rulează și pe selectorii
+ * user-locked (healSlot), un selector manual bun putea fi numărat ca eșec,
+ * auto-unlocked (v2.5.72) și înlocuit de AI — exact ce v2.5.44 interzice.
  */
-const NON_NEWCHAT_LABEL_RE = /retry|regenerate|edit|delete|remove|dismiss|upgrade|cancel|close/i;
+const NON_NEWCHAT_LABEL_RE =
+  /(?:^|[^a-z])(retry|regenerate|edit|delete|remove|dismiss|upgrade|cancel|close)(?:[^a-z]|$)/i;
+
+/**
+ * v2.7 (FIX 3 — audit H2): caută eticheta de acțiune în SEMNALELE ELEMENTULUI
+ * (aria-label / title / placeholder / data-testid / name / id / class / text),
+ * nu în șirul selectorului. Un drum propus de AI (`aside.close-wrap > button`)
+ * sau o clasă de strămoș nu mai respinge un buton corect; dacă elementul nu
+ * poate fi citit, cădem înapoi pe textul selectorului (comportamentul de
+ * dinainte). Întoarce tokenul găsit (lowercase) sau null.
+ */
+async function nonNewChatLabelHit(page: Page, selector: string): Promise<string | null> {
+  let hay = selector;
+  try {
+    // `count()` nu așteaptă; `evaluate()` ar aștepta până la 30s elementul
+    // lipsă — exact ce NU vrem într-o buclă de validare a candidaților.
+    const loc = page.locator(selector).first();
+    if ((await loc.count()) > 0) {
+      const own = await loc.evaluate((el: Element) => {
+        const parts: string[] = [];
+        for (const attr of ['aria-label', 'title', 'placeholder', 'data-testid', 'name', 'id']) {
+          const value = el.getAttribute(attr);
+          if (value) parts.push(value);
+        }
+        const cls = (el as HTMLElement).className;
+        if (typeof cls === 'string' && cls) parts.push(cls);
+        parts.push((el as HTMLElement).innerText || el.textContent || '');
+        return parts.join(' ');
+      });
+      if (own && own.trim()) hay = own;
+    }
+  } catch {
+    /* elementul nu e (încă) în pagină sau selector invalid — testăm selectorul */
+  }
+  const match = NON_NEWCHAT_LABEL_RE.exec(hay);
+  return match ? match[1].toLowerCase() : null;
+}
 
 /**
  * Click pe un candidat de newChat și măsurarea efectului.
@@ -2493,8 +2677,9 @@ async function functionallyValidateNewChat(
   providerId: string,
   selector: string
 ): Promise<boolean> {
-  if (NON_NEWCHAT_LABEL_RE.test(selector)) {
-    log('functional test failed for newChat ' + selector + ': action label (retry/regenerate/edit/delete)');
+  const badLabel = await nonNewChatLabelHit(page, selector);
+  if (badLabel) {
+    log('functional test failed for newChat ' + selector + ': action label (' + badLabel + ')');
     return false;
   }
   const responseSelectors = selectors.candidates(providerId, 'response');
@@ -2635,44 +2820,9 @@ export async function validateSelectors(
     try {
       // v2.5.47 (bug #106): aici rămân doar `newChat`/`stopButton` — `response`
       // are propriul drum, cu validare de conținut (validateResponseSelector).
-      const probe = await page.evaluate<SlotProbe, { s: string }>(
-        (args) => {
-          let nodes: NodeListOf<Element>;
-          try {
-            nodes = document.querySelectorAll(args.s);
-          } catch {
-            return { count: -1 };
-          }
-          const count = nodes.length;
-          if (count === 0 || count > 20) return { count };
-          const el = nodes[0] as HTMLElement;
-          const r = el.getBoundingClientRect();
-          const st = window.getComputedStyle(el);
-          const visible =
-            r.width >= 6 && r.height >= 6 && st.visibility !== 'hidden' && st.display !== 'none';
-          return { count, visible };
-        },
-        { s: sel }
-      );
-
-      if (!probe || probe.count === -1) {
-        log('respins ' + slot + ' (selector invalid): ' + sel);
-        continue;
-      }
-      if (probe.count === 0) {
-        log('respins ' + slot + ' (0 potriviri): ' + sel);
-        continue;
-      }
-      if (probe.count > 20) {
-        log('respins ' + slot + ' (prea generic, ' + probe.count + ' potriviri): ' + sel);
-        continue;
-      }
-      if (!probe.visible) {
-        log('respins ' + slot + ' (invizibil): ' + sel);
-        continue;
-      }
-      if ((slot === 'newChat' || slot === 'stopButton') && NON_ACTION_RE.test(sel)) {
-        log('respins ' + slot + ' (buton non-acțiune): ' + sel);
+      const probe = await probeActionSelector(page, sel);
+      if (!probe.ok) {
+        log('respins ' + slot + ' (' + probe.log + '): ' + sel);
         continue;
       }
       assignSlot(valid, slot, sel);

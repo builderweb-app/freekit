@@ -2008,13 +2008,17 @@ export async function executeTool(
         // trimitea modelul să caute diferențe într-un fișier inexistent).
         const oldInfo = await tryReadInfo(call.args.path, workspaceRoot);
         if (!oldInfo.exists) {
-          logLine('tool', 'edit_file failed: file not found: ' + call.args.path);
+          // v2.7 (FIX 4 — audit H3): „inexistent" și „nu s-a putut citi" nu mai
+          // sunt tratate la fel — vezi readFailureError().
+          logLine(
+            'tool',
+            'edit_file failed (' + (oldInfo.reason ?? 'missing') + '): ' +
+              call.args.path +
+              (oldInfo.detail ? ' — ' + oldInfo.detail : '')
+          );
           return {
             ok: false,
-            error:
-              'File not found: ' +
-              call.args.path +
-              '. Use read_file to check the path, or write_file to create the file.'
+            error: readFailureError('edit_file', call.args.path, oldInfo)
           };
         }
         const oldContent = oldInfo.content;
@@ -2204,22 +2208,101 @@ export async function executeTool(
   }
 }
 
-/** v0.5.0: ca tryRead, dar spune și dacă fișierul exista (pentru diff-ul nativ). */
-async function tryReadInfo(
-  rel: string,
-  root: string
-): Promise<{ exists: boolean; content: string }> {
+/** v2.7 (FIX 4 — audit H3): de ce a eșuat citirea fișierului. */
+type ReadFailureReason = 'missing' | 'denied' | 'error';
+
+/** Rezultatul lui `tryReadInfo` (v2.7: include și motivul eșecului). */
+interface ReadInfo {
+  exists: boolean;
+  content: string;
+  reason?: ReadFailureReason;
+  detail?: string;
+}
+
+/**
+ * v0.5.0: ca tryRead, dar spune și dacă fișierul exista (pentru diff-ul nativ).
+ *
+ * v2.7 (FIX 4 — audit H3): întoarce și MOTIVUL eșecului. Înainte, orice eroare
+ * (permisiuni, I/O, cale respinsă de sandbox-ul de scop) devenea „fișier
+ * inexistent": edit_file trimitea modelul să recreeze fișierul (pierzând restul
+ * conținutului), iar diff-ul nativ arăta „📄 New file" peste un fișier existent.
+ */
+async function tryReadInfo(rel: string, root: string): Promise<ReadInfo> {
   try {
     const abs = safePath(rel, root);
     const content = await vscode.workspace.fs.readFile(vscode.Uri.file(abs));
     return { exists: true, content: Buffer.from(content).toString('utf8') };
-  } catch {
-    return { exists: false, content: '' };
+  } catch (e: any) {
+    const detail = String(e?.message ?? e);
+    const hay = String(e?.code ?? '') + ' ' + detail;
+    const reason: ReadFailureReason = /ENOENT|FileNotFound|no such file/i.test(hay)
+      ? 'missing'
+      : // `safePath` aruncă un Error simplu pentru căile din afara sandbox-ului.
+        /outside workspace|allowExternalPaths/i.test(detail)
+        ? 'denied'
+        : 'error';
+    return { exists: false, content: '', reason, detail };
   }
 }
 
-function makeDiff(filePath: string, oldText: string, newText: string): string {
+/**
+ * v2.7 (FIX 4 — audit H3): descrierea unui eșec de citire care NU înseamnă
+ * „fișier inexistent", sau `undefined` când absența e reală (acolo „📄 New
+ * file" e corect).
+ */
+function unreadableNote(info: ReadInfo): string | undefined {
+  if (info.exists || !info.reason || info.reason === 'missing') return undefined;
+  return info.detail ? info.reason + ': ' + info.detail : info.reason;
+}
+
+/**
+ * v2.7 (FIX 4 — audit H3): eroarea dată MODELULUI. Pentru un fișier chiar
+ * inexistent mesajul rămâne cel din v2.5.43 (bug #99); pentru o eroare de
+ * citire spunem adevărul, ca modelul să nu recreeze fișierul prin write_file.
+ */
+function readFailureError(tool: string, rel: string, info: ReadInfo): string {
+  if (!info.reason || info.reason === 'missing') {
+    return (
+      'File not found: ' +
+      rel +
+      '. Use read_file to check the path, or write_file to create the file.'
+    );
+  }
+  return (
+    'Could not read ' +
+    rel +
+    ' before ' +
+    tool +
+    ' (' +
+    info.reason +
+    (info.detail ? ': ' + info.detail : '') +
+    '). The file may exist but is not readable — do NOT recreate it with ' +
+    'write_file; report the failure to the user instead.'
+  );
+}
+
+/**
+ * v2.7 (FIX 4 — audit H3): `unreadable` = motivul pentru care conținutul vechi
+ * nu a putut fi citit (altul decât „nu există"). Marcăm explicit, ca un eșec de
+ * citire să nu fie prezentat ca fișier nou.
+ */
+function makeDiff(
+  filePath: string,
+  oldText: string,
+  newText: string,
+  unreadable?: string
+): string {
   if (!oldText) {
+    if (unreadable) {
+      return (
+        '⚠️ Could not read the previous content of ' +
+        filePath +
+        ' (' +
+        unreadable +
+        ') — showing the new content only.\n\n' +
+        newText.slice(0, 3000)
+      );
+    }
     return '📄 New file: ' + filePath + '\n\n' + newText.slice(0, 3000);
   }
   if (oldText === newText) {
@@ -2618,7 +2701,8 @@ async function writeFileTool(
   }
   // v0.5.0: preview pentru diff-ul nativ (conținut vechi + nou)
   const oldInfo = await tryReadInfo(args.path, workspaceRoot);
-  const diff = makeDiff(args.path, oldInfo.content, newContent);
+  const oldNote = unreadableNote(oldInfo);
+  const diff = makeDiff(args.path, oldInfo.content, newContent, oldNote);
   // v2.5.6 (bug #10): WARNING ONLY — semnalăm că modelul a scris altceva
   // decât fragmentele din prompt, dar NU blocăm și NU reîncercăm
   const divergent = isDivergentFromPrompt(userText, args.path, newContent);
@@ -2627,7 +2711,7 @@ async function writeFileTool(
       label: args.path,
       oldContent: oldInfo.content,
       newContent,
-      isNew: !oldInfo.exists,
+      isNew: !oldInfo.exists && !oldNote,
       divergent
     }
   ];
@@ -3674,15 +3758,16 @@ async function writeFilesBatch(
   let diffBudget = 8000;
   for (const f of files) {
     const oldInfo = await tryReadInfo(f.path, root);
+    const oldNote = unreadableNote(oldInfo);
     changes.push({
       label: f.path,
       oldContent: oldInfo.content,
       newContent: f.content,
-      isNew: !oldInfo.exists,
+      isNew: !oldInfo.exists && !oldNote,
       // v2.5.6 (bug #10): WARNING ONLY — conținut impropriat față de prompt
       divergent: isDivergentFromPrompt(userText, f.path, f.content)
     });
-    const d = makeDiff(f.path, oldInfo.content, f.content);
+    const d = makeDiff(f.path, oldInfo.content, f.content, oldNote);
     const piece =
       d.length > 1600 ? d.slice(0, 1600) + '\n[...diff trunchiat...]' : d;
     if (diffBudget <= 0) {
@@ -3920,13 +4005,14 @@ async function copyFileTool(
   if (limitErr) return { ok: false, error: limitErr };
 
   const oldInfo = await tryReadInfo(to, root);
-  const diff = makeDiff(to, oldInfo.content, replaced.content);
+  const oldNote = unreadableNote(oldInfo);
+  const diff = makeDiff(to, oldInfo.content, replaced.content, oldNote);
   const changes: FileChangePreview[] = [
     {
       label: to,
       oldContent: oldInfo.content,
       newContent: replaced.content,
-      isNew: !oldInfo.exists
+      isNew: !oldInfo.exists && !oldNote
     }
   ];
   if (!(await approve('copy_file', to, diff, changes))) {

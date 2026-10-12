@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -242,7 +242,7 @@
           "type": "boolean",
           "default": false,
           "deprecationMessage": "Deprecated — use `freekit.aiSelectorFinder.mode` instead.",
-          "markdownDescription": "**Deprecated** — use `freekit.aiSelectorFinder.mode`. Kept only so older settings files keep working; the mode setting is what the AI selector finder actually reads."
+          "markdownDescription": "**Deprecated** — use `freekit.aiSelectorFinder.mode` instead. Kept so older settings files keep working: if `freekit.aiSelectorFinder.mode` is **not** set explicitly and this is set to `false`, the AI selector finder is disabled (equivalent to `mode: \"off\"`). Any other value (or leaving it untouched) defers to `freekit.aiSelectorFinder.mode`."
         },
         "freekit.aiSelectorFinder.mode": {
           "type": "string",

@@ -92,7 +92,8 @@ import {
   readProviderHealth,
   recordProviderMalformed,
   recordProviderNoResponse,
-  recordProviderSuccess
+  recordProviderSuccess,
+  setProviderHealthRoot
 } from './providerHealth';
 import {
   buildCircuitBreakerHint,
@@ -982,6 +983,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     /** v1.7.2: rădăcina globalStorage (asset-urile Whisper pentru voice input). */
     private readonly globalStorageRoot: string = ''
   ) {
+    // v2.7 (FIX 2 — audit H1): providers/base.ts consultă starea de fiabilitate
+    // ca să plafoneze așteptarea unui provider recent „mut".
+    setProviderHealthRoot(globalStorageRoot);
     // v0.2.1: starea toggle-ului Auto-approve (persistată)
     this.autoApprove = state.get<boolean>(AUTO_APPROVE_KEY, false) === true;
     log('auto-approve: ' + (this.autoApprove ? 'ON' : 'OFF'));

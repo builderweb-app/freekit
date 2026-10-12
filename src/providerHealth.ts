@@ -146,6 +146,35 @@ export function isProviderUnhealthy(
   return Date.now() - entry.unhealthyAt < withinMs;
 }
 
+/**
+ * v2.7 (FIX 2 — audit H1): rădăcina globalStorage, înregistrată o singură dată
+ * de chatView (care o are deja). Modulele care nu primesc rădăcina — în special
+ * `providers/base.ts`, unde se calculează bugetul de așteptare — pot astfel
+ * consulta starea de fiabilitate fără să o care prin toate apelurile.
+ */
+let registeredRoot: string | undefined;
+
+/** Înregistrează rădăcina globalStorage pentru `isProviderCurrentlyUnhealthy`. */
+export function setProviderHealthRoot(root: string | undefined): void {
+  registeredRoot = root;
+}
+
+/**
+ * v2.7 (FIX 2 — audit H1): `isProviderUnhealthy` pentru rădăcina înregistrată.
+ *
+ * `recordProviderNoResponse` SCRIA `unhealthyAt`, dar nimeni nu-l citea:
+ * promisiunea din comentariul lui („ca mesajele următoare să nu-l mai aștepte
+ * degeaba") nu era implementată nicăieri. base.ts folosește acum funcția asta
+ * ca să plafoneze bugetul de așteptare al unui provider marcat „mut".
+ */
+export function isProviderCurrentlyUnhealthy(
+  name: string,
+  withinMs = UNHEALTHY_TTL_MS
+): boolean {
+  if (!registeredRoot) return false;
+  return isProviderUnhealthy(registeredRoot, name, withinMs);
+}
+
 /** v2.5.74 (FIX 5): scoate marcajul „unhealthy" (ex: după un răspuns reușit). */
 export function clearProviderUnhealthy(root: string, name: string): void {
   if (!root || !name) return;

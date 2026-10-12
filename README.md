@@ -234,8 +234,8 @@ Additional safeguards:
 | `freekit.whisperCliPath` | *(empty)* | Path to `whisper-cli` for offline voice input |
 | `freekit.whisperModelPath` | *(empty)* | Path to the Whisper ggml model (e.g. `ggml-base.bin`) |
 | `freekit.whisperTimeoutSeconds` | `180` | Timeout for one Whisper transcription (10–1200 s) |
-| `freekit.aiSelectorFinder.mode` | `api-proxy` | How a broken selector is repaired automatically: `off` / `ollama` / `browser` / `api-proxy` |
-| `freekit.aiSelectorFinder` | `false` | **Deprecated** — use `freekit.aiSelectorFinder.mode` |
+| `freekit.aiSelectorFinder.mode` | `api-proxy` | How a broken selector is repaired automatically: `off` / `ollama` / `browser` / `api-proxy`. In `api-proxy` mode a **truncated** proxy reply (the upstream stream can be cut mid-JSON) is retried up to 3 times, and only then does the browser fallback run |
+| `freekit.aiSelectorFinder` | `false` | **Deprecated** — use `freekit.aiSelectorFinder.mode`. Still honoured as an opt-out: when `mode` is **not** set explicitly and this is `false`, the AI selector finder is disabled (same as `mode: "off"`). Any other value defers to `mode` |
 | `freekit.aiFinderModel` | `auto` | Ollama model for the AI selector finder in `ollama` mode |
 | `freekit.aiFinderTimeoutSeconds` | `30` | Timeout per AI selector-analysis attempt in `ollama` mode |
 | `freekit.aiFinderProxyUrl` | `https://freekitproxy.identitate-brand.workers.dev` | Endpoint used by `api-proxy` mode |

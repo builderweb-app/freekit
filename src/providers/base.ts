@@ -24,6 +24,7 @@ import {
 import { installMutationTracker, waitForAbort, waitStep } from '../mutation';
 import { autoAcceptPopups } from '../popups';
 import { logLine } from '../log';
+import { isProviderCurrentlyUnhealthy, UNHEALTHY_TTL_MS } from '../providerHealth';
 import {
   DetectedProviderError,
   detectProviderError,
@@ -109,6 +110,18 @@ const STUCK_ABORT_MS = 90_000;
 const PROVIDER_TIMEOUT_OVERRIDE_MS: Record<string, number> = {
   qwen: 30_000
 };
+
+/**
+ * v2.7 (FIX 2 — audit H1): plafonul de așteptare pentru un provider marcat
+ * „unhealthy" (mut la un mesaj recent — vezi `recordProviderNoResponse`).
+ * `unhealthyAt` era scris, dar niciodată citit: mesajele următoare așteptau
+ * din nou tot bugetul (până la 90s) pentru un provider despre care știam deja
+ * că nu răspunde. Același raționament ca override-ul de mai sus pentru Qwen.
+ */
+const UNHEALTHY_WAIT_MS = 30_000;
+
+/** v2.7 (FIX 2): providerii pentru care am anunțat deja plafonul în chat. */
+const unhealthyNoticesShown = new Set<string>();
 
 /** v2.5.74 (FIX 5): promptul SIMPLU pentru reîncercarea unui provider mut. */
 const SIMPLE_RETRY_PROMPT =
@@ -1560,7 +1573,30 @@ export async function sendAndWait(
   // override-ul per provider (Qwen: 30s).
   const configuredTimeoutMs = providerTimeoutMs();
   const overrideMs = PROVIDER_TIMEOUT_OVERRIDE_MS[providerId];
-  const hardTimeoutMs = overrideMs ? Math.min(configuredTimeoutMs, overrideMs) : configuredTimeoutMs;
+  // v2.7 (FIX 2 — audit H1): un provider marcat „unhealthy" (mut la un mesaj
+  // recent) nu mai consumă tot bugetul. `unhealthyAt` era scris de
+  // `recordProviderNoResponse`, dar niciodată citit — promisiunea „mesajele
+  // următoare nu-l mai așteaptă degeaba" nu exista în cod.
+  const unhealthyMs = isProviderCurrentlyUnhealthy(providerId)
+    ? UNHEALTHY_WAIT_MS
+    : undefined;
+  if (unhealthyMs && !unhealthyNoticesShown.has(providerId)) {
+    unhealthyNoticesShown.add(providerId);
+    log(
+      label + ': marked unhealthy in the last ' +
+        Math.round(UNHEALTHY_TTL_MS / 60_000) + ' min — capping the wait at ' +
+        Math.round(UNHEALTHY_WAIT_MS / 1000) + 's'
+    );
+    cfg.onNotice?.(
+      '⏱️ ' + label + ' was unresponsive recently — waiting at most ' +
+        Math.round(UNHEALTHY_WAIT_MS / 1000) + 's before retrying.'
+    );
+  }
+  const hardTimeoutMs = Math.min(
+    configuredTimeoutMs,
+    overrideMs ?? Number.POSITIVE_INFINITY,
+    unhealthyMs ?? Number.POSITIVE_INFINITY
+  );
   // pragul de „provider blocat" nu poate depăși bugetul efectiv
   const stuckAbortMs = Math.min(STUCK_ABORT_MS, hardTimeoutMs);
   let started = Date.now();

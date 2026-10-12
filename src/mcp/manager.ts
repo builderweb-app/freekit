@@ -63,6 +63,16 @@ export class McpManager {
     this.notify = fn ?? (() => undefined);
   }
 
+  /**
+   * v2.7 (FIX 5 — audit H4): afișează în chat eroarea de configurare întâlnită
+   * de `loadConfig()`. Fără ea, un `.vscode/mcp.json` cu JSON invalid arăta
+   * exact ca „niciun server configurat".
+   */
+  private reportConfigError(): void {
+    const err = this.client.getConfigError();
+    if (err) this.notify('⚠️ MCP: ' + err);
+  }
+
   hasServers(): boolean {
     return this.client.serverNames().length > 0;
   }
@@ -278,6 +288,8 @@ export class McpManager {
       if (Number.isFinite(toolSecs)) this.client.setToolTimeoutMs(toolSecs * 1000);
 
       await this.client.loadConfig();
+      // v2.7 (FIX 5 — audit H4): un .vscode/mcp.json invalid devine vizibil.
+      this.reportConfigError();
       const names = this.client.serverNames();
       if (!names.length) {
         log('MCP: niciun server configurat');
@@ -354,6 +366,8 @@ export class McpManager {
     }
     await this.client.stopAll();
     await this.client.loadConfig();
+    // v2.7 (FIX 5 — audit H4): și la reload, nu doar la pornire.
+    this.reportConfigError();
     const names = this.client.serverNames();
     if (!names.length) {
       this.notify('🔌 MCP: no server configuration found — everything was stopped.');

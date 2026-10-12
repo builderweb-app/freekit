@@ -241,6 +241,13 @@ export class McpClient {
   private configs: Record<string, McpServerConfig> = {};
   private states = new Map<string, McpServerInfo>();
   private opts: Required<McpClientOptions>;
+  /**
+   * v2.7 (FIX 5 — audit H4): ultima eroare de configurare întâlnită la
+   * `loadConfig()` (ex: `.vscode/mcp.json` cu JSON invalid). Înainte, un JSON
+   * stricat era înghițit mut: userul rămânea fără servere MCP și fără niciun
+   * indiciu, imposibil de distins de „nu am configurat nimic".
+   */
+  private configError?: string;
 
   /** Notificare de eroare la pornire (folosită de manager pentru UI). */
   onServerError?: (name: string, message: string) => void;
@@ -268,6 +275,7 @@ export class McpClient {
 
   async loadConfig(): Promise<void> {
     let mcpConfig: any = {};
+    this.configError = undefined;
     try {
       // require lazy — în teste Node modulul 'vscode' poate lipsi
       const v = require('vscode') as typeof vscode;
@@ -281,10 +289,18 @@ export class McpClient {
         );
         try {
           const content = await v.workspace.fs.readFile(configPath);
-          mcpConfig = JSON.parse(Buffer.from(content).toString('utf8'));
-          log('loaded .vscode/mcp.json');
+          try {
+            mcpConfig = JSON.parse(Buffer.from(content).toString('utf8'));
+            log('loaded .vscode/mcp.json');
+          } catch (e: any) {
+            // v2.7 (FIX 5 — audit H4): JSON invalid ≠ fișier lipsă.
+            const detail = String(e?.message ?? e);
+            this.configError =
+              'Invalid JSON in .vscode/mcp.json — the file is ignored: ' + detail;
+            log(this.configError);
+          }
         } catch {
-          /* fișierul nu există sau nu e JSON valid */
+          /* fișierul nu există (sau nu poate fi citit) — nu e o eroare */
         }
       }
       // 2. Fallback: settings.json
@@ -314,6 +330,15 @@ export class McpClient {
 
   getConfigs(): Record<string, McpServerConfig> {
     return { ...this.configs };
+  }
+
+  /**
+   * v2.7 (FIX 5 — audit H4): eroarea de configurare de la ultimul `loadConfig()`
+   * (sau `undefined`). Managerul o afișează în chat, ca un `.vscode/mcp.json`
+   * invalid să nu treacă drept „niciun server configurat".
+   */
+  getConfigError(): string | undefined {
+    return this.configError;
   }
 
   serverNames(): string[] {

@@ -139,6 +139,7 @@ import {
   isProviderRootUrl,
   isSelectorsBrokenError,
   isSessionReady,
+  readBrowserChatHistory,
   resumeConversation,
   sleep
 } from './providers/base';
@@ -183,6 +184,9 @@ import {
 } from './voiceRecorder';
 
 const log = (msg: string) => logLine('chat', msg);
+
+/** v2.8.3 (FIX 3): textul din log pe O SINGURĂ linie (ecoul are newline-uri). */
+const oneLine = (text: string) => String(text ?? '').replace(/\s+/g, ' ').trim();
 
 // FAZA III (E): bucla agentică — 40 de pași per mesaj
 const MAX_ITERATIONS = 40;
@@ -866,6 +870,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * dată per mesaj (vezi handleUserMessage) și citit de `openOrResumeChat`.
    */
   private handoffNeeded = true;
+  /**
+   * v2.8.3 (FIX 2): am verificat deja chatul din browser reluat de la pornire?
+   * La PRIMUL mesaj după restartul VS Code conversația salvată poate fi poluată
+   * cu un ecou al system prompt-ului (orice mesaj nou primea același ecou) —
+   * verificarea rulează o singură dată per sesiune, apoi chatul e al nostru.
+   */
+  private browserChatVerified = false;
   /** v0.2.1: aprobă automat toate operațiile care necesită confirmare. */
   private autoApprove = false;
   /** v0.4.0: guard anti-suprapunere pentru verificarea de status. */
@@ -2421,6 +2432,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               signal
             );
             if (cpHandoff) crossProviderHandoff = cpHandoff;
+            // v2.8.3 (FIX 2): chatul salvat, reluat după restart, poate fi poluat
+            // cu ecoul system prompt-ului — rotim înainte de a trimite
+            await this.ensureCleanBrowserChat(prov, prep.page, signal, label);
             // v1.8.0: dacă pagina cere CAPTCHA, Chrome e adus în față până e rezolvat
             await this.runWithCaptchaAssist(label, prep.page, signal);
             // v2.2.0: aplică modelul web ales în chip (best-effort)
@@ -2466,6 +2480,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // v2.5.50: handoff complet la schimbarea de provider (vezi mai sus).
         const cpHandoff = await this.openOrResumeChat(prov, prep.page, label, signal);
         if (cpHandoff) crossProviderHandoff = cpHandoff;
+        // v2.8.3 (FIX 2): chatul salvat, reluat după restart, poate fi poluat cu
+        // ecoul system prompt-ului — rotim înainte de a trimite
+        await this.ensureCleanBrowserChat(prov, prep.page, signal, label);
         // v1.8.0: CAPTCHA assist (reCAPTCHA / hCaptcha / Cloudflare „Just a moment”)
         await this.runWithCaptchaAssist(label, prep.page, signal);
         // v2.2.0: aplică modelul web ales în chip (best-effort)
@@ -2483,6 +2500,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         log('first AI reply length: ' + aiReply.length);
       }
       if (!provider) throw new Error('No provider available.');
+      /** v2.8.3 (FIX 1/2): eticheta providerului pentru rotirea chatului. */
+      const chatLabel = PROVIDER_LABELS[provider.name] ?? provider.name;
       /** v2.5.56 (FIX 3): providerii folosiți deja pe ACEST mesaj (auto-switch). */
       const attemptedProviders = new Set<string>([provider.name]);
 
@@ -2616,31 +2635,44 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
 
         if (!toolCall) {
-          // v2.8.2 (FIX 2): modelul a ECOUAT system prompt-ul („Before
-          // executing, generate a numbered plan of steps…") în loc să emită un
-          // tool call. Textul intern i-a ajuns în răspuns, deci task-ul nu
-          // avansează: O SINGURĂ reluare, cu instrucțiune explicită.
+          // v2.8.2 (FIX 2) → v2.8.3 (FIX 1): modelul a ECOUAT system prompt-ul
+          // („Before executing, generate a numbered plan of steps…") în loc să
+          // emită un tool call. Reluarea în ACELAȘI chat NU ajută: istoricul
+          // conține deja promptul + ecoul propriu, deci modelul îl repetă (log
+          // real: același răspuns de 164 de caractere la a doua încercare).
+          // Închidem chatul poluat și trimitem promptul original într-un chat
+          // NOU, cu instrucțiunea explicită de a emite UN tool call.
           if (
             promptKind === 'task' &&
             echoRetries < MAX_ECHO_RETRIES &&
             looksLikePromptEcho(aiReply)
           ) {
             echoRetries++;
-            log('model echoed system prompt — retrying with explicit instruction');
+            log('model echoed system prompt — opening fresh chat for retry');
+            await this.logEchoDiagnostics(page, provider, aiReply);
             this.post(
               'heal',
               '🔁 Auto-retry ' + echoRetries + '/' + MAX_ECHO_RETRIES +
-                ': the model echoed the system prompt instead of executing — asking for ONE tool call.'
+                ': the model echoed the system prompt instead of executing — closing this chat and asking for ONE tool call in a new one.'
             );
             this.postVerboseStep({
               kind: 'decision',
               title:
                 'Auto-retry ' + echoRetries + '/' + MAX_ECHO_RETRIES + ' (system prompt echo)',
               text:
-                'The model repeated system-prompt text instead of emitting a tool call — re-asking for exactly ONE tool call and nothing else.',
+                'The model repeated system-prompt text instead of emitting a tool call — the polluted chat was closed, a NEW chat was opened and the original prompt was sent again, asking for exactly ONE tool call.',
               status: 'done'
             });
-            aiReply = await provider.send(page, ECHO_NUDGE, signal, followUpOpts);
+            // chat nou: aici ecoul din istoric nu mai există
+            await this.rotateBrowserChat(provider, page, signal, chatLabel);
+            const urlBeforeRetry = page?.url();
+            aiReply = await provider.send(
+              page,
+              messageFor(provider) + '\n\n' + ECHO_NUDGE,
+              signal,
+              sendOpts
+            );
+            await this.rememberBrowserChat(provider, page, urlBeforeRetry);
             continue;
           }
           // v2.5.14 (bug #38): refuz al protocolului de unelte („the tools you
@@ -4051,6 +4083,109 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * v2.8.3 (FIX 1/2): rotește chatul web — închide conversația curentă (cea
+   * poluată cu ecoul modelului) și pornește una NOUĂ, goală, apoi așteaptă
+   * composerul. Întoarce URL-ul noului chat ('' dacă rotirea a eșuat — în acest
+   * caz apelantul continuă în chatul curent, ca la rotirea de handoff).
+   */
+  private async rotateBrowserChat(
+    provider: AIProvider,
+    page: Page | undefined,
+    signal: AbortSignal,
+    label: string
+  ): Promise<string> {
+    if (!page || provider.local) return '';
+    const pg = page;
+    try {
+      // v2.8.3: metoda de rotire a providerului; fallback pe `newChat` pentru
+      // providerii care nu o implementează încă
+      const url = provider.rotateChat
+        ? await this.runWithLoginAssist(label, pg, signal, () =>
+            provider.rotateChat!(pg)
+          )
+        : await this.runWithLoginAssist(label, pg, signal, async () => {
+            await provider.newChat(pg);
+            return pg.url();
+          });
+      // chat NOU ⇒ numărătoarea de pași + fișierele citite o iau de la 0
+      this.resetBrowserChatState();
+      log('new browser chat: ' + url + ' — fresh chat for retry');
+      return url;
+    } catch (e: any) {
+      if (this.abortRequested || e?.message === '__ABORTED__') throw e;
+      log('could not open a fresh browser chat: ' + (e?.message ?? String(e)));
+      this.post(
+        'notice',
+        '⚠️ ' + label + ': could not open a new chat (' +
+          String(e?.message ?? e) + ') — continuing in the current chat.'
+      );
+      return '';
+    }
+  }
+
+  /**
+   * v2.8.3 (FIX 3): diagnosticul ecoului — primele 100 de caractere ale
+   * răspunsului modelului și cât de încărcat e chatul din browser (N mesaje de
+   * user, M răspunsuri). Numărătoarea se citește din DOM (best-effort).
+   */
+  private async logEchoDiagnostics(
+    page: Page | undefined,
+    provider: AIProvider,
+    reply: string
+  ): Promise<void> {
+    log('echo detected: "' + oneLine(reply).slice(0, 100) + '"');
+    const history =
+      page && !provider.local
+        ? await readBrowserChatHistory(page, provider.name)
+        : { userMessages: 0, assistantMessages: 0, lastAssistantText: '' };
+    log(
+      'browser chat history: ' + history.userMessages + ' user messages, ' +
+        history.assistantMessages + ' assistant messages'
+    );
+  }
+
+  /**
+   * v2.8.3 (FIX 2): chatul din browser reluat la PRIMUL mesaj după restartul
+   * VS Code vine cu tot istoricul lui. Dacă ultimul răspuns de acolo e un ecou
+   * al system prompt-ului, chatul e poluat: modelul ar răspunde iar cu ecoul.
+   * În acest caz rotim la un chat nou ÎNAINTE de trimitere. Rulează o singură
+   * dată per sesiune (de la al doilea mesaj încolo chatul e al nostru).
+   */
+  private async ensureCleanBrowserChat(
+    provider: AIProvider,
+    page: Page | undefined,
+    signal: AbortSignal,
+    label: string
+  ): Promise<void> {
+    if (this.browserChatVerified) return;
+    this.browserChatVerified = true;
+    if (!page || provider.local) return;
+    const history = await readBrowserChatHistory(page, provider.name);
+    if (
+      !history.lastAssistantText ||
+      !looksLikePromptEcho(history.lastAssistantText)
+    ) {
+      log(
+        'browser chat history: ' + history.userMessages + ' user messages, ' +
+          history.assistantMessages + ' assistant messages — no prompt echo'
+      );
+      return;
+    }
+    log('stale echoed chat detected — forcing new chat');
+    log('echo detected: "' + oneLine(history.lastAssistantText).slice(0, 100) + '"');
+    log(
+      'browser chat history: ' + history.userMessages + ' user messages, ' +
+        history.assistantMessages + ' assistant messages'
+    );
+    this.post(
+      'notice',
+      '🧹 ' + label +
+        ': the saved browser chat echoes its own instructions — starting a fresh chat so the task can run.'
+    );
+    await this.rotateBrowserChat(provider, page, signal, label);
+  }
+
+  /**
    * Reține URL-ul chatului din browser, ca mesajele următoare ale conversației
    * active să continue în el, nu să deschidă altul.
    */
@@ -4326,17 +4461,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    * ==================================================================== */
 
   /** Rulează open()/newChat(); la „cere login" aduce Chrome în față și reia după login. */
-  private async runWithLoginAssist(
+  private async runWithLoginAssist<T>(
     label: string,
     page: Page | undefined,
     signal: AbortSignal,
-    op: () => Promise<void>
-  ): Promise<void> {
+    op: () => Promise<T>
+  ): Promise<T> {
     let assists = 0;
     for (;;) {
       try {
-        await op();
-        return;
+        return await op();
       } catch (e: any) {
         if (!isLoginRequiredError(e) || !page || assists >= LOGIN_MAX_ASSISTS) throw e;
         assists++;

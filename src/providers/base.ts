@@ -984,6 +984,151 @@ export async function resumeConversation(
   await findInput(page, providerId, label, 30000);
 }
 
+/* =========================================================================
+ * v2.8.3 (FIX 1) — ROTIREA CHATULUI (chat NOU, nu retry în același chat)
+ *
+ * Un model care a ecouat system prompt-ul rămâne blocat pe ecou dacă îl
+ * re-întrebăm în ACELAȘI chat: istoricul conține deja mesajul userului
+ * (promptul de sistem) + propriul ecou, deci îl repetă (log real: același
+ * răspuns de 164 de caractere). Rotirea închide conversația poluată și
+ * pornește una goală, unde promptul original are șanse să fie executat.
+ * ========================================================================= */
+
+/**
+ * v2.8.3 (FIX 1): chat NOU în browser (închide conversația curentă) și așteaptă
+ * composerul. Întoarce URL-ul noului chat. Best-effort pe repararea butonului
+ * (vezi `newChatVia`); dacă tot rămânem pe aceeași conversație, navigăm direct
+ * la pagina de start a providerului (chat nou garantat).
+ */
+export async function rotateChatVia(
+  page: Page,
+  providerId: string,
+  label: string
+): Promise<string> {
+  const before = page.url();
+  await newChatVia(page, providerId, label);
+  // butonul poate exista fără să fi produs un chat nou (SPA lenes) — dacă URL-ul
+  // e neschimbat și nu suntem deja pe pagina de start, forțăm navigarea
+  const stillSameChat =
+    !isProviderRootUrl(page.url(), providerId) &&
+    normalizeNavUrl(page.url()) === normalizeNavUrl(before);
+  if (stillSameChat) {
+    log(label + ': rotate — still on the same conversation, navigating to a fresh chat');
+    await page.goto(selectors.url(providerId), { waitUntil: 'domcontentloaded' });
+    await autoAcceptPopups(page, { log }).catch(() => []);
+    if (isLoginUrl(page.url())) {
+      notifyNotReady(providerId, 'login page?');
+      throw loginError(providerId, page.url());
+    }
+    await findInput(page, providerId, label, 30000);
+  }
+  log(label + ': rotate — fresh chat ready at ' + page.url());
+  return page.url();
+}
+
+/* =========================================================================
+ * v2.8.3 (FIX 2/3) — CÂT DE POLLUAT E CHATUL DIN BROWSER
+ *
+ * La primul mesaj după restartul VS Code reluăm conversația din browser
+ * salvată în globalState. Dacă acolo a rămas un ecou al system prompt-ului
+ * („Before executing, generate a numbered plan…"), acela e și contextul cu
+ * care modelul ar răspunde din nou — deci chatul trebuie rotit ÎNAINTE de
+ * trimitere. Numărătoarea user/asistent e doar diagnostic (log FIX 3).
+ * ========================================================================= */
+
+/** Mesajele utilizatorului din chatul web (ChatGPT, Claude, DeepSeek…). */
+export const USER_MESSAGE_SELECTORS = [
+  '[data-message-author-role="user"]',
+  '[data-testid="user-message"]',
+  '[data-testid^="user-turn"]',
+  '[data-testid^="human-turn"]',
+  '[data-testid^="user-message"]'
+];
+
+/** Rezumatul citit din DOM al chatului web activ. */
+export interface BrowserChatHistory {
+  userMessages: number;
+  assistantMessages: number;
+  /** Textul ultimului răspuns al asistentului ('' dacă nu există). */
+  lastAssistantText: string;
+}
+
+/** Rulează în pagină: numără mesajele user/asistent (fără dubluri). */
+const scanChatHistory = (args: {
+  userSels: string[];
+  assistantSels: string[];
+}): BrowserChatHistory => {
+  const collect = (sels: string[]): Element[] => {
+    const seen = new Set<Element>();
+    const out: Element[] = [];
+    for (const sel of sels) {
+      let nodes: NodeListOf<Element>;
+      try {
+        nodes = document.querySelectorAll(sel);
+      } catch {
+        continue;
+      }
+      nodes.forEach((n) => {
+        if (!seen.has(n)) {
+          seen.add(n);
+          out.push(n);
+        }
+      });
+    }
+    return out;
+  };
+  const users = collect(args.userSels);
+  const assistants = collect(args.assistantSels);
+  const lastAssistantText = assistants.length
+    ? ((assistants[assistants.length - 1] as HTMLElement).innerText || '').trim()
+    : '';
+  return {
+    userMessages: users.length,
+    assistantMessages: assistants.length,
+    lastAssistantText
+  };
+};
+
+/** Selectorii de răspuns ai providerului + variantele generice. */
+function assistantMessageSelectors(providerId: string): string[] {
+  const sels = ['[data-message-author-role="assistant"]'];
+  try {
+    for (const sel of selectors.candidates(providerId, 'response')) {
+      if (!sels.includes(sel)) sels.push(sel);
+    }
+  } catch {
+    /* provider fără slot `response` configurat */
+  }
+  return sels;
+}
+
+/**
+ * v2.8.3 (FIX 3): ce conține chatul web activ — pentru logul de diagnostic și
+ * pentru detectarea chatului poluat. Fail-open: 0/0 pe orice eroare de DOM.
+ */
+export async function readBrowserChatHistory(
+  page: Page,
+  providerId: string
+): Promise<BrowserChatHistory> {
+  const empty: BrowserChatHistory = {
+    userMessages: 0,
+    assistantMessages: 0,
+    lastAssistantText: ''
+  };
+  try {
+    return await page.evaluate<
+      BrowserChatHistory,
+      { userSels: string[]; assistantSels: string[] }
+    >(scanChatHistory, {
+      userSels: USER_MESSAGE_SELECTORS,
+      assistantSels: assistantMessageSelectors(providerId)
+    });
+  } catch (e: any) {
+    log('reading the browser chat history failed: ' + (e?.message ?? String(e)));
+    return empty;
+  }
+}
+
 /** Apasă butonul de Stop al site-ului (best-effort, folosit la anulare). */
 export async function clickStop(page: Page, providerId: string): Promise<boolean> {
   for (const sel of selectors.candidates(providerId, 'stopButton')) {

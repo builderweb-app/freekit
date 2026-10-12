@@ -1690,17 +1690,20 @@ export function looksLikeIntentOnly(reply: string): boolean {
 
 /* =========================================================================
  * v2.8.2 (FIX 2) — ECOUL SYSTEM PROMPT-ULUI
+ * v2.8.3 (FIX 1) — reluarea se face într-un CHAT NOU, nu în cel poluat
  * v2.8.2 nu mai trimite instrucțiunea de plan (PLAN FIRST a fost eliminată),
  * dar un model poate returna în continuare TEXT DIN PROMPTUL DE SISTEM în
  * loc să execute — logul real: răspuns de 164 de caractere („Before
  * executing, generate a numbered plan of steps…"), ZERO tool calls, task-ul
  * se închidea cu „no valid tool call, final answer". chatView detectează
- * ecoul și reia O SINGURĂ dată cu ECHO_NUDGE, care cere explicit UN tool call.
+ * ecoul, închide chatul poluat (istoricul lui conținea deja promptul + ecoul,
+ * deci modelul îl repeta la nesfârșit) și retrimite promptul original într-un
+ * chat NOU, cu ECHO_NUDGE la final.
  * ========================================================================= */
 
 export const MAX_ECHO_RETRIES = 1;
 
-/** Nudge trimis modelului când răspunsul e un ecou al system prompt-ului. */
+/** Nudge atașat promptului original la retry-ul în chatul nou. */
 export const ECHO_NUDGE = `IMPORTANT: Do not describe a plan. Do not ask for approval.
 Emit ONE tool call now. Nothing else.`;
 

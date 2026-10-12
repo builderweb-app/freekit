@@ -48,6 +48,12 @@ export interface AIProvider {
   onThinking?: (text: string) => void;
   open(page: Page | undefined): Promise<void>;
   newChat(page: Page | undefined): Promise<void>;
+  /**
+   * v2.8.3 (FIX 1): rotește chatul web — închide conversația curentă (poluată)
+   * și pornește una NOUĂ, goală, apoi așteaptă composerul. Întoarce URL-ul
+   * noului chat, ca apelantul să-l poată loga / salva.
+   */
+  rotateChat?(page: Page | undefined): Promise<string>;
   /** Trimite mesajul și așteaptă răspunsul stabil. `signal` opțional pentru Stop. */
   send(
     page: Page | undefined,

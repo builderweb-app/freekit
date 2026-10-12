@@ -1,6 +1,12 @@
 import { Page } from 'playwright';
 import { AIProvider, SendOptions } from './types';
-import { clickStop, newChatVia, openProvider, sendAndWait } from './base';
+import {
+  clickStop,
+  newChatVia,
+  openProvider,
+  rotateChatVia,
+  sendAndWait
+} from './base';
 import { selectors } from '../selectors';
 
 // Toți selectorii sunt în src/selectors.json (auto-reparați la nevoie).
@@ -21,6 +27,11 @@ export class ClaudeProvider implements AIProvider {
 
   async newChat(page: Page) {
     await newChatVia(page, ID, 'Claude');
+  }
+
+  /** v2.8.3 (FIX 1): chat nou în locul celui poluat (ecou de system prompt). */
+  async rotateChat(page: Page): Promise<string> {
+    return rotateChatVia(page, ID, 'Claude');
   }
 
   async send(

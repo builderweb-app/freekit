@@ -1636,9 +1636,13 @@ export async function sendAndWait(
       // caracter încetinea vizibil trimiterea; ChatGPT/Claude păstrează
       // tastarea umană (stealth).
       const fastPaste =
-        providerId === 'deepseek' ||
-        providerId === 'gemini' ||
-        providerId === 'ollama';
+  	providerId === 'deepseek' ||
+  	providerId === 'gemini' ||
+  	providerId === 'ollama' ||
+  	providerId === 'chatgpt' ||
+  	providerId === 'claude' ||
+  	providerId === 'mistral' ||
+  	providerId === 'qwen';
       if (human.typing && !fastPaste) {
         await humanType(page, text, {}, signal);
       } else {

@@ -111,6 +111,14 @@ export interface LearnedSelector {
    * utilizatorul are ultimul cuvânt pe acel slot. Vezi learn()/learnLocked().
    */
   locked?: boolean;
+  /**
+   * v2.8.4 (FIX 1): candidații de rezervă ai unei reparații (max. 3, scor
+   * >= 50), în ordinea în care trebuie încercați. `selector` rămâne
+   * principalul (primul din listă) — se încearcă pe rând, primul care
+   * funcționează în pagină câștigă (vezi candidates()). Dacă unul pică,
+   * ceilalți preiau rolul fără o nouă reparație.
+   */
+  selectors?: string[];
 }
 
 /** Configul "bundled" din selectors.json — baza de comparație + fallback. */
@@ -512,26 +520,38 @@ export function notifySelectorAlert(alert: SelectorAlert): void {
 const HEALER_MAX_FUNCTIONAL_TRIES = 3;
 
 /**
- * v2.5.65 (FIX 2): sub acest scor healer-ul NU salvează candidatul — un scor
- * mic (ex: `#base-ui-_r_4e_` cu 7 la `claude.newChat`) înseamnă „ghiceală pe
- * un id instabil", iar salvarea lui bloca cascada: AI Finder-ul (tier 4) nu
- * mai apuca să caute. Candidatul slab se sare, se continuă cu următorii, iar
- * dacă niciunul nu trece pragul cascada merge mai departe (tier 4 → 5 → 6).
+ * v2.8.4 (FIX 1) — TREPTELE DE SCOR ALE HEALER-ULUI.
+ *
+ * v2.5.65/v2.5.74 foloseau praguri mici (10, respectiv 25) pentru că scorul
+ * era dominat de „zgomot" de formă (tag, iconiță, poziție, adâncime). Sub un
+ * prag atât de mic, ORICE element care trecea filtrul de vizibilitate putea fi
+ * salvat ca slot: pe ChatGPT, `newChat` a fost reparat cu 8 butoane GREȘITE
+ * („Add files and more", „Add new project", „Send", „Start Voice", „Dictate",
+ * „Temporary chat", două drumuri poziționale) înainte de cel real.
+ *
+ * Acum scorul e SEMANTIC (vezi stratul de roluri din scanCandidates):
+ *   HARD +100 | SOFT +50 | BLACKLIST → candidat respins instant.
+ *   - >= 80  → potrivire HARD (selectată prima);
+ *   - >= 50  → potrivire SOFT (acceptată doar dacă nu există HARD);
+ *   - < 50   → EȘEC: healer-ul NU forțează o ghicire, cascada merge mai departe
+ *              (tier 4 AI Finder → 5 backup → 6/7).
  */
-const MIN_HEALER_SCORE = 10;
+const HEALER_HARD_SCORE = 80;
+
+/** v2.8.4 (FIX 1): pragul minim (SOFT_MATCH) sub care nimic nu se salvează. */
+const HEALER_SOFT_SCORE = 50;
 
 /**
- * v2.5.74 (FIX 1): pragul pentru `newChat` e mai mare — un buton de chat nou
- * trebuie să poarte semnalul lui explicit („new chat"/„chat nou"), nu doar tag +
- * poziție. Fără el, `button[aria-label="Dismiss upgrade banner"]` (Claude)
- * câștiga scanul și era învățat ca buton de chat nou.
+ * v2.8.4 (FIX 1): câți candidați (cu scor >= SOFT) se salvează ca ARRAY de
+ * fallback-uri — se încearcă pe rând, primul care funcționează câștigă.
  */
-const NEWCHAT_MIN_SCORE = 25;
+const HEALER_MAX_CANDIDATES = 3;
 
-/** v2.5.74 (FIX 1): pragul de salvare al unui candidat, per slot. */
-function minHealerScore(slot: SlotName): number {
-  return slot === 'newChat' ? NEWCHAT_MIN_SCORE : MIN_HEALER_SCORE;
-}
+/**
+ * v2.8.4 (FIX 1): câte respingeri se loghează detaliat (restul, însumate) —
+ * log-ul de reparație trebuie să spună DE CE a fost refuzat fiecare candidat.
+ */
+const HEALER_MAX_REJECT_LOGS = 5;
 
 export class SelectorStore {
   private overrides = new Map<string, LearnedSelector>();
@@ -592,6 +612,21 @@ export class SelectorStore {
         purged++;
         log('fragile (positional) override ignored: ' + item.provider + '.' + item.slot + ' -> ' + item.selector);
         continue;
+      }
+      // v2.8.4 (FIX 1): candidații de rezervă trec prin ACEEAȘI filtrare ca
+      // fiecare intrare proaspătă (utilizabil / stabil / neblocat); ce rămâne
+      // fără niciunul nu mai ține câmpul.
+      if (Array.isArray(item.selectors)) {
+        item.selectors = item.selectors.filter(
+          (sel) =>
+            typeof sel === 'string' &&
+            !!sel.trim() &&
+            sel !== item.selector &&
+            isUsableSelector(sel) &&
+            !isFragileSelector(sel) &&
+            !isPersistBlocked(item.slot, sel)
+        );
+        if (!item.selectors.length) delete item.selectors;
       }
       this.overrides.set(this.key(item.provider, item.slot), item);
     }
@@ -715,13 +750,21 @@ export class SelectorStore {
    * v2.5.75 (FIX 2): un selector-fallback FRAGIL (pozițional) are un singur rost —
    * să prindă elementul când nimic stabil nu mai există — deci stă la COADĂ, ca
    * să nu umbrească selectorii statici (buni) de dinaintea lui.
+   * v2.8.4 (FIX 1): o reparație salvează până la 3 candidați (`selectors`) —
+   * toți intră în listă, în ordinea salvată (primul e cel mai bine cotat).
    */
   candidates(providerId: string, slot: SlotName): string[] {
     const learned = this.overrides.get(this.key(providerId, slot));
     const list = [...this.staticCandidates(providerId, slot)];
-    if (learned && !list.includes(learned.selector)) {
-      if (learned.how === 'fragile') list.push(learned.selector);
-      else list.unshift(learned.selector);
+    if (learned) {
+      // `selectors` poate veni din persistență FĂRĂ primul element (a fost
+      // scos ca duplicat la salvare) — `selector` rămâne mereu capul listei.
+      const learnedList = [learned.selector, ...(learned.selectors ?? [])];
+      const extra = learnedList.filter((sel, i) => !!sel && learnedList.indexOf(sel) === i && list.indexOf(sel) < 0);
+      if (extra.length) {
+        if (learned.how === 'fragile') list.push(...extra);
+        else list.unshift(...extra);
+      }
     }
     return list;
   }
@@ -949,6 +992,68 @@ export class SelectorStore {
       log('notifier failed: ' + (e?.message ?? String(e)));
     }
     return true;
+  }
+
+  /**
+   * v2.8.4 (FIX 1): salvează o REPARAȚIE cu mai mulți candidați (până la 3, în
+   * ordinea în care trebuie încercați — vezi HEALER_MAX_CANDIDATES). Primul e
+   * scris și în `selector` (compatibilitate: `learned()?.selector` rămâne
+   * selectorul principal), restul în `selectors`. Fiecare candidat trece prin
+   * aceleași filtre ca `learn()`; ce nu trece e aruncat. Întoarce lista
+   * salvată (goală dacă nimic nu a putut fi stocat).
+   */
+  learnMany(
+    providerId: string,
+    slot: SlotName,
+    sels: string[],
+    how: LearnHow
+  ): string[] {
+    const list: string[] = [];
+    for (const raw of sels || []) {
+      const sel = String(raw || '').trim();
+      if (!sel || sel.length > 400) continue;
+      if (!isUsableSelector(sel)) continue;
+      if (isFragileSelector(sel)) continue;
+      if (isPersistBlocked(slot, sel)) continue;
+      if (list.indexOf(sel) < 0) list.push(sel);
+    }
+    if (!list.length) return [];
+    const key = this.key(providerId, slot);
+    const existing = this.overrides.get(key);
+    if (existing?.locked) {
+      healLog(
+        'skip ' + providerId + ':' + slot + ' — user-locked (keeping "' + existing.selector +
+          '", refused ' + list.length + ' selector(s) from ' + how + ')'
+      );
+      return [];
+    }
+    const same =
+      existing?.selector === list[0] &&
+      (existing.selectors ?? []).join('\u0000') === list.slice(1).join('\u0000');
+    if (same) return list;
+
+    const entry: LearnedSelector = {
+      provider: providerId,
+      slot,
+      selector: list[0],
+      how,
+      at: Date.now()
+    };
+    if (list.length > 1) entry.selectors = list;
+    this.overrides.set(key, entry);
+    this.failures.delete(key);
+    this.unlockedUserLocks.delete(key);
+    log(
+      'selector repaired: ' + key + ' -> ' + list[0] + ' (' + how +
+        (list.length > 1 ? ', ' + list.length + ' candidates' : '') + ')'
+    );
+    void this.persist();
+    try {
+      this.notifier?.(entry);
+    } catch (e: any) {
+      log('notifier failed: ' + (e?.message ?? String(e)));
+    }
+    return list;
   }
 
   /**
@@ -1227,7 +1332,11 @@ export const selectors = new SelectorStore();
  * fără referințe la variabile din afara funcției.
  * ========================================================================= */
 
-interface ScanArgs {
+/**
+ * v2.8.4 (FIX 1): exportate (tip + funcție) ca să poată fi testate izolat, cu
+ * un DOM sintetic (vezi nota de la `export const scanCandidates`).
+ */
+export interface ScanArgs {
   fp: Fingerprint;
   slot: SlotName;
   /** Blacklist-ul de false-positive — trimis ca argument ca să rămână o
@@ -1246,21 +1355,31 @@ interface ScanArgs {
   navSels?: string[];
 }
 
-interface ScanResult {
+export interface ScanResult {
   selector: string;
   score: number;
   why: string[];
   preview: string;
   /**
-   * v2.8.1 (FIX 1): tokenii din blacklist-ul semantic care au respins
-   * candidatul (doar `newChat`). Candidatul se întoarce DOAR ca healer-ul să-l
-   * poată raporta (`candidate rejected: … (semantic)`) — nu intră niciodată în
+   * v2.8.4 (FIX 1): motivul pentru care candidatul a fost RESPINS din start
+   * (blacklist universal/de rol sau altă funcție de UI), ex: `blacklist: add
+   * files`. Candidatul se întoarce DOAR ca healer-ul să-l poată raporta
+   * (`[healer] rejected: … (blacklist: add files)`) — nu intră niciodată în
    * testul funcțional sau în `learn()`.
    */
-  semantic?: string[];
+  reject?: string;
+  /** v2.8.4 (FIX 1): potrivirea semantică (HARD >= 80 / SOFT >= 50). */
+  tier?: 'hard' | 'soft';
 }
 
-const scanCandidates = (args: ScanArgs): ScanResult[] => {
+/**
+ * v2.8.4 (FIX 1): EXPORTATĂ pentru testare izolată — scoring-ul semantic
+ * (HARD/SOFT/BLACKLIST) e testat cu un DOM sintetic, fără browser real:
+ *   page.evaluate(scanCandidates, { fp, slot, ... }).
+ * Funcția rămâne autonomă (rulează serializată în pagină), deci nu are voie să
+ * refere variabile din afara corpului ei.
+ */
+export const scanCandidates = (args: ScanArgs): ScanResult[] => {
   const fp: any = args.fp || {};
   const slot: string = args.slot;
   const blacklist: string[] = (args.blacklist || []).map((k) => String(k).toLowerCase());
@@ -1302,40 +1421,6 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
   // v2.5.74 (FIX 1): butoanele de banner / chrome (upgrade, dismiss, close,
   // cancel) nu sunt butonul de chat nou — vezi scorul de `newChat`.
   const NEWCHAT_CHROME_TOKENS = ['dismiss', 'close', 'upgrade', 'cancel'];
-  // v2.8 (FIX 1/4): SCORUL SEMANTIC de `newChat` — potrivirea pe FUNCȚIE, nu
-  // doar pe frază. (a) orice semnal de „chat nou" din aria-label/title/testid/
-  // id/clase (ex: `data-testid="create-new-chat-button"`) primește un bonus
-  // mare; (b) tokenii altei FUNCȚII (trimite, oprește, atașează, setări, cont,
-  // căutare, temă) sunt penalizați puternic. Fără (b), un buton de chrome
-  // („Search", „Settings") aflat în header câștiga doar prin poziție.
-  const NEWCHAT_SEMANTIC_BONUS = 35;
-  const NEWCHAT_SEMANTIC_RE =
-    /(?:^|[^a-z0-9])(?:(?:new|nou|create|start|compose)[\s]{0,2}(?:chat|conversation|convo)|(?:chat|conversation|convo)[\s]{0,2}nou)(?:[^a-z0-9]|$)/;
-  const NEWCHAT_WRONG_SLOT_RE =
-    /(?:^|[^a-z0-9])(send|submit|stop|abort|attach|upload|mic|voice|settings|theme|help|search|login|sign[\s_-]?in|sign[\s_-]?out|account|profile|logout|pricing|subscription|language)(?:[^a-z0-9]|$)/;
-  /* v2.8.1 (FIX 1): BLACKLIST-UL SEMANTIC COMPLET al slotului `newChat`.
-     v2.8 penaliza doar trimitere/oprire/setări/căutare/cont — healer-ul alegea
-     în continuare butoane de ALTĂ funcție, aflate în header lângă cel real:
-       [healer] heal chatgpt.newChat -> button[aria-label="Add files and more"] (scor 46)
-       [healer] candidate rejected: button[aria-label="Add new project"] (functional test failed)
-       [healer] candidate rejected: button[aria-label="Start Voice"] (score 21 < 25)
-     Fiecare token găsit = -40 (mai aspru decât -25 de mai sus), iar candidatul e
-     marcat `semantic` — nu se învață nici dacă rămâne cel mai bine cotat. */
-  const NEWCHAT_SEMANTIC_BLACKLIST = [
-    'add files',
-    'add file',
-    'attach',
-    'upload',
-    'dictate',
-    'voice',
-    'mic',
-    'feedback',
-    'more options',
-    'add new project',
-    'new project',
-    'start voice'
-  ];
-  const NEWCHAT_SEMANTIC_PENALTY = 40;
   // clasele/id-urile folosesc cratime (`new-chat-button`) — le tratăm ca spații la fraze
   const phraseHay = (s: string): string => s.replace(/[-_]+/g, ' ');
 
@@ -1355,6 +1440,391 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
       i = hay.indexOf(token, i + 1);
     }
     return false;
+  };
+
+  /* =====================================================================
+   * v2.8.4 (FIX 1) — SCOR SEMANTIC PE ROL: HARD / SOFT / BLACKLIST
+   *
+   * Problema (dovadă din log): scorul premia iconița, poziția, tag-ul și
+   * adâncimea, iar aria-label-ul/textul semantic conta doar ca bonus mic. Pe
+   * ChatGPT, `newChat` a fost „reparat" cu 8 butoane de ALTĂ funcție înainte
+   * de cel real („Add files and more", „Add new project", „Send", „Start
+   * Voice", „Dictate", „Temporary chat" + două drumuri poziționale), iar
+   * `response` cu `div[role="presentation"]` (18.239 de caractere = tot DOM-ul).
+   *
+   * Acum fiecare rol (slot) are trei niveluri de potrivire:
+   *   HARD_MATCH +100 | SOFT_MATCH +50 | BLACKLIST → candidat RESPINS instant.
+   * Semnalele se caută case-insensitive, cu diacriticele normalizate
+   * (ă/â/î/ș/ț → a/a/i/s/t) și cu `-`/`_` tratate ca spații, în aria-label,
+   * data-testid / data-test-id, textul vizibil, clase/id și href.
+   * Pragurile de selecție (>= 80 HARD, >= 50 SOFT, altfel eșec) sunt aplicate
+   * de healer (vezi HEALER_HARD_SCORE / HEALER_SOFT_SCORE).
+   * ===================================================================== */
+  const HARD_MATCH = 100;
+  const SOFT_MATCH = 50;
+  const BLACKLIST_MATCH = -100;
+  /**
+   * Plafonul scorului „de formă" (fingerprint: tag, atribute, poziție,
+   * adâncime, text apropiat...). SINGUR nu poate face un candidat eligibil —
+   * altfel un element fără nicio potrivire semantică (dar cu mult zgomot de
+   * formă) ar trece pragul de 50 și ar fi salvat ca slot.
+   */
+  const FINGERPRINT_SCORE_CAP = 45;
+
+  /** Normalizare: lowercase + diacritice + `-`/`_` ca spații (pentru tokeni). */
+  const normalize = (s: string): string =>
+    String(s || '')
+      .toLowerCase()
+      .replace(/[ăâ]/g, 'a')
+      .replace(/[îí]/g, 'i')
+      .replace(/[șş]/g, 's')
+      .replace(/[țţ]/g, 't')
+      .replace(/[-_]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  /**
+   * BLACKLIST UNIVERSAL (scor -100 pentru ORICE rol): un element care poartă
+   * un astfel de token e ALTĂ funcție de UI, nu slotul cerut. `submit` are
+   * voie la „send" (vezi ROLE_BLACKLIST.submit + submitReason).
+   */
+  const UNIVERSAL_BLACKLIST = [
+    'add file',
+    'add files',
+    'attach',
+    'upload',
+    'dictate',
+    'voice',
+    'start voice',
+    'microphone',
+    'record',
+    'add new project',
+    'new project',
+    'add project',
+    'search',
+    'settings',
+    'profile',
+    'account',
+    'logout',
+    'help',
+    'feedback',
+    'upgrade',
+    'pricing',
+    'temporary chat',
+    'temporary',
+    'greeting',
+    'welcome',
+    'hello'
+  ];
+
+  /**
+   * Tokeni interziși per rol, PESTE lista universală. La `newChat` rămân (din
+   * v2.8/v2.8.1) și tokenii de ALTĂ funcție care nu sunt în lista universală
+   * (temă, limbă, abonament, autentificare, oprire) — un buton de chrome din
+   * header era ales doar pentru că stătea lângă cel real.
+   */
+  const ROLE_BLACKLIST: Record<string, string[]> = {
+    newChat: [
+      'send',
+      'stop',
+      'cancel',
+      'mic',
+      'more options',
+      'theme',
+      'language',
+      'subscription',
+      'login',
+      'sign in',
+      'sign out',
+      'abort'
+    ],
+    submit: ['stop', 'cancel', 'clear'],
+    stopButton: ['new chat', 'send'],
+    input: [],
+    response: []
+  };
+
+  /** Aria-label-urile exacte de „chat nou" (HARD). */
+  const NEWCHAT_ARIA_EXACT = ['new chat', 'chat nou', 'new conversation'];
+
+  /** Clase de conținut care indică un MESAJ (nu containerul conversației). */
+  const RESPONSE_CONTENT_TOKENS = [
+    'assistant message',
+    'assistant response',
+    'model response',
+    'message content',
+    'conversation turn',
+    'claude message',
+    'markdown',
+    'prose'
+  ];
+
+  /** Semnalele elementului, normalizate o singură dată. */
+  interface RoleSignals {
+    aria: string;
+    testid: string;
+    attrs: string;
+    text: string;
+    rawHref: string;
+    type: string;
+    visible: boolean;
+    enabled: boolean;
+    blocks: boolean;
+    length: number;
+  }
+
+  interface RoleVerdict {
+    add: number;
+    why: string[];
+    tier?: 'hard' | 'soft';
+    reject?: string;
+  }
+
+  /** Cache de text: un singur `textOf` per element (scanul cheamă des). */
+  const textCache = new Map<Element, string>();
+  const textCached = (el: Element): string => {
+    let t = textCache.get(el);
+    if (t === undefined) {
+      t = textOf(el);
+      textCache.set(el, t);
+    }
+    return t;
+  };
+
+  /**
+   * v2.8.4 (FIX 1): elementul „ultimului mesaj" al conversației — cel mai
+   * EXTERIOR element din ultimul mesaj (urcăm cât timp textul rămâne identic:
+   * wrapper-e fără alt conținut), nu containerul conversației, care are și
+   * mesajele anterioare (mai mult text) și e respins de garda de ecou.
+   * Se calculează o dată per scan, de la coada pool-ului spre început.
+   */
+  let lastMessageEl: Element | null = null;
+
+  /**
+   * v2.8.4 (FIX 1): semnalul de buton TRIMITE (rolul `submit`). În acest cod
+   * trimiterea se face cu Enter (nu există un slot `submit`), deci profilul
+   * lui se aplică drept GARDĂ TRANSVERSALĂ: un control de trimitere nu e
+   * niciodată composer (`input`), buton de chat nou sau răspuns.
+   */
+  const submitReason = (tag: string, sig: RoleSignals): string | null => {
+    const sendControl =
+      (tag === 'input' && sig.type === 'submit') ||
+      sig.aria === 'send' ||
+      sig.aria === 'send message' ||
+      sig.aria === 'trimite' ||
+      sig.testid === 'send button' ||
+      sig.testid === 'composer submit';
+    return sendControl ? 'submit-control' : null;
+  };
+
+  const roleSignals = (el: Element, tag: string): RoleSignals => {
+    const attr = (name: string): string => String(el.getAttribute(name) || '');
+    const rawHref = tag === 'a' ? attr('href') : '';
+    const text = textCached(el);
+    return {
+      aria: normalize(attr('aria-label')),
+      testid: normalize(attr('data-testid') + ' ' + attr('data-test-id')),
+      attrs: normalize(signalText(el) + ' ' + rawHref),
+      text: normalize(text),
+      rawHref,
+      type: attr('type').toLowerCase(),
+      visible: isVisible(el),
+      enabled: !el.hasAttribute('disabled') && el.getAttribute('aria-disabled') !== 'true',
+      blocks: !!el.querySelector('p, li, pre, code'),
+      length: text.length
+    };
+  };
+
+  /** Scorul semantic al unui element pentru slotul cerut (hard/soft/blacklist). */
+  const roleVerdict = (el: Element, tag: string, sig: RoleSignals): RoleVerdict => {
+    /* ---- 1) BLACKLIST (universal + rol) -------------------------------- */
+    // Pentru `input`/`response` NU intră în calcul TEXTUL elementului: acolo
+    // textul e CONȚINUTUL utilizatorului, respectiv al răspunsului, nu o
+    // etichetă de UI (un răspuns care începe cu „Hello!" nu e un buton de
+    // salut, iar draftul din composer nu e „un element de căutare").
+    const textHay = slot === 'input' || slot === 'response' ? '' : sig.text;
+    const hay = sig.attrs + ' ' + textHay;
+    for (const token of UNIVERSAL_BLACKLIST) {
+      if (flatTokenHit(hay, token)) return { add: 0, why: [], reject: 'blacklist: ' + token };
+    }
+    for (const token of ROLE_BLACKLIST[slot] || []) {
+      if (flatTokenHit(hay, token)) return { add: 0, why: [], reject: 'blacklist: ' + token };
+    }
+    if (slot !== 'submit') {
+      const submit = submitReason(tag, sig);
+      if (submit) return { add: 0, why: [], reject: 'blacklist: ' + submit };
+    }
+
+    /* ---- 2) ROLUL newChat ---------------------------------------------- */
+    if (slot === 'newChat') {
+      if (NEWCHAT_ARIA_EXACT.indexOf(sig.aria) >= 0) {
+        return { add: HARD_MATCH, why: ['hard:aria=' + sig.aria], tier: 'hard' };
+      }
+      if (
+        flatTokenHit(sig.testid, 'new chat') ||
+        flatTokenHit(sig.testid, 'create new chat') ||
+        flatTokenHit(sig.testid, 'chat nou')
+      ) {
+        return { add: HARD_MATCH, why: ['hard:testid'], tier: 'hard' };
+      }
+      if (tag === 'a' && sig.rawHref === '/') {
+        return { add: HARD_MATCH, why: ['hard:href=/'], tier: 'hard' };
+      }
+      if (
+        NEW_CHAT_PHRASES.some(
+          (p) => sig.text.indexOf(p) >= 0 || sig.aria.indexOf(p) >= 0
+        )
+      ) {
+        return { add: SOFT_MATCH, why: ['soft:text'], tier: 'soft' };
+      }
+      if (
+        flatTokenHit(sig.attrs, 'new chat') ||
+        flatTokenHit(sig.attrs, 'chat nou') ||
+        flatTokenHit(sig.attrs, 'new conversation')
+      ) {
+        return { add: SOFT_MATCH, why: ['soft:attrs'], tier: 'soft' };
+      }
+      // Claude & co.: un <a href="/new"> (fără text/aria) e tot un chat nou.
+      if (tag === 'a' && /\/(?:new|nou)\/?$/i.test(sig.rawHref.split(/[?#]/)[0])) {
+        return { add: SOFT_MATCH, why: ['soft:href=new'], tier: 'soft' };
+      }
+      return { add: 0, why: [] };
+    }
+
+    /* ---- 3) ROLUL input (composer) ------------------------------------- */
+    if (slot === 'input') {
+      if (tag === 'input' && ['search', 'hidden', 'submit', 'button', 'reset', 'checkbox', 'radio', 'file'].indexOf(sig.type) >= 0) {
+        return { add: 0, why: [], reject: 'blacklist: input[type=' + sig.type + ']' };
+      }
+      if (!sig.enabled || el.hasAttribute('readonly') || el.getAttribute('aria-hidden') === 'true') {
+        return { add: 0, why: [], reject: 'blacklist: read-only/disabled' };
+      }
+      const style = String(el.getAttribute('style') || '').replace(/\s+/g, '').toLowerCase();
+      if (style.indexOf('display:none') >= 0 || style.indexOf('visibility:hidden') >= 0) {
+        return { add: 0, why: [], reject: 'blacklist: hidden' };
+      }
+      const contentEditable =
+        el.getAttribute('contenteditable') === 'true' ||
+        (el as HTMLElement).isContentEditable === true;
+      if (contentEditable && sig.visible) {
+        return { add: HARD_MATCH, why: ['hard:contenteditable'], tier: 'hard' };
+      }
+      if (tag === 'textarea' && sig.visible) {
+        return { add: HARD_MATCH, why: ['hard:textarea'], tier: 'hard' };
+      }
+      if (el.getAttribute('role') === 'textbox' && sig.visible) {
+        return { add: HARD_MATCH, why: ['hard:role=textbox'], tier: 'hard' };
+      }
+      if (tag === 'input' && (sig.type === '' || sig.type === 'text') && sig.visible) {
+        return { add: SOFT_MATCH, why: ['soft:input[type=text]'], tier: 'soft' };
+      }
+      return { add: 0, why: [] };
+    }
+
+    /* ---- 4) ROLUL response (mesajul asistentului) ---------------------- */
+    if (slot === 'response') {
+      const authorRole = String(el.getAttribute('data-message-author-role') || '').toLowerCase();
+      // mesajul UTILIZATORULUI nu e răspuns (bula noastră, nu a modelului)
+      if (authorRole === 'user') {
+        return { add: 0, why: [], reject: 'blacklist: user message' };
+      }
+      // stub de bun-venit / mesaj gol: scurt ȘI fără structură de răspuns
+      if (sig.length < 50 && !sig.blocks) {
+        return { add: 0, why: [], reject: 'blacklist: empty/short message' };
+      }
+      let tier: 'hard' | 'soft' | undefined;
+      const why: string[] = [];
+      let add = 0;
+      if (authorRole === 'assistant') {
+        add = HARD_MATCH;
+        tier = 'hard';
+        why.push('hard:data-message-author-role=assistant');
+      } else if (sig.testid === 'assistant message') {
+        add = HARD_MATCH;
+        tier = 'hard';
+        why.push('hard:testid=assistant-message');
+      } else if (flatTokenHit(sig.testid, 'conversation turn')) {
+        add = HARD_MATCH;
+        tier = 'hard';
+        why.push('hard:conversation-turn');
+      } else if (el.getAttribute('role') === 'article') {
+        add = SOFT_MATCH;
+        tier = 'soft';
+        why.push('soft:role=article');
+      } else if (lastMessageEl === el) {
+        add = SOFT_MATCH;
+        tier = 'soft';
+        why.push('soft:last-message');
+      } else if (RESPONSE_CONTENT_TOKENS.some((t) => flatTokenHit(sig.attrs, t))) {
+        add = SOFT_MATCH;
+        tier = 'soft';
+        why.push('soft:content-class');
+      }
+      // un container FĂRĂ semnal de mesaj care prinde > 5000 de caractere e
+      // tot DOM-ul (cazul real: div[role="presentation"] cu 18.239 caractere)
+      if (!tier && sig.length > 5000) {
+        add -= 80;
+        why.push('penal:whole-dom(-80)');
+      }
+      return { add, why, tier };
+    }
+
+    /* ---- 5) ROLUL stopButton ------------------------------------------- */
+    if (slot === 'stopButton') {
+      if (flatTokenHit(sig.testid, 'stop')) {
+        return { add: HARD_MATCH, why: ['hard:testid=stop'], tier: 'hard' };
+      }
+      if (sig.aria === 'stop' || sig.aria.indexOf('stop') === 0 || sig.aria.indexOf('opreste') === 0) {
+        return { add: HARD_MATCH, why: ['hard:aria=stop'], tier: 'hard' };
+      }
+      if (
+        ['stop', 'opreste', 'generating', 'arret', 'interrompre', 'detener'].some((t) =>
+          flatTokenHit(sig.attrs, t)
+        )
+      ) {
+        return { add: SOFT_MATCH, why: ['soft:stop'], tier: 'soft' };
+      }
+      return { add: 0, why: [] };
+    }
+
+    return { add: 0, why: [] };
+  };
+
+  /**
+   * v2.8.4 (FIX 1) — REGULI DE STABILITATE: penalizează selectori care se rup
+   * la prima schimbare de DOM. Preferința pentru data-testid / aria-label
+   * exact / role / href exact e implicită (ele dau potrivirea HARD/SOFT), aici
+   * doar scădem din ce e fragil.
+   */
+  const HASH_CLASS_RE = /[A-Z][a-z]+-[A-Za-z0-9]{6,}/;
+  const fragileSel = (sel: string): boolean =>
+    sel.indexOf(':nth-of-type') >= 0 || (sel.indexOf(' > ') >= 0 && !/[#.\[]/.test(sel));
+  const stabilityPenalty = (el: Element): { delta: number; why: string[] } => {
+    let delta = 0;
+    const why: string[] = [];
+    const cls =
+      typeof (el as HTMLElement).className === 'string' ? (el as HTMLElement).className : '';
+    // clase hash generate (ex: DilRenderer-tB76Jj) — se schimbă la fiecare build
+    if (HASH_CLASS_RE.test(cls)) {
+      delta -= 30;
+      why.push('penal:hash-class(-30)');
+    }
+    const cands = selectorCandidates(el);
+    // niciun selector stabil: TOȚI candidații sunt poziționali (nth-of-type)
+    if (cands.length && !cands.some((c) => !fragileSel(c))) {
+      delta -= 20;
+      why.push('penal:positional(-20)');
+    }
+    // lanț pozițional lung (ex: div > div > div > div > button)
+    const shortest = cands.reduce(
+      (acc: string | null, c) => (acc === null || c.length < acc.length ? c : acc),
+      null
+    );
+    if (shortest && shortest.split('>').length > 4) {
+      delta -= 15;
+      why.push('penal:deep-chain(-15)');
+    }
+    return { delta, why };
   };
 
   // FIX v2: 'auth' fără 'author' (ChatGPT: data-message-author-role).
@@ -1461,8 +1931,17 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
     const list: string[] = [];
     const tag = el.tagName.toLowerCase();
 
+    // v2.8.4 (FIX 1): id-urile INSTABILE (Radix/base-ui: `:r1:`, `_r_4e_`,
+    // orice id cu cifre) nu mai generează candidați — cu pragurile semantice
+    // noi, un element cu potrivire HARD (+100) ar fi salvat altfel tocmai prin
+    // `#base-ui-_r_4e_` (exact bug-ul din v2.5.65: „scor mic = ghicire pe un
+    // id instabil"). Rămân selectorii de atribut/testid/aria sau drumul
+    // pozițional (respins la salvare).
     const id = el.getAttribute('id');
-    if (id) list.push('#' + escapeSel(id));
+    const unstableId =
+      !!id &&
+      (/^base-ui-/i.test(id) || /^_r_/i.test(id) || /^:r[^:]*:/i.test(id) || /\d/.test(id));
+    if (id && !unstableId) list.push('#' + escapeSel(id));
 
     for (const a of [
       'data-testid',
@@ -1587,13 +2066,45 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
   const unique = new Set<Element>(pool);
   pool = Array.from(unique);
 
+  /* v2.8.4 (FIX 1): „ultimul mesaj" al conversației (vezi lastMessageEl) — se
+     caută o singură dată per scan, de la coada pool-ului spre început. */
+  if (slot === 'response') {
+    const messageLike = (el: Element): boolean =>
+      !inNav(el) &&
+      !isEditable(el) &&
+      !el.querySelector('textarea, [contenteditable="true"]') &&
+      textCached(el).length >= 100 &&
+      !!el.querySelector('p, li, pre, code');
+    for (let i = pool.length - 1; i >= 0 && !lastMessageEl; i--) {
+      const el = pool[i];
+      if (!messageLike(el)) continue;
+      let top: Element = el;
+      let up: Element | null = el.parentElement;
+      while (up && messageLike(up) && textCached(up).length === textCached(top).length) {
+        top = up;
+        up = up.parentElement;
+      }
+      lastMessageEl = top;
+    }
+  }
+
   /* ---- scor ---- */
-  const score = (el: Element): { score: number; why: string[]; semantic?: string[] } | null => {
+  const score = (
+    el: Element
+  ): { score: number; why: string[]; reject?: string; tier?: 'hard' | 'soft' } | null => {
     const tag = el.tagName.toLowerCase();
     if (!isVisible(el)) return null;
-    // v2.8.1 (FIX 1): tokenii din blacklist-ul semantic de `newChat` (buton de
-    // atașare/voce/meniu) — vezi NEWCHAT_SEMANTIC_BLACKLIST.
-    let semanticReject: string[] | undefined;
+
+    /* v2.8.4 (FIX 1): stratul semantic de ROL înainte de orice scor „de
+       formă" — un candidat din blacklist (universal sau de rol) e respins
+       INSTANT: nu consumă buget de test funcțional și nu ajunge la `learn()`.
+       Se întoarce doar ca healer-ul să-l poată raporta în log. */
+    const sig = roleSignals(el, tag);
+    const role = roleVerdict(el, tag, sig);
+    if (role.reject) {
+      return { score: BLACKLIST_MATCH, why: ['reject:' + role.reject], reject: role.reject };
+    }
+    const stability = stabilityPenalty(el);
 
     /* v0.9.3 FIX Kimi: slotul `response` NU poate fi căsuța de input.
        Healer-ul alesese `div.chat-input-editor[role="textbox"]` (composer-ul
@@ -1621,6 +2132,17 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
 
     let s = 0;
     const why: string[] = [];
+    /* v2.8.4 (FIX 1): potrivirea semantică (HARD/SOFT) și penalizările de
+       stabilitate intră în scor ÎNAINTE de regulile „de formă" de mai jos —
+       toate gardele lor (`s <= 0`) trebuie să vadă scorul real. */
+    if (role.add) {
+      s += role.add;
+      why.push.apply(why, role.why);
+    }
+    if (stability.delta) {
+      s += stability.delta;
+      why.push.apply(why, stability.why);
+    }
     const id = el.getAttribute('id') || '';
     if (
       id &&
@@ -1876,32 +2398,11 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
             why.push('penal:' + bad);
           }
         }
-        // v2.8 (FIX 1/4): semantic — bonus pentru semnalul de „chat nou" din
-        // ORICE atribut (inclusiv data-testid/id/clase, unde cratimele devin
-        // spații), penalizare pentru tokenii altei funcții.
-        if (NEWCHAT_SEMANTIC_RE.test(labelFlat)) {
-          s += NEWCHAT_SEMANTIC_BONUS;
-          why.push('semantic:new-chat');
-        }
-        const wrongSlot = NEWCHAT_WRONG_SLOT_RE.exec(labelFlat);
-        if (wrongSlot) {
-          s -= 25;
-          why.push('penal:not-newchat-' + wrongSlot[1]);
-        }
-        // v2.8.1 (FIX 1): blacklist-ul semantic COMPLET — atributele ȘI textul
-        // elementului (un `<button>Add files</button>` fără aria-label poartă
-        // tokenul doar în text). -40 per token, iar candidatul iese din cursă
-        // înainte de pragul de scor (vezi `semantic` în healSlot).
-        const newChatHay = phraseHay((labelHay + ' ' + textOf(el)).toLowerCase());
-        const semanticHits: string[] = [];
-        for (const bad of NEWCHAT_SEMANTIC_BLACKLIST) {
-          if (flatTokenHit(newChatHay, bad)) semanticHits.push(bad);
-        }
-        if (semanticHits.length) {
-          s -= NEWCHAT_SEMANTIC_PENALTY * semanticHits.length;
-          semanticReject = semanticHits;
-          why.push('penal:semantic-' + semanticHits.join('+'));
-        }
+        // v2.8.4 (FIX 1): bonusul semantic de „chat nou" (+35 în v2.8) și
+        // blacklist-ul semantic de `newChat` (-40/token în v2.8.1) au fost
+        // MUTATE în stratul de roluri (roleVerdict): potrivirea pe frază dă
+        // acum HARD +100 / SOFT +50, iar tokenii altei funcții (atașare, voce,
+        // proiect, căutare, setări, „temporary"...) resping candidatul instant.
         try {
           if (el.closest('header, [role="banner"], aside, nav, [class*="sidebar" i]')) {
             s += 3;
@@ -1980,11 +2481,15 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
       }
     }
 
-    // v2.8.1 (FIX 1): un candidat respins SEMANTIC se întoarce chiar și cu scor
-    // negativ — doar ca healer-ul să-l raporteze ca atare; lista de învățare îl
-    // exclude pe baza câmpului `semantic` (vezi healSlot).
-    if (s <= 0 && !semanticReject) return null;
-    return { score: s, why, semantic: semanticReject };
+    /* v2.8.4 (FIX 1): scorul „de formă" (fingerprint) NU poate singur să facă
+       un candidat eligibil — doar stratul semantic (HARD/SOFT) decide, deci un
+       element fără nicio potrivire de rol rămâne sub prag și nu se forțează
+       (cascada merge la AI Finder). Penalizările de stabilitate se scad din
+       scorul FINAL, ca să conteze și peste o potrivire hard. */
+    const base = Math.min(s - role.add - stability.delta, FINGERPRINT_SCORE_CAP);
+    const total = base + role.add + stability.delta;
+    if (total <= 0) return null;
+    return { score: Math.round(total), why, tier: role.tier };
   };
 
   interface ScanItem {
@@ -1994,8 +2499,10 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
     why: string[];
     preview: string;
     len: number;
-    /** v2.8.1 (FIX 1): tokenii din blacklist-ul semantic (doar `newChat`). */
-    semantic?: string[];
+    /** v2.8.4 (FIX 1): motivul respingerii (blacklist) — vezi ScanResult.reject. */
+    reject?: string;
+    /** v2.8.4 (FIX 1): HARD (>= 80) sau SOFT (>= 50). */
+    tier?: 'hard' | 'soft';
   }
 
   const items: ScanItem[] = [];
@@ -2003,7 +2510,7 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
     const el = pool[i];
     const r = score(el);
     if (!r) continue;
-    const text = textOf(el);
+    const text = textCached(el);
     items.push({
       el,
       idx: i,
@@ -2011,14 +2518,21 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
       why: r.why,
       preview: text.slice(0, 60) || signalText(el).slice(0, 60),
       len: text.length,
-      semantic: r.semantic
+      reject: r.reject,
+      tier: r.tier
     });
   }
 
   // păstrăm doar elementele cele mai "interioare": dacă un element conține un
-  // alt candidat aproape la fel de mare, el e doar un container (nu un mesaj)
+  // alt candidat aproape la fel de mare, el e doar un container (nu un mesaj).
+  // v2.8.4 (FIX 1): EXCEPȚIE — un candidat cu potrivire HARD nu e „un
+  // container": el e exact elementul semantic căutat (ex:
+  // `[data-message-author-role="assistant"]` înfășoară `div.markdown` cu
+  // ACELAȘI text; fără excepție, hard-match-ul era eliminat și healer-ul
+  // salva un nod interior arbitrar).
   let shortlist = items.filter(
     (it) =>
+      it.tier === 'hard' ||
       !items.some(
         (other) =>
           other !== it && it.el.contains(other.el) && other.len >= it.len * 0.7
@@ -2042,7 +2556,8 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
       score: item.score,
       why: item.why,
       preview: item.preview,
-      semantic: item.semantic
+      reject: item.reject,
+      tier: item.tier
     });
   }
   return out;
@@ -2780,56 +3295,70 @@ export async function healSlot(
       found = [];
     }
 
-    const usable = (found || []).filter(
-      (c) =>
-        !(c.semantic || []).length &&
-        isUsableSelector(c.selector) &&
-        !isPersistBlocked(slot, c.selector)
-    );
-    // v2.8 (FIX 1/4 — audit M1): pragul de scor se aplică ÎNAINTE de partiția
-    // stable/fragile și de bugetul de `HEALER_MAX_FUNCTIONAL_TRIES` încercări.
-    // Înainte, ordinea din DOM rupea sortarea pe scor (scanCandidates întoarce
-    // descrescător): trei candidați stabili sub prag consumau tot bugetul și un
-    // candidat fragil dar VALID nu era niciodată examinat („tier 3 (healer)
-    // found no candidate that passed the score/functional test", deși exista).
-    const minScore = minHealerScore(slot);
-    // v2.8.1 (FIX 1): candidații respinși SEMANTIC (buton de atașare/voce/meniu
-    // propus pentru `newChat`) se raportează ca atare și ies din cursă ÎNAINTE de
-    // pragul de scor — nu consumă buget de test funcțional și nu ajung la
-    // `learn()` nici dacă rămân cei mai bine cotați. Vezi NEWCHAT_SEMANTIC_BLACKLIST.
-    const semanticRejected = (found || []).filter((c) => (c.semantic || []).length > 0);
-    for (const c of semanticRejected.slice(0, HEALER_MAX_FUNCTIONAL_TRIES)) {
-      healLog('candidate rejected: ' + c.selector + ' (semantic)');
+    /* v2.8.4 (FIX 1): candidații din BLACKLIST (universal sau de rol) se
+       raportează ca atare și ies din cursă ÎNAINTE de orice prag — nu consumă
+       buget de test funcțional și nu ajung la `learn()` nici dacă ar rămâne
+       cei mai bine cotați. */
+    const rejected = (found || []).filter((c) => !!c.reject);
+    for (const c of rejected.slice(0, HEALER_MAX_REJECT_LOGS)) {
+      healLog('rejected: ' + c.selector + ' (' + c.reject + ')');
     }
-    if (semanticRejected.length > HEALER_MAX_FUNCTIONAL_TRIES) {
+    if (rejected.length > HEALER_MAX_REJECT_LOGS) {
       healLog(
-        semanticRejected.length - HEALER_MAX_FUNCTIONAL_TRIES +
-          ' more candidate(s) rejected on semantics'
+        rejected.length - HEALER_MAX_REJECT_LOGS + ' more candidate(s) rejected (blacklist/role)'
       );
     }
-    const eligible = usable.filter((c) => c.score >= minScore);
-    const belowScore = usable.filter((c) => c.score < minScore);
-    for (const c of belowScore.slice(0, HEALER_MAX_FUNCTIONAL_TRIES)) {
-      // v2.5.65 (FIX 2): un candidat slab nu se salvează (vezi MIN_HEALER_SCORE).
-      // v2.5.74 (FIX 1): pentru `newChat` pragul e mai mare (NEWCHAT_MIN_SCORE).
-      healLog('candidate rejected: ' + c.selector + ' (score ' + c.score + ' < ' + minScore + ')');
-    }
-    if (belowScore.length > HEALER_MAX_FUNCTIONAL_TRIES) {
-      healLog(
-        belowScore.length - HEALER_MAX_FUNCTIONAL_TRIES + ' more candidate(s) below score ' + minScore
-      );
-    }
-    // FIX v2: preferăm selectorii stabili; nth-of-type doar ca ultimă variantă.
-    // v2.8: ordinea pe scor se păstrează ÎN INTERIORUL fiecărei partiții, deci
-    // cel mai bine cotat candidat (semantic) e testat primul.
-    const byScore = [...eligible].sort((a, b) => b.score - a.score);
-    const ordered = [
-      ...byScore.filter((c) => !isFragileSelector(c.selector)),
-      ...byScore.filter((c) => isFragileSelector(c.selector))
-    ];
-    log('tier 3 (healer) trying for ' + slotKey + ' (' + ordered.length + ' candidate(s))');
 
-    // v2.5.61 (FIX 1): candidatul se TESTEAZĂ funcțional înainte de `learn()`.
+    const usable = (found || []).filter(
+      (c) => !c.reject && isUsableSelector(c.selector) && !isPersistBlocked(slot, c.selector)
+    );
+    // v2.8.4 (FIX 1): TREPTELE de scor — primul candidat cu >= 80 (HARD), altfel
+    // primul cu >= 50 (SOFT), altfel EȘEC (nu se forțează o ghicire). Un selector
+    // deja combinat (cu virgulă) pierde 5 puncte, ca să nu fie re-învățat degeaba.
+    const withScore = usable
+      .filter((c) => c.score > 0)
+      .map((c) => ({ candidate: c, score: c.selector.indexOf(',') >= 0 ? c.score - 5 : c.score }))
+      .sort((a, b) => b.score - a.score);
+    for (const { candidate, score } of withScore
+      .filter((x) => x.score < HEALER_SOFT_SCORE)
+      .slice(0, HEALER_MAX_REJECT_LOGS)) {
+      healLog('rejected: ' + candidate.selector + ' (score ' + score + ' < ' + HEALER_SOFT_SCORE + ')');
+    }
+    const lowCount = withScore.filter((x) => x.score < HEALER_SOFT_SCORE).length;
+    if (lowCount > HEALER_MAX_REJECT_LOGS) {
+      healLog(lowCount - HEALER_MAX_REJECT_LOGS + ' more candidate(s) below score ' + HEALER_SOFT_SCORE);
+    }
+    const soft = withScore.filter((x) => x.score >= HEALER_SOFT_SCORE);
+    const hard = soft.filter((x) => x.score >= HEALER_HARD_SCORE);
+    // HARD primele (treapta 1), SOFT după ele (treapta 2): dacă toți candidații
+    // HARD pică la testul funcțional, se încearcă și SOFT-urile, ca slotul să nu
+    // rămână gol degeaba. Ordinea pe scor se păstrează în fiecare treaptă.
+    const ranked = [...hard, ...soft.filter((x) => x.score < HEALER_HARD_SCORE)].map(
+      (x) => x.candidate
+    );
+    // FIX v2: preferăm selectorii stabili; nth-of-type doar ca ultimă variantă.
+    // v2.8: ordinea pe scor se păstrează ÎN INTERIORUL fiecărei partiții.
+    const ordered = [
+      ...ranked.filter((c) => !isFragileSelector(c.selector)),
+      ...ranked.filter((c) => isFragileSelector(c.selector))
+    ];
+
+    if (!ordered.length) {
+      healLog(
+        'role=' + slotKey + ' no candidate >= ' + HEALER_SOFT_SCORE +
+          ' — not forcing a guess (tier 4 next)'
+      );
+      log('tier 3 (healer) found no candidate above the semantic threshold for ' + slotKey);
+    } else {
+      healLog('role=' + slotKey + ' trying ' + ordered.length + ' candidate(s)');
+      log('tier 3 (healer) trying for ' + slotKey + ' (' + ordered.length + ' candidate(s))');
+    }
+
+    /* v2.5.61 (FIX 1): candidatul se TESTEAZĂ funcțional înainte de `learn()`.
+       v2.8.4 (FIX 1): se adună TOȚI candidații care trec testul (până la
+       HEALER_MAX_CANDIDATES) — primul e folosit imediat, restul rămân în
+       `selectors` ca rezerve, ca o schimbare de DOM să nu ceară re-heal. */
+    const proven: string[] = [];
     for (const candidate of ordered.slice(0, HEALER_MAX_FUNCTIONAL_TRIES)) {
       if (functionalValidatorFn) {
         let ok = false;
@@ -2843,44 +3372,47 @@ export async function healSlot(
           ok = false;
         }
         if (!ok) {
-          healLog('candidate rejected: ' + candidate.selector + ' (functional test failed)');
+          healLog('rejected: ' + candidate.selector + ' (functional test failed)');
           continue;
         }
       }
-      log(
-        'heal ' +
-          slotKey +
-          ' -> ' +
-          candidate.selector +
-          ' (scor ' +
-          candidate.score +
-          ' | ' +
-          candidate.why.join(', ') +
-          ')'
+      healLog(
+        'accepted: ' + candidate.selector + ' (score ' + candidate.score + ', ' +
+          (candidate.tier === 'hard' ? 'hard match' : 'soft match') + ')'
       );
+      proven.push(candidate.selector);
+      if (proven.length >= HEALER_MAX_CANDIDATES) break;
+    }
+
+    if (proven.length) {
       selectors.recordSuccess(providerId, slot);
+      const stable = proven.filter((sel) => !isFragileSelector(sel));
+      const fragile = proven.filter((sel) => isFragileSelector(sel));
       // v2.5.75 (FIX 2): un selector pozițional (fragil) nu trece prin `learn()`
       // — dar dacă e singurul care a trecut testul funcțional, îl păstrăm ca
       // FALLBACK (la coada candidaților), nu îl aruncăm. Altfel slotul rămânea
       // fără niciun selector până la următoarea rulare.
-      if (isFragileSelector(candidate.selector)) {
-        if (selectors.learnFallback(providerId, slot, candidate.selector)) {
-          log(
-            'keeping fragile fallback for ' + slotKey + ' -> ' + candidate.selector +
-              ' (no stable selector available)'
-          );
-        }
-      } else {
-        selectors.learn(providerId, slot, candidate.selector, 'fingerprint');
+      if (stable.length) {
+        const saved = selectors.learnMany(providerId, slot, stable, 'fingerprint');
+        if (saved.length) healLog('saved: ' + JSON.stringify(saved));
+      } else if (fragile.length && selectors.learnFallback(providerId, slot, fragile[0])) {
+        log(
+          'keeping fragile fallback for ' + slotKey + ' -> ' + fragile[0] +
+            ' (no stable selector available)'
+        );
       }
-      return candidate.selector;
+      const chosen = proven[0];
+      const meta = ordered.find((c) => c.selector === chosen);
+      log(
+        'heal ' + slotKey + ' -> ' + chosen +
+          (meta ? ' (scor ' + meta.score + ' | ' + meta.why.join(', ') + ')' : '')
+      );
+      return chosen;
     }
     if (ordered.length) {
       log(
         'tier 3 (healer) found no candidate that passed the score/functional test for ' + slotKey
       );
-    } else {
-      log('tier 3 (healer) found no candidate for ' + slotKey);
     }
   }
 

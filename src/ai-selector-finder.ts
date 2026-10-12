@@ -3484,6 +3484,9 @@ export function saveUserSelectors(): void {
     if (!providers[item.provider]) providers[item.provider] = {};
     providers[item.provider][item.slot] = {
       selector: item.selector,
+      // v2.8.4 (FIX 1): reparațiile cu mai mulți candidați (HARD + rezerve) se
+      // scriu ca listă, ca ordinea de încercare să supraviețuiască restartului.
+      ...(item.selectors && item.selectors.length > 1 ? { selectors: item.selectors } : {}),
       how: item.how,
       at: item.at,
       confidence: item.confidence,
@@ -3648,7 +3651,17 @@ function loadUserSelectorsFromDisk(): void {
           entry && typeof entry === 'object'
             ? { confidence: Number(entry.confidence), reasoning: String(entry.reasoning || '') }
             : undefined;
-        if (selectors.learn(pid, slot, sel.trim(), 'ai', meta2)) {
+        // v2.8.4 (FIX 1): o reparație poate avea mai mulți candidați (`selectors`)
+        // — se reîncarcă toți, în ordinea salvată.
+        const extra: string[] = Array.isArray(entry?.selectors)
+          ? entry.selectors.filter((s: unknown): s is string => typeof s === 'string' && !!s.trim())
+          : [];
+        const list = [sel.trim(), ...extra.map((s) => s.trim())];
+        const ok =
+          list.length > 1
+            ? selectors.learnMany(pid, slot, list, 'ai').length > 0
+            : selectors.learn(pid, slot, sel.trim(), 'ai', meta2);
+        if (ok) {
           loaded++;
           auto++;
         } else {

@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.8.4
+
+**Healer-ul alege selectoare după SEMNIFICAȚIE, nu după icon/poziție: fiecare slot are potriviri HARD (100) / SOFT (50) / BLACKLIST (-100), iar o reparație salvează până la 3 candidați (rezerve, încercate pe rând).**
+
+- **Scor semantic pe rol (FIX 1).** `chatgpt.newChat` alegea 8 butoane GREȘITE înainte de cel real (`Add files and more`, `Add new project`, `Send`, `Start Voice`, `Dictate`, `Temporary chat` + două drumuri poziționale), iar `chatgpt.response` putea lua `div[role="presentation"]` (18.239 caractere = tot DOM-ul), o clasă hash sau mesajul de bun-venit. Cauza: scorul premia iconița/`pos:top`/`tag:button` și trata `aria-label`-ul doar ca bonus mic. Acum ROLELE (`newChat`, `submit`, `input`, `response`, `stopButton`) au semnale explicite, căutate case-insensitive, cu diacriticele normalizate și `-`/`_` tratate ca spații, în `aria-label`, `data-testid` / `data-test-id`, textul vizibil, clase/id și `href`:
+  - `newChat`: HARD pentru `aria-label` exact „new chat"/„chat nou"/„new conversation", `data-testid` cu „new-chat"/„create-new-chat", `<a href="/">`; SOFT pentru textul/fraza de chat nou, atributele care o conțin și `href="/new"`.
+  - `input`: HARD pentru `contenteditable="true"` / `<textarea>` / `role="textbox"` vizibile și active; SOFT pentru `<input type="text">`.
+  - `response`: HARD pentru `data-message-author-role="assistant"`, `data-testid="assistant-message"`, `conversation-turn`; SOFT pentru `role="article"`, ultimul mesaj al conversației (text >= 100 + `p/pre/code`) și containerele de conținut (`markdown`, `prose`, `assistant-message`...).
+  - `stopButton`: HARD pe `stop` din `aria-label`/`data-testid`, SOFT pe tokenii de „generating"/„oprește".
+- **BLACKLIST universal (-100, respins instant):** atașare/fișiere, upload, voce/dictare/microfon/înregistrare, proiect nou, căutare, setări, profil/cont/logout, ajutor/feedback, upgrade/pricing, „temporary chat", saluturi („greeting"/„welcome"/„hello") — plus tokenii de altă funcție per rol (`send`/`stop`/`cancel` pentru `newChat`, temă/limbă/abonament/autentificare...). La `response` mesajul utilizatorului, stub-urile scurte fără structură și containerele fără semnal de mesaj care prind > 5000 de caractere (tot DOM-ul) sunt respinse/penalizate. `input` respinge `type="search"/"hidden"/"submit"`, `readonly`, `disabled`, `aria-hidden`, `display:none`.
+- **Praguri de selecție + penalizări de stabilitate (FIX 1).** Se alege primul candidat cu scor >= 80 (HARD); dacă nu există, primul cu >= 50 (SOFT); altfel EȘEC — healer-ul NU mai forțează o ghicire, cascada merge la AI Finder. Scorul „de formă" (fingerprint) e plafonat la 45, deci singur nu poate face un candidat eligibil. Penalizări: clase hash (-30), drumuri poziționale (`nth-of-type`, -20), lanțuri > 4 niveluri (-15). Id-urile instabile (`:r1:`, `_r_4e_`, orice id cu cifre) nu mai generează selectori.
+- **Salvare cu rezerve (FIX 1).** O reparație salvează până la 3 candidați cu scor >= 50 (`["a[data-testid='create-new-chat-button']", "button[aria-label='New chat']", "a[href='/']"]`) — se încearcă pe rând, primul care funcționează câștigă, iar dacă toți pică se re-repară. Lista e persistată în `selectors-user.json` (`providers.<id>.<slot>.selectors`) și apare în Diagnostics.
+- **Log de reparație explicit.** `[healer] role=chatgpt.newChat trying 5 candidates`, `[healer] rejected: button[aria-label="Add files and more"] (blacklist: add files)`, `[healer] accepted: button[aria-label="New chat"] (score 100, hard match)`, `[healer] saved: [...]`.
+
 ## v2.8.3
 
 **Ecoul system prompt-ului se relua în ACELAȘI chat (care conținea deja ecoul) — acum retry-ul deschide un chat NOU, iar un chat poluat găsit după restart e rotit înainte de trimitere.**

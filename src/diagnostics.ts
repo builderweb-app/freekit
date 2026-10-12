@@ -109,8 +109,11 @@ export async function runDiagnostics(
   lines.push('Auto-repaired selectors (overrides): ' + learned.length);
   for (const l of learned) {
     // v2.5.44 (bug #101): selecțiile scrise manual sunt marcate ca atare
+    // v2.8.4 (FIX 1): o reparație poate salva mai mulți candidați (rezerve)
     lines.push(
-      '  - ' + l.provider + '.' + l.slot + ' → ' + l.selector + (l.locked ? ' [user-locked]' : '')
+      '  - ' + l.provider + '.' + l.slot + ' → ' + l.selector +
+        (l.selectors && l.selectors.length > 1 ? ' (+' + (l.selectors.length - 1) + ' fallback)' : '') +
+        (l.locked ? ' [user-locked]' : '')
     );
   }
 

@@ -1240,7 +1240,72 @@ export async function readComposerText(
 export const composerTextMatches = (actual: string, expected: string): boolean =>
   normalize(actual) === normalize(expected);
 
-/** Golește composerul (best-effort) — un draft rămas nu are voie să plece. */
+/** v2.8.6.1 (FIX 3): câte încercări de golire (prima + 2 retry-uri, cum cere spec-ul). */
+const COMPOSER_CLEAR_ATTEMPTS = 3;
+
+/**
+ * v2.8.6.1 (FIX 1): selectează TOT textul din composer prin JS. Ctrl+A + Backspace
+ * NU e fiabil în ProseMirror (composerul ChatGPT e `div[contenteditable]`, iar un
+ * draft de ~18k caractere rămânea în căsuță după „golire") — un Range peste
+ * conținutul elementului e metoda sigură; `document.execCommand('selectAll')`
+ * rămâne rezerva (retry). La input/textarea selecția se face nativ (`select()`).
+ */
+async function selectAllInComposer(target: Locator, viaExecCommand = false): Promise<boolean> {
+  try {
+    return await target.evaluate((el, useCommand) => {
+      if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+        const field = el as HTMLTextAreaElement;
+        field.focus();
+        field.select();
+        return true;
+      }
+      const node = el as HTMLElement;
+      node.focus();
+      const sel = window.getSelection();
+      if (!sel) return false;
+      if (useCommand) return document.execCommand('selectAll', false, undefined);
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return sel.rangeCount > 0 && !sel.isCollapsed;
+    }, viaExecCommand);
+  } catch (e: any) {
+    log('selectAllInComposer failed: ' + (e?.message ?? String(e)));
+    return false;
+  }
+}
+
+/**
+ * v2.8.6.1 (FIX 3): lungimea conținutului composerului (`textContent` pentru
+ * contenteditable, `value` pentru input/textarea) — `0` = căsuța chiar e goală.
+ */
+async function composerContentLength(target: Locator): Promise<number | null> {
+  try {
+    return await target.evaluate((el) => {
+      if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+        return String((el as HTMLTextAreaElement).value || '').length;
+      }
+      return String((el as HTMLElement).textContent || '').length;
+    });
+  } catch (e: any) {
+    log('composerContentLength failed: ' + (e?.message ?? String(e)));
+    return null;
+  }
+}
+
+/**
+ * Golește composerul (best-effort) — un draft rămas nu are voie să plece.
+ *
+ * v2.8.6.1 (FIX 1): Ctrl+A + Backspace NU e fiabil în ProseMirror (composerul
+ * ChatGPT e `div[contenteditable]`) — draftul de 18.556 de caractere rămânea în
+ * căsuță, iar paste-ul de peste el „reușea" (vechea verificare doar limita de
+ * jos). Acum: click pe composer, select all prin JS (Range peste conținut) +
+ * Delete, iar la nevoie retry cu `ControlOrMeta+A` + Delete și apoi cu
+ * `execCommand('selectAll')` + Delete.
+ * v2.8.6.1 (FIX 3): după golire se verifică `textContent().length === 0` — log
+ * `[human] composer cleared: 0 chars`, altfel warning + retry (max. 2).
+ */
 export async function clearComposer(
   page: Page,
   input: Locator,
@@ -1248,14 +1313,41 @@ export async function clearComposer(
   providerId?: string
 ): Promise<void> {
   try {
+    const target =
+      page && providerId ? await composerLocator(page, providerId, input) : input;
     const current = await readComposerText(input, { page, providerId });
     if (current === null) return; // nu putem citi → nu riscăm un Ctrl+A orb
     if (!current.trim()) return; // nimic de curățat
-    await humanClickButton(page, input, 5000);
-    await page.keyboard.press('ControlOrMeta+A');
-    await page.keyboard.press('Backspace');
-    await sleep(150);
-    log(label + ': leftover draft cleared from the composer (' + current.length + ' chars)');
+    log(label + ': clearing the leftover draft from the composer (' + current.length + ' chars)');
+    let left: number | null = null;
+    for (let attempt = 1; attempt <= COMPOSER_CLEAR_ATTEMPTS; attempt++) {
+      await humanClickButton(page, target, 5000);
+      if (attempt === 1) {
+        await selectAllInComposer(target);
+      } else if (attempt === 2) {
+        await page.keyboard.press('ControlOrMeta+A');
+      } else {
+        await selectAllInComposer(target, true);
+      }
+      await page.keyboard.press('Delete');
+      await sleep(150);
+      left = await composerContentLength(target);
+      if (left === 0) break;
+      logLine(
+        'human',
+        'composer still has ' + (left === null ? 'unreadable' : left + ' chars') +
+          ' after clear attempt ' + attempt + '/' + COMPOSER_CLEAR_ATTEMPTS + ' — retrying'
+      );
+    }
+    if (left === 0) {
+      logLine('human', 'composer cleared: 0 chars');
+    } else {
+      logLine(
+        'human',
+        'WARNING: composer NOT cleared after ' + COMPOSER_CLEAR_ATTEMPTS + ' tries (' +
+          (left === null ? 'unreadable' : left + ' chars') + ' left)'
+      );
+    }
   } catch (e: any) {
     log(label + ': composer clear failed — ' + (e?.message ?? String(e)));
   }
@@ -1426,10 +1518,21 @@ export async function ensureComposerHasMessage(
  * reîncercăm o dată, iar dacă tot nu încape împărțim mesajul în chunk-uri de
  * ~3000 de caractere, lipite pe rând în ACEEAȘI căsuță (fără Enter), apoi
  * trimitem o singură dată.
+ * v2.8.6.1 (FIX 2): verificarea are AMBELE limite — un composer mai LUNG decât
+ * mesajul (draft vechi rămas sub paste) nu mai trece ca „ok"; e golit și
+ * relipit (înainte era verificată doar limita de jos, deci 19.109 caractere
+ * „confirmau" un mesaj de 37).
  * ========================================================================= */
 
 /** v2.8.5: sub această diferență (caractere) mesajul din composer e „întreg". */
 const FAST_PASTE_TOLERANCE = 50;
+
+/**
+ * v2.8.6.1 (FIX 2): peste această diferență (caractere) composerul are
+ * LEFT-OVER — un draft vechi rămas sub mesaj (lungimea „prea mare" nu mai e
+ * acceptată ca „mesajul e întreg").
+ */
+const FAST_PASTE_LEFTOVER_TOLERANCE = 300;
 
 /** v2.8.5: câte caractere se lipesc într-un chunk când composerul trunchiază. */
 const FAST_PASTE_CHUNK_SIZE = 3000;
@@ -1463,6 +1566,10 @@ export function splitIntoChunks(text: string, size: number): string[] {
  * nu poate fi citit (atunci rămâne lipirea simplă, ca înainte); false când nici
  * chunk-urile nu au încăput — apelantul lasă mai departe verificarea/relipirea
  * din `ensureComposerHasMessage`.
+ *
+ * v2.8.6.1 (FIX 2): verificarea are AMBELE limite — un composer mai LUNG decât
+ * mesajul (draft vechi sub paste) e tratat ca eșec („composer has leftover") și
+ * golit, nu ca „ok".
  */
 export async function fastPasteVerified(
   page: Page,
@@ -1473,8 +1580,11 @@ export async function fastPasteVerified(
 ): Promise<boolean> {
   const expected = text.length;
   const read = () => readComposerText(input, { page, providerId });
-  const verified = (actual: string | null): boolean =>
-    actual !== null && actual.length >= expected - FAST_PASTE_TOLERANCE;
+  const withinBounds = (actual: string | null, len: number): boolean =>
+    actual !== null &&
+    actual.length >= len - FAST_PASTE_TOLERANCE &&
+    actual.length <= len + FAST_PASTE_LEFTOVER_TOLERANCE;
+  const verified = (actual: string | null): boolean => withinBounds(actual, expected);
 
   for (let attempt = 1; attempt <= FAST_PASTE_ATTEMPTS; attempt++) {
     await page.keyboard.insertText(text);
@@ -1492,12 +1602,24 @@ export async function fastPasteVerified(
       );
       return true;
     }
-    logLine(
-      'human',
-      'paste attempt ' + attempt + ': ' + expected + ' chars → composer has ' + actual.length
-    );
+    // v2.8.6.1 (FIX 2): composerul mai LUNG decât mesajul = draft vechi sub paste
+    const leftover = actual.length > expected + FAST_PASTE_LEFTOVER_TOLERANCE;
+    if (leftover) {
+      logLine(
+        'human',
+        'composer has leftover (' + actual.length + ' chars, expected ' + expected +
+          ') — clearing again'
+      );
+    } else {
+      logLine(
+        'human',
+        'paste attempt ' + attempt + ': ' + expected + ' chars → composer has ' + actual.length
+      );
+    }
     if (attempt === FAST_PASTE_ATTEMPTS) break;
-    logLine('human', 'paste truncated — clearing and re-pasting the whole message');
+    if (!leftover) {
+      logLine('human', 'paste truncated — clearing and re-pasting the whole message');
+    }
     await clearComposer(page, input, label, providerId);
   }
 
@@ -1515,20 +1637,32 @@ export async function fastPasteVerified(
     await sleep(250);
     done += chunk.length;
     let actual = await read();
-    let ok = actual !== null && actual.length >= done - FAST_PASTE_TOLERANCE;
-    if (!ok) {
+    let ok = withinBounds(actual, done);
+    // v2.8.6.1 (FIX 2): retry doar când LIPSEȘTE text (chunk pierdut) — un
+    // composer prea LUNG are draft vechi sub mesaj, nu un chunk pierdut
+    // (reîncercarea ar adăuga chunk-ul de două ori).
+    if (!ok && (actual === null || actual.length < done - FAST_PASTE_TOLERANCE)) {
       // un chunk pierdut (focus/caret) — o singură reîncercare, apoi mergem mai departe
       await page.keyboard.press('ControlOrMeta+End').catch(() => {});
       await page.keyboard.insertText(chunk);
       await sleep(250);
       actual = await read();
-      ok = actual !== null && actual.length >= done - FAST_PASTE_TOLERANCE;
+      ok = withinBounds(actual, done);
     }
     logLine(
       'human',
       'chunk ' + (i + 1) + '/' + chunks.length + ': ' + chunk.length + ' chars → ' +
         (ok ? 'ok' : 'composer has ' + (actual === null ? 'unreadable' : actual.length))
     );
+    if (!ok && actual !== null && actual.length > done + FAST_PASTE_LEFTOVER_TOLERANCE) {
+      // v2.8.6.1 (FIX 2): draft vechi sub chunk-uri — nu mai adăugăm bucăți peste el
+      logLine(
+        'human',
+        'composer has leftover (' + actual.length + ' chars, expected ' + done +
+          ') — stopping the chunk split'
+      );
+      break;
+    }
   }
 
   const final = await read();
@@ -1538,7 +1672,11 @@ export async function fastPasteVerified(
   }
   logLine(
     'human',
-    'composer STILL truncated after ' + chunks.length + ' chunks (' +
+    'composer STILL ' +
+      (final !== null && final.length > expected + FAST_PASTE_LEFTOVER_TOLERANCE
+        ? 'has leftover'
+        : 'truncated') +
+      ' after ' + chunks.length + ' chunks (' +
       (final === null ? 'unreadable' : final.length + '/' + expected) + ')'
   );
   return false;

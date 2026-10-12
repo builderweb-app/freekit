@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.8.6.1
+
+**La ChatGPT, golirea composerului (ProseMirror) chiar golește — verificat la 0 caractere —, iar verificarea de paste are AMBELE limite: un composer mai LUNG decât mesajul (draft vechi rămas sub paste) e tratat ca eșec, golit și relipit, nu ca „ok" (înainte, 19.109 de caractere „confirmau" un mesaj de 37).**
+
+- **Golirea composerului ProseMirror (FIX 1).** `clearComposer()` din [src/providers/base.ts](./src/providers/base.ts) nu mai folosește Ctrl+A + Backspace — nofiabil în ProseMirror (composerul ChatGPT e `div[contenteditable="true"] class="ProseMirror"`, iar draftul de 18.556 de caractere rămânea în căsuță: `paste attempt 1: 18556 chars → composer has 19109 — ok`). Acum: click pe composer → select all prin JS (Range `selectNodeContents` peste element; la input/textarea, `select()` nativ) → `Delete`; dacă nu s-a golit, retry cu `ControlOrMeta+A` + `Delete`, apoi cu `execCommand('selectAll')` + `Delete`.
+- **Verificare both bounds (FIX 2).** `fastPasteVerified()` accepta orice lungime ≥ `expected - 50`, deci un composer cu 19.109 de caractere „confirma" un mesaj de 37. Acum: `expected - 50 ≤ actualLen ≤ expected + 300`; peste limita de sus composerul are LEFT-OVER (draft vechi sub paste) și NU mai e „ok" — log explicit `[human] composer has leftover (19109 chars, expected 37) — clearing again`, golire și relipire. În modul chunk-uri, un composer prea lung oprește împărțirea (nu reîncearcă chunk-ul, ca să nu-l adauge de două ori), iar verificarea finală folosește aceleași limite.
+- **Log după golire (FIX 3).** După fiecare golire, `textContent().length` (sau `value.length` la textarea) trebuie să fie exact 0: `[human] composer cleared: 0 chars`; dacă nu, warning (`composer still has N chars after clear attempt 1/3 — retrying`) și încă până la 2 încercări, apoi `WARNING: composer NOT cleared after 3 tries (N chars left)`.
+- Verificat în Chromium (Playwright, DOM de test tip ProseMirror care înghite Ctrl+A/Backspace și trunchiază paste-urile mari la 3000 de caractere): composer cu 19.109 caractere golit la 0 (`composer cleared: 0 chars`); mesaj de 37 de caractere lipit peste draftul de 19.109 → `composer has leftover (19146 chars, expected 37) — clearing again` → golit → `paste attempt 2: 37 chars → composer has 37 — ok`; composer indelebil (toate tastele înghițite) → 3 încercări + warning, fără excepție; mesaj de 4.839 de caractere pe composer care trunchiază → split în chunk-uri, `composer verified: 4839 chars` (comportamentul v2.8.5 păstrat); textarea (ceilalți provideri) golită normal; composer deja gol → no-op.
+- Build: version **2.8.6 → 2.8.7** (build etichetat v2.8.6.1 — numerotarea cu 4 părți nu e semver; identic cu precedentul v2.5.7.1 → 2.5.8).
+
 ## v2.8.6
 
 **La ChatGPT, fiecare task începe într-un chat NOU, verificat gol (URL de start + composer gol), iar primul mesaj pleacă ÎMPĂRȚIT: system prompt-ul (~18k caractere) ca MESAJ 1, apoi task-ul userului ca MESAJ 2 — răspunsul la al doilea mesaj e cel care trebuie să dea tool call-ul.**

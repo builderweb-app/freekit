@@ -26,6 +26,14 @@ export interface SendOptions {
   onMemoryFull?: (
     providerId: string
   ) => Promise<{ action: 'continue'; prefix?: string } | { action: 'cancel' }>;
+  /**
+   * v2.8.6 (FIX 2): „ack mode" — mesajul trimis e doar system prompt-ul din
+   * protocolul de prompt ÎMPĂRȚIT (vezi `SPLIT_PROMPT_PROVIDERS` în chatView):
+   * system prompt = msg 1, task-ul userului = msg 2. Ack-ul nu e răspunsul
+   * task-ului, deci așteptăm cel mult 30s un semn de răspuns și întoarcem
+   * textul parțial ('' dacă modelul tace) în loc să aruncăm eroare de timeout.
+   */
+  ack?: boolean;
 }
 
 /**

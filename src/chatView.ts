@@ -133,6 +133,8 @@ import {
 } from './project';
 import { initLogChannel, logLine } from './log';
 import {
+  clearComposerDraft,
+  composerCharCount,
   detectCaptcha,
   isLoginRequiredError,
   isLoginUrl,
@@ -482,6 +484,28 @@ const AUTO_VERIFY_TOOLS = new Set(['edit_file', 'write_file', 'write_files']);
 
 // v1.3.0: câte auto-repair-uri încercăm înainte de rollback-ul automat
 const MAX_VERIFY_REPAIRS = 3;
+
+/* -------------------------------------------------------------------------
+ * v2.8.6 (FIX 1/2) — CHAT NOU VERIFICAT + PROMPT ÎMPĂRȚIT
+ * Chatul web ține istoricul între mesaje: la ChatGPT rămâneau în context
+ * system prompt-ul vechi (~18k caractere) + ecoul lui, iar modelul răspundea cu
+ * un ecou „CHUNKED WRITES…” în loc de tool call — chiar și după „New chat”.
+ * Pentru providerii de aici, fiecare TASK pornește într-un chat NOU, verificat
+ * gol (URL de start + composer gol), iar primul mesaj pleacă în DOUĂ părți:
+ * system prompt-ul (msg 1, urmat de un ack) și task-ul userului (msg 2 — cel
+ * care trebuie să dea tool call-ul). Ceilalți provideri rămân pe fluxul
+ * dintr-un singur mesaj.
+ * ------------------------------------------------------------------------- */
+const SPLIT_PROMPT_PROVIDERS = new Set(['chatgpt']);
+
+/** v2.8.6 (FIX 1): cât așteptăm după „New chat" înainte de a verifica chatul. */
+const FRESH_CHAT_WAIT_MS = 3000;
+
+/** v2.8.6 (FIX 1): câte încercări „New chat" (prima + un retry, cum cere spec-ul). */
+const FRESH_CHAT_ATTEMPTS = 2;
+
+/** v2.8.6 (FIX 1): sub atâtea caractere composerul unui chat NOU e gol. */
+const COMPOSER_EMPTY_CHARS = 50;
 
 /* -------------------------------------------------------------------------
  * v2.5.53 (FIX 4/8) — ciclurile de reparație după un diagnostic
@@ -2335,12 +2359,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           ? '\n\n---\nTASK HANDOFF (provider switch):\n' + crossProviderHandoff
           : '') +
         '\n\n---\nUSER MESSAGE:\n' + userText;
-      const messageFor = (p: AIProvider) => {
-        // v2.5.71 FIX 2: întrebare simplă → DOAR promptul scurt (modelul
-        // răspunde direct, nu încearcă să emită unelte / un plan).
-        if (promptKind === 'question') {
-          return QUESTION_SYSTEM_PROMPT + questionBlock();
-        }
+      /**
+       * v2.8.6 (FIX 2): partea de SYSTEM PROMPT (fără mesajul userului) — e
+       * msg 1 la providerii din SPLIT_PROMPT_PROVIDERS și începutul mesajului
+       * unic la ceilalți.
+       */
+      const systemPartFor = (p: AIProvider): string => {
         const mcpSection = mcp.promptSection(!!p.local);
         let prompt = p.local ? SYSTEM_PROMPT_LOCAL : SYSTEM_PROMPT;
         if (
@@ -2357,10 +2381,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           prompt +
           (p.local ? '' : '\n\n' + MARKER_FORMAT_EXAMPLE) +
           (p.local ? '' : this.chunkedWritePromptSection()) +
-          (mcpSection ? '\n\n---\n' + mcpSection : '') +
-          contextBlock()
+          (mcpSection ? '\n\n---\n' + mcpSection : '')
         );
       };
+      /**
+       * v2.8.6 (FIX 2): părțile primului mesaj al unui task — system prompt-ul
+       * (msg 1 la providerii cu prompt împărțit) și partea de task + mesajul
+       * userului (msg 2). La ceilalți provideri cele două părți se lipesc în
+       * continuare într-un singur mesaj (v2.5.71 FIX 2: în question mode doar
+       * promptul scurt — modelul răspunde direct, fără unelte / plan).
+       */
+      const firstParts = (p: AIProvider): { system: string; task: string } =>
+        promptKind === 'question'
+          ? { system: QUESTION_SYSTEM_PROMPT, task: questionBlock() }
+          : { system: systemPartFor(p), task: contextBlock() };
 
       // FAZA III (E): progres vizibil — textul parțial al răspunsului
       const onProgress = (partial: string) => {
@@ -2432,9 +2466,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               signal
             );
             if (cpHandoff) crossProviderHandoff = cpHandoff;
-            // v2.8.3 (FIX 2): chatul salvat, reluat după restart, poate fi poluat
-            // cu ecoul system prompt-ului — rotim înainte de a trimite
-            await this.ensureCleanBrowserChat(prov, prep.page, signal, label);
+            // v2.8.3 (FIX 2) + v2.8.6 (FIX 1): chatul salvat, reluat după
+            // restart, poate fi poluat cu ecoul system prompt-ului — rotim
+            // înainte de a trimite; providerii cu prompt împărțit (ChatGPT)
+            // primesc MEREU un chat nou, verificat gol
+            await this.prepareChatForSend(
+              prov,
+              prep.page,
+              signal,
+              label,
+              promptKind
+            );
             // v1.8.0: dacă pagina cere CAPTCHA, Chrome e adus în față până e rezolvat
             await this.runWithCaptchaAssist(label, prep.page, signal);
             // v2.2.0: aplică modelul web ales în chip (best-effort)
@@ -2442,7 +2484,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             this.active = { provider, page };
             if (this.abortRequested) throw new Error('__ABORTED__');
             const urlBeforeSend = page?.url();
-            aiReply = await provider.send(page, messageFor(provider), signal, sendOpts);
+            // v2.8.6 (FIX 2): ChatGPT primește promptul ÎMPĂRȚIT (system → ack → task)
+            aiReply = await this.sendFirstTaskMessage(
+              provider,
+              page,
+              signal,
+              sendOpts,
+              this.usesSplitPrompt(provider, promptKind),
+              firstParts(provider)
+            );
             await this.rememberBrowserChat(provider, page, urlBeforeSend);
             if (i > 0) {
               this.post('notice', '🔄 Auto: response served by ' + label + ' (fallback).');
@@ -2480,9 +2530,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         // v2.5.50: handoff complet la schimbarea de provider (vezi mai sus).
         const cpHandoff = await this.openOrResumeChat(prov, prep.page, label, signal);
         if (cpHandoff) crossProviderHandoff = cpHandoff;
-        // v2.8.3 (FIX 2): chatul salvat, reluat după restart, poate fi poluat cu
-        // ecoul system prompt-ului — rotim înainte de a trimite
-        await this.ensureCleanBrowserChat(prov, prep.page, signal, label);
+        // v2.8.3 (FIX 2) + v2.8.6 (FIX 1): chatul salvat, reluat după restart,
+        // poate fi poluat cu ecoul system prompt-ului — rotim înainte de a
+        // trimite; providerii cu prompt împărțit (ChatGPT) primesc MEREU un
+        // chat nou, verificat gol
+        await this.prepareChatForSend(prov, prep.page, signal, label, promptKind);
         // v1.8.0: CAPTCHA assist (reCAPTCHA / hCaptcha / Cloudflare „Just a moment”)
         await this.runWithCaptchaAssist(label, prep.page, signal);
         // v2.2.0: aplică modelul web ales în chip (best-effort)
@@ -2495,7 +2547,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
 
         const urlBeforeSend = page?.url();
-        aiReply = await provider.send(page, messageFor(provider), signal, sendOpts);
+        // v2.8.6 (FIX 2): ChatGPT primește promptul ÎMPĂRȚIT (system → ack → task)
+        aiReply = await this.sendFirstTaskMessage(
+          provider,
+          page,
+          signal,
+          sendOpts,
+          this.usesSplitPrompt(provider, promptKind),
+          firstParts(provider)
+        );
         await this.rememberBrowserChat(provider, page, urlBeforeSend);
         log('first AI reply length: ' + aiReply.length);
       }
@@ -2666,11 +2726,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             // chat nou: aici ecoul din istoric nu mai există
             await this.rotateBrowserChat(provider, page, signal, chatLabel);
             const urlBeforeRetry = page?.url();
-            aiReply = await provider.send(
+            // v2.8.6 (FIX 2): și retry-ul de după ecou păstrează promptul
+            // împărțit la providerii care îl folosesc (system → ack → task+nudge)
+            aiReply = await this.sendFirstTaskMessage(
+              provider,
               page,
-              messageFor(provider) + '\n\n' + ECHO_NUDGE,
               signal,
-              sendOpts
+              sendOpts,
+              this.usesSplitPrompt(provider, promptKind),
+              firstParts(provider),
+              ECHO_NUDGE
             );
             await this.rememberBrowserChat(provider, page, urlBeforeRetry);
             continue;
@@ -4183,6 +4248,161 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ': the saved browser chat echoes its own instructions — starting a fresh chat so the task can run.'
     );
     await this.rotateBrowserChat(provider, page, signal, label);
+  }
+
+  /* ======================================================================
+   * v2.8.6 — CHAT NOU VERIFICAT + PROMPT ÎMPĂRȚIT (ChatGPT)
+   * Chatul web ține istoricul între mesaje, deci la ChatGPT rămâneau în context
+   * system prompt-ul vechi (~18k caractere) + ecoul lui, iar modelul răspundea
+   * cu ecou („CHUNKED WRITES…") în loc de tool call — chiar și după „New chat".
+   * Pentru providerii din SPLIT_PROMPT_PROVIDERS fiecare task pornește într-un
+   * chat NOU, verificat gol, iar primul mesaj pleacă în DOUĂ părți.
+   * ==================================================================== */
+
+  /** v2.8.6 (FIX 2): primul mesaj al unui task pleacă împărțit la providerul dat? */
+  private usesSplitPrompt(
+    provider: AIProvider,
+    promptKind: 'question' | 'task'
+  ): boolean {
+    return (
+      promptKind === 'task' &&
+      !provider.local &&
+      SPLIT_PROMPT_PROVIDERS.has(provider.name)
+    );
+  }
+
+  /**
+   * v2.8.6 (FIX 2): primul mesaj al unui task. La providerii din
+   * SPLIT_PROMPT_PROVIDERS pleacă în DOUĂ mesaje, în chatul NOU verificat gol:
+   *   msg 1 = system prompt-ul (~18k caractere) → așteptăm un ACK (orice
+   *           răspuns, max 30s; nu e parsat ca tool call);
+   *   msg 2 = task-ul userului (+ nudge-ul opțional) → răspunsul LUI e cel
+   *           parsat de bucla agentică (tool call).
+   * La ceilalți provideri cele două părți se lipesc într-un singur mesaj, exact
+   * ca înainte. Întoarce răspunsul care poate conține tool call-ul.
+   */
+  private async sendFirstTaskMessage(
+    provider: AIProvider,
+    page: Page | undefined,
+    signal: AbortSignal,
+    sendOpts: SendOptions,
+    split: boolean,
+    parts: { system: string; task: string },
+    nudge = ''
+  ): Promise<string> {
+    const taskPart = parts.task + (nudge ? '\n\n' + nudge : '');
+    if (!split) {
+      return provider.send(page, parts.system + taskPart, signal, sendOpts);
+    }
+    const id = provider.name;
+    log(id + ': sending system prompt (' + parts.system.length + ' chars) as msg 1');
+    // atașamentele (imagini/binare) merg cu TASK-ul (msg 2), nu cu system
+    // prompt-ul — altfel un upload ar pleca de două ori
+    const ackOpts: SendOptions = { ...sendOpts, ack: true };
+    delete ackOpts.files;
+    const ack = await provider.send(page, parts.system, signal, ackOpts);
+    log(
+      id + ': ack received' +
+        (ack ? ' (' + ack.length + ' chars)' : ' (no reply — continuing)')
+    );
+    log(id + ': sending user task as msg 2');
+    return provider.send(page, taskPart, signal, sendOpts);
+  }
+
+  /**
+   * v2.8.6 (FIX 1): chatul din browser, pregătit ÎNAINTE de primul mesaj al
+   * unui task. Providerii cu prompt împărțit primesc un chat NOU, verificat gol
+   * (istoricul lor se lipește la promptul nou); restul păstrează verificarea
+   * „o singură dată per sesiune" din v2.8.3.
+   */
+  private async prepareChatForSend(
+    provider: AIProvider,
+    page: Page | undefined,
+    signal: AbortSignal,
+    label: string,
+    promptKind: 'question' | 'task'
+  ): Promise<void> {
+    if (this.usesSplitPrompt(provider, promptKind)) {
+      await this.forceFreshBrowserChat(provider, page, signal, label);
+      return;
+    }
+    await this.ensureCleanBrowserChat(provider, page, signal, label);
+  }
+
+  /**
+   * v2.8.6 (FIX 1): chat NOU GARANTAT înainte de un task — apasă „New chat"
+   * (selectorul user-locked al providerului, prin `newChat`), așteaptă 3s și
+   * verifică: URL-ul e pagina de start (nu `/c/<uuid>`) și composerul e gol
+   * (sub 50 de caractere). Dacă URL-ul e tot o conversație, mai încearcă O
+   * DATĂ; dacă tot nu s-a schimbat, deschide direct pagina de start a
+   * providerului. Orice eșec de verificare e logat, nu aruncat: trimiterea
+   * continuă (composerul e oricum golit înainte de tastare).
+   */
+  private async forceFreshBrowserChat(
+    provider: AIProvider,
+    page: Page | undefined,
+    signal: AbortSignal,
+    label: string
+  ): Promise<void> {
+    if (!page || provider.local) return;
+    const pg = page;
+    const id = provider.name;
+    log(id + ': forcing new chat');
+    for (let attempt = 1; attempt <= FRESH_CHAT_ATTEMPTS; attempt++) {
+      try {
+        await this.runWithLoginAssist(label, pg, signal, () =>
+          provider.newChat(pg)
+        );
+      } catch (e: any) {
+        if (isLoginRequiredError(e) || this.abortRequested) throw e;
+        log(id + ': new chat failed — ' + (e?.message ?? String(e)));
+      }
+      await sleep(FRESH_CHAT_WAIT_MS);
+      if (await this.verifyFreshChat(pg, id, label)) {
+        // chat NOU ⇒ numărătoarea de pași + fișierele citite o iau de la 0
+        this.resetBrowserChatState();
+        return;
+      }
+      if (attempt < FRESH_CHAT_ATTEMPTS) {
+        log(id + ': still not a fresh chat — retrying with New chat');
+      }
+    }
+    log(
+      id + ': no fresh chat after ' + FRESH_CHAT_ATTEMPTS +
+        ' tries — opening ' + provider.url + ' directly'
+    );
+    await pg.goto(provider.url, { waitUntil: 'domcontentloaded' });
+    await sleep(FRESH_CHAT_WAIT_MS);
+    await this.verifyFreshChat(pg, id, label);
+    this.resetBrowserChatState();
+  }
+
+  /**
+   * v2.8.6 (FIX 1): verifică „chat NOU, gol" — URL-ul e pagina de start (nu o
+   * conversație `/c/<uuid>`) și composerul e gol. Un draft rămas (ex: un mesaj
+   * netrimis din chatul vechi) e golit aici. Întoarce true când URL-ul e cel
+   * așteptat (draftul nu blochează trimiterea: composerul e golit oricum
+   * înainte de tastare).
+   */
+  private async verifyFreshChat(
+    pg: Page,
+    id: string,
+    label: string
+  ): Promise<boolean> {
+    const url = pg.url();
+    if (!isProviderRootUrl(url, id)) {
+      log(id + ': chat URL = ' + url + ' (still a conversation)');
+      return false;
+    }
+    log(id + ': chat URL = ' + url + ' ✓');
+    const chars = await composerCharCount(pg, id, label);
+    if (chars !== null && chars >= COMPOSER_EMPTY_CHARS) {
+      log(id + ': composer has ' + chars + ' chars — clearing the leftover draft');
+      await clearComposerDraft(pg, id, label);
+      return true;
+    }
+    log(id + ': composer empty ✓');
+    return true;
   }
 
   /**

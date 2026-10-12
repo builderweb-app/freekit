@@ -123,6 +123,14 @@ const UNHEALTHY_WAIT_MS = 30_000;
 /** v2.7 (FIX 2): providerii pentru care am anunțat deja plafonul în chat. */
 const unhealthyNoticesShown = new Set<string>();
 
+/**
+ * v2.8.6 (FIX 2): cât așteptăm „ack"-ul din protocolul de prompt împărțit
+ * (msg 1 = system prompt-ul, msg 2 = task-ul userului). Ack-ul NU e răspunsul
+ * task-ului: dacă nu vine nimic în acest interval (ecou, model mut), mergem mai
+ * departe cu msg 2 — fără card de eroare și fără reîncercări.
+ */
+const ACK_WAIT_MS = 30_000;
+
 /** v2.5.74 (FIX 5): promptul SIMPLU pentru reîncercarea unui provider mut. */
 const SIMPLE_RETRY_PROMPT =
   'Please reply with one short sentence.';
@@ -1155,10 +1163,67 @@ export async function clickStop(page: Page, providerId: string): Promise<boolean
  * intenționat înainte de Enter (altfel îl relipim dintr-o bucată).
  * ========================================================================= */
 
-/** Textul curent din composer (innerText pentru contenteditable, value pentru input/textarea). */
-export async function readComposerText(input: Locator): Promise<string | null> {
+/**
+ * v2.8.6 (FIX 5): composerul ChatGPT, în ordinea din spec — id-ul propriu are
+ * prioritate, apoi `data-testid`-ul. `div[contenteditable="true"]` prinde uneori
+ * ALT element din pagină (alt editor), deci e doar rezervă (ULTIMUL div editabil
+ * din document — vezi `composerLocator`).
+ */
+const CHATGPT_COMPOSER_SELECTORS = [
+  '#prompt-textarea',
+  '[data-testid="prompt-textarea"]'
+];
+
+/** v2.8.6 (FIX 5): rezerva pentru composerul ChatGPT (ultimul div editabil). */
+const CHATGPT_COMPOSER_FALLBACK = 'div[contenteditable="true"]';
+
+/**
+ * v2.8.6 (FIX 5): elementul din care se CITEȘTE composerul. La ChatGPT întoarce
+ * `#prompt-textarea` (id propriu); dacă nu există, ULTIMUL `div[contenteditable=
+ * "true"]` din pagină (composerul stă jos — primul element găsit putea fi un alt
+ * editor, iar lungimea citită din el nu avea legătură cu mesajul). La restul
+ * providerilor întoarce locatorul primit.
+ */
+export async function composerLocator(
+  page: Page,
+  providerId: string,
+  input: Locator
+): Promise<Locator> {
+  if (providerId !== 'chatgpt') return input;
+  for (const sel of CHATGPT_COMPOSER_SELECTORS) {
+    const cand = page.locator(sel).first();
+    try {
+      if ((await cand.count()) > 0) return cand;
+    } catch {
+      /* selector respins pe acest DOM — trecem la următorul */
+    }
+  }
   try {
-    return await input.evaluate((el) => {
+    const editables = page.locator(CHATGPT_COMPOSER_FALLBACK);
+    const count = await editables.count();
+    if (count > 0) return editables.nth(count - 1);
+  } catch {
+    /* păstrăm locatorul primit */
+  }
+  return input;
+}
+
+/**
+ * Textul curent din composer (innerText pentru contenteditable, value pentru
+ * input/textarea).
+ * v2.8.6 (FIX 5): cu `page` + `providerId`, textul se citește din composerul
+ * corect al providerului (ChatGPT: `#prompt-textarea`) — vezi `composerLocator`.
+ */
+export async function readComposerText(
+  input: Locator,
+  opts?: { page?: Page; providerId?: string }
+): Promise<string | null> {
+  try {
+    const target =
+      opts?.page && opts.providerId
+        ? await composerLocator(opts.page, opts.providerId, input)
+        : input;
+    return await target.evaluate((el) => {
       const tag = el.tagName;
       if (tag === 'TEXTAREA' || tag === 'INPUT') {
         return String((el as HTMLTextAreaElement).value || '');
@@ -1179,10 +1244,11 @@ export const composerTextMatches = (actual: string, expected: string): boolean =
 export async function clearComposer(
   page: Page,
   input: Locator,
-  label: string
+  label: string,
+  providerId?: string
 ): Promise<void> {
   try {
-    const current = await readComposerText(input);
+    const current = await readComposerText(input, { page, providerId });
     if (current === null) return; // nu putem citi → nu riscăm un Ctrl+A orb
     if (!current.trim()) return; // nimic de curățat
     await humanClickButton(page, input, 5000);
@@ -1192,6 +1258,47 @@ export async function clearComposer(
     log(label + ': leftover draft cleared from the composer (' + current.length + ' chars)');
   } catch (e: any) {
     log(label + ': composer clear failed — ' + (e?.message ?? String(e)));
+  }
+}
+
+/**
+ * v2.8.6 (FIX 1): câte caractere are composerul ACUM (`null` = nu a putut fi
+ * citit). Folosit la verificarea „chat NOU, composer gol" dinainte de a trimite
+ * system prompt-ul: sub 50 de caractere căsuța e goală (placeholder-ul nu
+ * contează).
+ */
+export async function composerCharCount(
+  page: Page,
+  providerId: string,
+  label: string
+): Promise<number | null> {
+  try {
+    const input = await findInput(page, providerId, label, 15000);
+    const text = await readComposerText(input, { page, providerId });
+    return text === null ? null : text.length;
+  } catch (e: any) {
+    log(
+      label + ': composer not readable for the empty-chat check — ' +
+        (e?.message ?? String(e))
+    );
+    return null;
+  }
+}
+
+/** v2.8.6 (FIX 1): golește un draft rămas în composerul unui chat nou (best-effort). */
+export async function clearComposerDraft(
+  page: Page,
+  providerId: string,
+  label: string
+): Promise<void> {
+  try {
+    const input = await findInput(page, providerId, label, 15000);
+    await clearComposer(page, input, label, providerId);
+  } catch (e: any) {
+    log(
+      label + ': could not clear the leftover composer draft — ' +
+        (e?.message ?? String(e))
+    );
   }
 }
 
@@ -1258,7 +1365,7 @@ export async function ensureComposerHasMessage(
   label: string,
   onNotice?: (text: string) => void
 ): Promise<Locator> {
-  const actual = await readComposerText(input);
+  const actual = await readComposerText(input, { page, providerId });
   if (actual === null) return input; // nu putem verifica — mergem ca înainte
   if (composerTextMatches(actual, message)) {
     suspectInput.delete(providerId); // scrie corect → inputul nu mai e suspect
@@ -1273,10 +1380,10 @@ export async function ensureComposerHasMessage(
     '⚠️ The chat composer did not contain the full message (truncated or a leftover draft) — ' +
       'the whole message was re-pasted before sending.'
   );
-  await clearComposer(page, input, label);
+  await clearComposer(page, input, label, providerId);
   await page.keyboard.insertText(message);
   await sleep(200);
-  const after = await readComposerText(input);
+  const after = await readComposerText(input, { page, providerId });
   if (after !== null && composerTextMatches(after, message)) {
     log(label + ': composer verified after re-paste');
     return input;
@@ -1293,10 +1400,10 @@ export async function ensureComposerHasMessage(
   const replacement = page.locator(repaired).first();
   try {
     await humanClickButton(page, replacement, 15000);
-    await clearComposer(page, replacement, label);
+    await clearComposer(page, replacement, label, providerId);
     await page.keyboard.insertText(message);
     await sleep(200);
-    const retry = await readComposerText(replacement);
+    const retry = await readComposerText(replacement, { page, providerId });
     if (retry !== null && !composerTextMatches(retry, message)) {
       log(label + ': composer STILL mismatched with the repaired input — sending what is in the box');
     } else {
@@ -1361,16 +1468,18 @@ export async function fastPasteVerified(
   page: Page,
   input: Locator,
   text: string,
-  label: string
+  label: string,
+  providerId?: string
 ): Promise<boolean> {
   const expected = text.length;
+  const read = () => readComposerText(input, { page, providerId });
   const verified = (actual: string | null): boolean =>
     actual !== null && actual.length >= expected - FAST_PASTE_TOLERANCE;
 
   for (let attempt = 1; attempt <= FAST_PASTE_ATTEMPTS; attempt++) {
     await page.keyboard.insertText(text);
     await sleep(400);
-    const actual = await readComposerText(input);
+    const actual = await read();
     if (actual === null) {
       logLine('human', 'composer unreadable — keeping the single paste (cannot verify)');
       return true;
@@ -1389,12 +1498,12 @@ export async function fastPasteVerified(
     );
     if (attempt === FAST_PASTE_ATTEMPTS) break;
     logLine('human', 'paste truncated — clearing and re-pasting the whole message');
-    await clearComposer(page, input, label);
+    await clearComposer(page, input, label, providerId);
   }
 
   const chunks = splitIntoChunks(text, FAST_PASTE_CHUNK_SIZE);
   logLine('human', 'paste truncated — splitting into ' + chunks.length + ' chunks');
-  await clearComposer(page, input, label);
+  await clearComposer(page, input, label, providerId);
 
   let done = 0;
   for (let i = 0; i < chunks.length; i++) {
@@ -1405,14 +1514,14 @@ export async function fastPasteVerified(
     await page.keyboard.insertText(chunk);
     await sleep(250);
     done += chunk.length;
-    let actual = await readComposerText(input);
+    let actual = await read();
     let ok = actual !== null && actual.length >= done - FAST_PASTE_TOLERANCE;
     if (!ok) {
       // un chunk pierdut (focus/caret) — o singură reîncercare, apoi mergem mai departe
       await page.keyboard.press('ControlOrMeta+End').catch(() => {});
       await page.keyboard.insertText(chunk);
       await sleep(250);
-      actual = await readComposerText(input);
+      actual = await read();
       ok = actual !== null && actual.length >= done - FAST_PASTE_TOLERANCE;
     }
     logLine(
@@ -1422,7 +1531,7 @@ export async function fastPasteVerified(
     );
   }
 
-  const final = await readComposerText(input);
+  const final = await read();
   if (verified(final)) {
     logLine('human', 'composer verified: ' + final!.length + ' chars');
     return true;
@@ -1752,7 +1861,7 @@ export async function sendAndWait(
     // v2.5.14 (bug #39): un mesaj trunchiat de site lasă restul ca DRAFT în
     // composer; următoarea trimitere l-ar lipi la mesajul nou (context poluat —
     // dovedit live pe ChatGPT). Golim înainte de tastare.
-    await clearComposer(page, box, label);
+    await clearComposer(page, box, label, providerId);
 
     // v0.8.0: tastare "umană" (evenimente reale de tastatură); v2.0.6: mesajele
     // lungi tastează natural doar începutul, restul se lipește — vezi humanType.
@@ -1778,7 +1887,7 @@ export async function sendAndWait(
         // v2.8.5: paste-ul „instant" e verificat pe LUNGIME înainte de Enter —
         // composerul care trunchiază primește mesajul în chunk-uri, nu întreg
         // (altfel promptul incomplet pleca mai departe).
-        await fastPasteVerified(page, box, text, label);
+        await fastPasteVerified(page, box, text, label, providerId);
       } else {
         await page.keyboard.insertText(text);
       }
@@ -1878,7 +1987,10 @@ export async function sendAndWait(
   const hardTimeoutMs = Math.min(
     configuredTimeoutMs,
     overrideMs ?? Number.POSITIVE_INFINITY,
-    unhealthyMs ?? Number.POSITIVE_INFINITY
+    unhealthyMs ?? Number.POSITIVE_INFINITY,
+    // v2.8.6 (FIX 2): „ack mode" (system prompt-ul din protocolul de prompt
+    // împărțit) așteaptă mult mai puțin — vezi ramura de expirare din buclă
+    cfg.ack ? ACK_WAIT_MS : Number.POSITIVE_INFINITY
   );
   // pragul de „provider blocat" nu poate depăși bugetul efectiv
   const stuckAbortMs = Math.min(STUCK_ABORT_MS, hardTimeoutMs);
@@ -2047,6 +2159,23 @@ export async function sendAndWait(
     // final de erori. O continuare într-un chat nou (memory full) resetează
     // `started` și reia bucla.
     if (Date.now() - started >= hardTimeoutMs) {
+      /**
+       * v2.8.6 (FIX 2): în „ack mode" (msg 1 = system prompt-ul, dintr-un
+       * prompt ÎMPĂRȚIT) expirarea NU e o eroare — ack-ul nu e răspunsul
+       * task-ului. Întoarcem ce s-a citit (de obicei ecoul promptului, sau ''
+       * dacă modelul tace) și apelantul trimite imediat task-ul (msg 2): fără
+       * card de eroare, fără RESCUE, fără reîncercarea automată.
+       */
+      if (cfg.ack) {
+        const partial = await readResponse(responseSelectors);
+        log(
+          label + ': ack wait expired (' + Math.round(ACK_WAIT_MS / 1000) + 's) — ' +
+            (partial
+              ? 'continuing with the task (partial reply: ' + partial.length + ' chars)'
+              : 'sending the task (no reply)')
+        );
+        return stripEchoedUserMessage(partial, sentText);
+      }
       // RESCUE: ultima șansă — extragere generică, ca să nu blocăm utilizatorul
       const rescued = await rescueRead();
       if (rescued.kind === 'restart') continue;
@@ -2121,6 +2250,10 @@ export async function sendAndWait(
     // stuck” — nu mai așteptăm bugetul întreg (era 300s; testul din 8 Oct:
     // 5 minute pierdute).
     if (
+      // v2.8.6 (FIX 2): în „ack mode" nu are sens „provider stuck" — ack-ul
+      // poate lipsi complet, iar expirarea e tratată la începutul buclei
+      // (întoarce textul parțial, fără card de eroare)
+      !cfg.ack &&
       stuckIndex < STUCK_CHECKPOINTS.length &&
       elapsed >= STUCK_CHECKPOINTS[stuckIndex]
     ) {

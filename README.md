@@ -175,6 +175,7 @@ Additional safeguards:
 - **The welcome card is shown once.** On the very first open (no conversations yet) the chat shows a quick-start card; **Got it** or sending your first message dismisses it for good. It only comes back if you delete every conversation.
 - **Web providers change their UI.** Selectors can break when a provider ships a redesign. Freekit repairs them automatically (bundled → learned → AI Finder) and falls back to a card with **Repair now** / **Switch provider** / **Diagnostics** only when everything else failed.
 - **A provider chat can hit its context limit** ("Chat memory full"). Freekit asks whether to start a new chat and continue the task there instead of failing silently.
+- **ChatGPT runs every task in a fresh chat.** The web chat keeps its own history, and a polluted one made ChatGPT echo the system prompt instead of calling tools (even after *New chat*). For ChatGPT, Freekit now opens a new chat before each task, verifies it is empty (start page + empty composer) and sends the system prompt first, then your message as a second one — so consecutive tasks do not share the browser chat.
 - **Login sessions expire.** If a provider is logged out, Freekit brings the Chrome window to the front and offers **Log in again** / **Retry** / **Switch provider** / **Diagnostics** right in the chat.
 
 ---

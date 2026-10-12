@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.8.5
+
+**Paste-ul „instant" își verifică LUNGIMEA în composer înainte de Enter: dacă site-ul trunchiază mesajul (ChatGPT: 10.234 → 5.847 de caractere), mesajul e împărțit în chunk-uri de ~3000 de caractere, lipite pe rând în aceeași căsuță, și trimis o singură dată.**
+
+- **Verificare de lungime după fiecare paste (FIX 1).** Noul `fastPasteVerified()` din [src/providers/base.ts](./src/providers/base.ts) citește composerul imediat după lipire și compară LUNGIMEA cu cea a mesajului (toleranță: 50 de caractere) — până acum verificarea de dinainte de Enter relipea tot mesajul dintr-o bucată, la fel de trunchiat, iar promptul incomplet pleca mai departe (modelul răspundea la fragmente, cu ecou în loc de tool call). Log: `[human] paste attempt 1: 10234 chars → composer has 5847`.
+- **A doua lipire completă înainte de împărțire (FIX 1).** La nepotrivire, căsuța e golită și mesajul e relipit dintr-o bucată o singură dată (`[human] paste truncated — clearing and re-pasting the whole message` → `paste attempt 2: ...`); abia dacă și a doua încercare iese trunchiată se trece la împărțire.
+- **Split în chunk-uri (FIX 2).** Mesajul e tăiat în bucăți de cel mult 3000 de caractere, la limita de cuvânt (`splitIntoChunks()`, cu `chunks.join('') === text` — nimic pierdut sau duplicat), lipite pe rând în ACEEAȘI căsuță, fără Enter, cu cursorul dus la final înainte de fiecare bucată; fiecare bucată e verificată pe lungime, cu o singură reîncercare dacă a fost pierdută (focus/caret). Enter se apasă o singură dată, la final.
+- **Log explicit (FIX 3).** `[human] paste truncated — splitting into 4 chunks`, `[human] chunk 1/4: 2995 chars → ok`, `[human] chunk 2/4: 2995 chars → ok`, `[human] composer verified: 10234 chars`, `[human] sending with Enter`. Un composer ilizibil (nu poate fi citit) lasă comportamentul de dinainte: o singură lipire, fără verificare (`composer unreadable — keeping the single paste`).
+- **Fallback neschimbat.** Dacă nici după chunk-uri mesajul nu e întreg, `ensureComposerHasMessage` face mai departe exact ce făcea: relipire, marcarea inputului ca „suspect" și reparația lui de către AI finder, plus notificarea din chat. Providerii care nu trunchiază (DeepSeek, Gemini, Ollama, Claude, Mistral, Qwen) rămân pe o singură lipire — acum verificată.
+- Verificat în Chromium pe un composer care trunchiază un singur insert mare (10.234 → 5.847, simptomul dovedit live): attempt 1 și 2 trunchiate → 4 chunk-uri (`2995/2995/2996/1248`) → composer 10.234 de caractere → un singur Enter trimite mesajul COMPLET (comparat caracter cu caracter); mesajele de 5.500 și 512 caractere rămân pe o singură lipire, verificată (`— ok`).
+- Build: version **2.8.4 → 2.8.5**.
+
 ## v2.8.4
 
 **Healer-ul alege selectoare după SEMNIFICAȚIE, nu după icon/poziție: fiecare slot are potriviri HARD (100) / SOFT (50) / BLACKLIST (-100), iar o reparație salvează până la 3 candidați (rezerve, încercate pe rând).**

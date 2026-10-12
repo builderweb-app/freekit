@@ -1309,6 +1309,132 @@ export async function ensureComposerHasMessage(
   }
 }
 
+/* =========================================================================
+ * v2.8.5 — FAST PASTE VERIFICAT (LUNGIME) + SPLIT ÎN CHUNK-URI
+ * Un paste „instant" de peste ~6k caractere e trunchiat de composer (dovedit
+ * live pe ChatGPT: 10.234 de caractere trimise → 5.847 în căsuță). Verificarea
+ * de dinainte de Enter relipea TOT mesajul dintr-o bucată — la fel de trunchiat —
+ * iar promptul incomplet pleca mai departe (modelul răspundea la fragmente, cu
+ * ecou în loc de tool call). Aici: după fiecare paste verificăm LUNGIMEA,
+ * reîncercăm o dată, iar dacă tot nu încape împărțim mesajul în chunk-uri de
+ * ~3000 de caractere, lipite pe rând în ACEEAȘI căsuță (fără Enter), apoi
+ * trimitem o singură dată.
+ * ========================================================================= */
+
+/** v2.8.5: sub această diferență (caractere) mesajul din composer e „întreg". */
+const FAST_PASTE_TOLERANCE = 50;
+
+/** v2.8.5: câte caractere se lipesc într-un chunk când composerul trunchiază. */
+const FAST_PASTE_CHUNK_SIZE = 3000;
+
+/** v2.8.5: câte lipiri dintr-o bucată încercăm înainte de a împărți mesajul. */
+const FAST_PASTE_ATTEMPTS = 2;
+
+/**
+ * v2.8.5: împarte textul în bucăți de cel mult `size` caractere, preferând
+ * sfârșitul de cuvânt (tăierea pe spațiu). `chunks.join('') === text` exact.
+ */
+export function splitIntoChunks(text: string, size: number): string[] {
+  if (text.length <= size) return [text];
+  const chunks: string[] = [];
+  let rest = text;
+  while (rest.length > size) {
+    let cut = rest.lastIndexOf(' ', size);
+    if (cut < size / 2) cut = size; // fără spațiu util → tăiem fix la `size`
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut);
+  }
+  if (rest) chunks.push(rest);
+  return chunks;
+}
+
+/**
+ * v2.8.5: lipește `text` în căsuța dată, verifică LUNGIMEA din composer și —
+ * dacă site-ul trunchiază — reîncearcă o dată, apoi împarte mesajul în chunk-uri.
+ *
+ * Întoarce true când mesajul a ajuns (verificat pe lungime) sau când composerul
+ * nu poate fi citit (atunci rămâne lipirea simplă, ca înainte); false când nici
+ * chunk-urile nu au încăput — apelantul lasă mai departe verificarea/relipirea
+ * din `ensureComposerHasMessage`.
+ */
+export async function fastPasteVerified(
+  page: Page,
+  input: Locator,
+  text: string,
+  label: string
+): Promise<boolean> {
+  const expected = text.length;
+  const verified = (actual: string | null): boolean =>
+    actual !== null && actual.length >= expected - FAST_PASTE_TOLERANCE;
+
+  for (let attempt = 1; attempt <= FAST_PASTE_ATTEMPTS; attempt++) {
+    await page.keyboard.insertText(text);
+    await sleep(400);
+    const actual = await readComposerText(input);
+    if (actual === null) {
+      logLine('human', 'composer unreadable — keeping the single paste (cannot verify)');
+      return true;
+    }
+    if (verified(actual)) {
+      logLine(
+        'human',
+        'paste attempt ' + attempt + ': ' + expected + ' chars → composer has ' +
+          actual.length + ' — ok'
+      );
+      return true;
+    }
+    logLine(
+      'human',
+      'paste attempt ' + attempt + ': ' + expected + ' chars → composer has ' + actual.length
+    );
+    if (attempt === FAST_PASTE_ATTEMPTS) break;
+    logLine('human', 'paste truncated — clearing and re-pasting the whole message');
+    await clearComposer(page, input, label);
+  }
+
+  const chunks = splitIntoChunks(text, FAST_PASTE_CHUNK_SIZE);
+  logLine('human', 'paste truncated — splitting into ' + chunks.length + ' chunks');
+  await clearComposer(page, input, label);
+
+  let done = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    // Cursorul trebuie să fie la FINALUL textului, altfel chunk-ul următor intră
+    // la mijloc (după un paste, caretul nu rămâne garantat la capăt).
+    if (i > 0) await page.keyboard.press('ControlOrMeta+End').catch(() => {});
+    await page.keyboard.insertText(chunk);
+    await sleep(250);
+    done += chunk.length;
+    let actual = await readComposerText(input);
+    let ok = actual !== null && actual.length >= done - FAST_PASTE_TOLERANCE;
+    if (!ok) {
+      // un chunk pierdut (focus/caret) — o singură reîncercare, apoi mergem mai departe
+      await page.keyboard.press('ControlOrMeta+End').catch(() => {});
+      await page.keyboard.insertText(chunk);
+      await sleep(250);
+      actual = await readComposerText(input);
+      ok = actual !== null && actual.length >= done - FAST_PASTE_TOLERANCE;
+    }
+    logLine(
+      'human',
+      'chunk ' + (i + 1) + '/' + chunks.length + ': ' + chunk.length + ' chars → ' +
+        (ok ? 'ok' : 'composer has ' + (actual === null ? 'unreadable' : actual.length))
+    );
+  }
+
+  const final = await readComposerText(input);
+  if (verified(final)) {
+    logLine('human', 'composer verified: ' + final!.length + ' chars');
+    return true;
+  }
+  logLine(
+    'human',
+    'composer STILL truncated after ' + chunks.length + ' chunks (' +
+      (final === null ? 'unreadable' : final.length + '/' + expected) + ')'
+  );
+  return false;
+}
+
 /**
  * Trimitere generică: scrie în input (v0.8.0: tastare "umană" caracter-cu-caracter
  * pe mesaje scurte, insertText pe cele lungi — nu `type`, altfel \n devine Enter),
@@ -1630,23 +1756,30 @@ export async function sendAndWait(
 
     // v0.8.0: tastare "umană" (evenimente reale de tastatură); v2.0.6: mesajele
     // lungi tastează natural doar începutul, restul se lipește — vezi humanType.
+    // v2.5.48: providerii rapizi (DeepSeek/Gemini/Ollama) primesc paste
+    // instant chiar și cu tastarea „umană" pornită — typing-ul caracter-cu-
+    // caracter încetinea vizibil trimiterea; ChatGPT/Claude păstrează
+    // tastarea umană (stealth).
+    // v2.8.5: `fastPaste` e citit și după tastare (log „sending with Enter"),
+    // deci îl calculăm înainte de try.
+    const fastPaste =
+      providerId === 'deepseek' ||
+      providerId === 'gemini' ||
+      providerId === 'ollama' ||
+      providerId === 'chatgpt' ||
+      providerId === 'claude' ||
+      providerId === 'mistral' ||
+      providerId === 'qwen';
     try {
-      // v2.5.48: providerii rapizi (DeepSeek/Gemini/Ollama) primesc paste
-      // instant chiar și cu tastarea „umană" pornită — typing-ul caracter-cu-
-      // caracter încetinea vizibil trimiterea; ChatGPT/Claude păstrează
-      // tastarea umană (stealth).
-      const fastPaste =
-  	providerId === 'deepseek' ||
-  	providerId === 'gemini' ||
-  	providerId === 'ollama' ||
-  	providerId === 'chatgpt' ||
-  	providerId === 'claude' ||
-  	providerId === 'mistral' ||
-  	providerId === 'qwen';
       if (human.typing && !fastPaste) {
         await humanType(page, text, {}, signal);
+      } else if (fastPaste) {
+        logLine('human', 'fast paste for ' + providerId);
+        // v2.8.5: paste-ul „instant" e verificat pe LUNGIME înainte de Enter —
+        // composerul care trunchiază primește mesajul în chunk-uri, nu întreg
+        // (altfel promptul incomplet pleca mai departe).
+        await fastPasteVerified(page, box, text, label);
       } else {
-        if (fastPaste) logLine('human', 'fast paste for ' + providerId);
         await page.keyboard.insertText(text);
       }
     } catch (e: any) {
@@ -1672,6 +1805,7 @@ export async function sendAndWait(
       cfg.onNotice
     );
 
+    if (fastPaste) logLine('human', 'sending with Enter');
     await page.keyboard.press('Enter');
     return target;
   };

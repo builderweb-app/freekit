@@ -1260,7 +1260,7 @@ async function checkRequestedSlots(
   discovered: DiscoveredSelectors,
   missingSlots: string[],
   required: string[],
-  opts: { echoText?: string } = {}
+  opts: { echoText?: string; providerId?: string } = {}
 ): Promise<{ ok: true } | { ok: false; reason: string; selector?: string }> {
   for (const slot of SLOTS) {
     if (missingSlots.indexOf(slot) < 0) continue;
@@ -1277,13 +1277,31 @@ async function checkRequestedSlots(
         // fără text de răspuns în DOM nu insistăm — descoperirea se amână
         return check.retryable ? { ok: false, reason: check.reason } : { ok: true };
       }
+      if (slot === 'input') {
+        // v2.8.1 (FIX 2): `input: null` nu închide calea — fallback-urile de
+        // composer se încearcă înainte de a raporta eșecul (vezi
+        // INPUT_FALLBACK_SELECTORS).
+        const fallback = await acceptInputFallback(page, opts.providerId || '');
+        if (fallback) {
+          discovered.input = fallback;
+          continue;
+        }
+      }
       if (required.indexOf(slot) < 0) continue;
       return { ok: false, reason: 'the AI answered null for "' + slot + '"' };
     }
     if (slot === 'input') {
       const check = await validateChatInputSelector(page, sel);
-      if (!check.ok) return { ok: false, reason: String(check.reason), selector: sel };
-      continue;
+      if (check.ok) continue;
+      // v2.8.1 (FIX 2): nici o propunere RESPINSĂ nu închide calea — un
+      // fallback valid de composer e mai bun decât o reîncercare de analiză
+      // (modul api-proxy nu reîncearcă deloc).
+      const fallback = await acceptInputFallback(page, opts.providerId || '');
+      if (fallback) {
+        discovered.input = fallback;
+        continue;
+      }
+      return { ok: false, reason: String(check.reason), selector: sel };
     }
     if (slot === 'response') {
       const check = await validateResponseSelector(page, sel, opts);
@@ -1741,7 +1759,10 @@ async function runFindSelectorsWithAI(
     }
 
     const verdict = await checkRequestedSlots(page, parsed, wanted, wantedRequired, {
-      echoText: opts.echoText
+      echoText: opts.echoText,
+      // v2.8.1 (FIX 2): fallback-urile de composer sunt pe provider — fără id
+      // cădem pe eticheta afișată (inputFallbackKey le știe pe amândouă).
+      providerId: opts.providerId || providerName
     });
     if (verdict.ok) return parsed;
 
@@ -1919,6 +1940,11 @@ async function probeActionSelector(
 export interface ValidateOptions {
   /** Mesajul tocmai trimis — respinge selectori de response care îl citesc (ecou). */
   echoText?: string;
+  /**
+   * v2.8.1 (FIX 2): providerul (id sau etichetă) — fallback-ul de composer se
+   * încearcă doar pentru providerii cu intrări în INPUT_FALLBACK_SELECTORS.
+   */
+  providerId?: string;
 }
 
 function normText(t: string): string {
@@ -1952,6 +1978,18 @@ function assignSlot(target: DiscoveredSelectors, slot: SlotName, selector: strin
  * (nu display:none / width:0 / opacity:0), activ, acceptă text, în viewport și
  * în jumătatea de jos a paginii. Fără ele, AI-ul a salvat un input ascuns din
  * UI (`input[aria-label="Line wrap"]`) și a stricat ChatGPT până la fix manual.
+ *
+ * v2.8.1 (FIX 3): regulile de INPUT sunt proprii și rămân separate de cele de
+ * `response` — cerințele sunt DIFERITE și nu se amestecă:
+ *   - input: element editabil (`textarea`, `input[type=text|search]`,
+ *     `contenteditable="true"`, editor bogat) + vizibil + activ + în viewport;
+ *   - input: NU se cere text conținut — composer-ul e gol (doar placeholder) în
+ *     momentul reparației, deci orice prag de caractere ar respinge candidatul
+ *     CORECT (pragurile RESPONSE_MIN_* din v2.8 nu se aplică aici);
+ *   - response: are propriul validator (validateResponseSelector), cu pragul
+ *     adaptiv de text, tool call prins, ecou/promo — vezi blockul de mai jos.
+ * Criteriile de input sunt folosite ȘI de pre-filtrarea DOM-ului (bug #96), deci
+ * rămân singura definiție a „căsuței de chat".
  */
 /**
  * v2.5.74 (FIX 2): `tag[attr="value"]` → părțile lui (null dacă selectorul e
@@ -2079,6 +2117,80 @@ export async function validateChatInputSelector(
   if (!probe) return fail('cannot be inspected', count);
 
   return { ...checkInputCandidate(probe, viewport), count, selector: effective };
+}
+
+/* -------------------------------------------------------------------------
+ * v2.8.1 (FIX 2) — FALLBACK-URI DE COMPOSER („input")
+ *
+ * Log-ul real: `[ai-finder] proxy raw: {"input": null, … "reasoning": "No
+ * suitable input element found…"}` → `[chat] timeout — auto-retry 1/1` →
+ * `[chat] no response from chatgpt — marking unhealthy and switching`. Modelul
+ * a răspuns `null` deși composer-ul există vizual, iar healer-ul a rămas fără
+ * nicio cale: analiza s-a terminat (modul `api-proxy` are o singură încercare)
+ * și slotul `input` nu a fost salvat niciodată.
+ *
+ * Când AI-ul nu propune nimic (sau propune ceva respins de validatorul de
+ * input), încercăm `INPUT_FALLBACK_SELECTORS` ÎN ORDINE — fiecare verificat cu
+ * ACEEAȘI regulă de input (vizibil, activ, acceptă text, în viewport, primul
+ * element), nu cu pragurile de conținut ale răspunsului.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * v2.8.1 (FIX 2): composer-ele cunoscute, pe provider, în ordinea cerută:
+ * orice `contenteditable` (ChatGPT își face composer-ul dintr-un `div` cu
+ * `contenteditable="true"`), apoi id-ul/testid-ul real (`#prompt-textarea`),
+ * apoi `textarea` cu placeholder de mesaj și editorul ProseMirror.
+ */
+export const INPUT_FALLBACK_SELECTORS: Record<string, string[]> = {
+  chatgpt: [
+    'div[contenteditable="true"]',
+    'div#prompt-textarea',
+    '[data-testid="prompt-textarea"]',
+    'textarea[placeholder*="Message"]',
+    'div.ProseMirror'
+  ]
+};
+
+/**
+ * v2.8.1 (FIX 2): cheia din hartă, tolerant la id SAU etichetă („chatgpt" /
+ * „ChatGPT") — apelanții trimit uneori doar numele afișat (vezi repairChatInput).
+ */
+function inputFallbackKey(provider: string): string {
+  const raw = String(provider || '').toLowerCase().trim();
+  if (!raw) return '';
+  if (INPUT_FALLBACK_SELECTORS[raw]) return raw;
+  for (const id of Object.keys(INPUT_FALLBACK_SELECTORS)) {
+    const label = String(PROVIDER_LABELS[id] || '').toLowerCase();
+    if (label && label === raw) return id;
+  }
+  return raw;
+}
+
+/**
+ * v2.8.1 (FIX 2): primul fallback de composer care trece validatorul de input.
+ * Loghează `input fallback accepted: <selector>` la acceptare și, la eșec
+ * complet, ce s-a respins (Output → Freekit) — fără să arunce.
+ */
+async function acceptInputFallback(page: Page, provider: string): Promise<string | null> {
+  const list = INPUT_FALLBACK_SELECTORS[inputFallbackKey(provider)];
+  if (!list || !list.length) return null;
+  const rejected: string[] = [];
+  for (const sel of list) {
+    let check: InputCandidateCheck & { count: number; selector: string };
+    try {
+      check = await validateChatInputSelector(page, sel);
+    } catch (e: any) {
+      rejected.push(sel + ' (' + (e?.message ?? String(e)) + ')');
+      continue;
+    }
+    if (check.ok) {
+      log('input fallback accepted: ' + check.selector);
+      return check.selector;
+    }
+    rejected.push(sel + ' (' + String(check.reason) + ')');
+  }
+  log('input fallback: none matched for ' + provider + ' — ' + rejected.join('; '));
+  return null;
 }
 
 /* -------------------------------------------------------------------------
@@ -2926,6 +3038,15 @@ export async function validateSelectors(
       // checkInputCandidate(). Regulile generale de mai jos nu se mai aplică.
       const check = await validateChatInputSelector(page, sel);
       if (!check.ok) {
+        // v2.8.1 (FIX 2): propunerea respinsă nu închide calea — fallback-urile
+        // de composer (dacă există pentru provider) se încearcă înainte de a
+        // raporta inputul ca nereparat.
+        const fallback = await acceptInputFallback(page, opts.providerId || '');
+        if (fallback) {
+          assignSlot(valid, slot, fallback);
+          log('validat ' + slot + ': ' + fallback + ' (fallback)');
+          continue;
+        }
         log('respins input (' + check.reason + '): ' + sel);
         continue;
       }
@@ -3882,7 +4003,7 @@ async function discoverForHealer(
       return backupTier(providerId, slot);
     }
 
-    const validated = await validateSelectors(page, discovered, { echoText });
+    const validated = await validateSelectors(page, discovered, { echoText, providerId });
     const applied: string[] = [];
     let found: string | null = null;
     for (const s of SLOTS) {
@@ -4183,7 +4304,7 @@ export async function proactiveDiscover(
       return { ran: true, applied: [], reason: 'the AI answered no usable selector' };
     }
 
-    const validated = await validateSelectors(page, discovered);
+    const validated = await validateSelectors(page, discovered, { providerId });
     const applied: string[] = [];
     for (const s of SLOTS) {
       const sel = validated[s];
@@ -4269,6 +4390,9 @@ export async function repairChatInput(
   try {
     const discovered = await findSelectorsWithAI(page, label, ['input'], {
       inputOnly: true,
+      // v2.8.1 (FIX 2): fallback-urile de composer sunt pe provider — de aici
+      // vine `input fallback accepted: …` când modelul răspunde `input: null`.
+      providerId,
       // v2.5.61 (FIX 6): reparația inputului e automată — fără carduri în chat
       silent: true
     });

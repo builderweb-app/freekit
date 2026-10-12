@@ -1251,6 +1251,13 @@ interface ScanResult {
   score: number;
   why: string[];
   preview: string;
+  /**
+   * v2.8.1 (FIX 1): tokenii din blacklist-ul semantic care au respins
+   * candidatul (doar `newChat`). Candidatul se întoarce DOAR ca healer-ul să-l
+   * poată raporta (`candidate rejected: … (semantic)`) — nu intră niciodată în
+   * testul funcțional sau în `learn()`.
+   */
+  semantic?: string[];
 }
 
 const scanCandidates = (args: ScanArgs): ScanResult[] => {
@@ -1306,8 +1313,49 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
     /(?:^|[^a-z0-9])(?:(?:new|nou|create|start|compose)[\s]{0,2}(?:chat|conversation|convo)|(?:chat|conversation|convo)[\s]{0,2}nou)(?:[^a-z0-9]|$)/;
   const NEWCHAT_WRONG_SLOT_RE =
     /(?:^|[^a-z0-9])(send|submit|stop|abort|attach|upload|mic|voice|settings|theme|help|search|login|sign[\s_-]?in|sign[\s_-]?out|account|profile|logout|pricing|subscription|language)(?:[^a-z0-9]|$)/;
+  /* v2.8.1 (FIX 1): BLACKLIST-UL SEMANTIC COMPLET al slotului `newChat`.
+     v2.8 penaliza doar trimitere/oprire/setări/căutare/cont — healer-ul alegea
+     în continuare butoane de ALTĂ funcție, aflate în header lângă cel real:
+       [healer] heal chatgpt.newChat -> button[aria-label="Add files and more"] (scor 46)
+       [healer] candidate rejected: button[aria-label="Add new project"] (functional test failed)
+       [healer] candidate rejected: button[aria-label="Start Voice"] (score 21 < 25)
+     Fiecare token găsit = -40 (mai aspru decât -25 de mai sus), iar candidatul e
+     marcat `semantic` — nu se învață nici dacă rămâne cel mai bine cotat. */
+  const NEWCHAT_SEMANTIC_BLACKLIST = [
+    'add files',
+    'add file',
+    'attach',
+    'upload',
+    'dictate',
+    'voice',
+    'mic',
+    'feedback',
+    'more options',
+    'add new project',
+    'new project',
+    'start voice'
+  ];
+  const NEWCHAT_SEMANTIC_PENALTY = 40;
   // clasele/id-urile folosesc cratime (`new-chat-button`) — le tratăm ca spații la fraze
   const phraseHay = (s: string): string => s.replace(/[-_]+/g, ' ');
+
+  /**
+   * v2.8.1 (FIX 1): potrivire pe TOKEN ÎNTREG, pe textul deja aplatizat de
+   * `phraseHay` — `mic` nu are voie să prindă `chemical`/`dynamic`, iar
+   * `add file` nu are voie să prindă `add filename`. Cratimele și
+   * underscore-urile sunt spații, deci `data-testid="add-new-project"` se
+   * potrivește cu tokenul `add new project`.
+   */
+  const flatTokenHit = (hay: string, token: string): boolean => {
+    let i = hay.indexOf(token);
+    while (i >= 0) {
+      const before = i > 0 ? hay.charAt(i - 1) : ' ';
+      const after = i + token.length < hay.length ? hay.charAt(i + token.length) : ' ';
+      if (!/[a-z0-9]/.test(before) && !/[a-z0-9]/.test(after)) return true;
+      i = hay.indexOf(token, i + 1);
+    }
+    return false;
+  };
 
   // FIX v2: 'auth' fără 'author' (ChatGPT: data-message-author-role).
   // v0.9.1: aceleași garduri de token ca în Node (funcția e serializată în
@@ -1540,9 +1588,12 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
   pool = Array.from(unique);
 
   /* ---- scor ---- */
-  const score = (el: Element): { score: number; why: string[] } | null => {
+  const score = (el: Element): { score: number; why: string[]; semantic?: string[] } | null => {
     const tag = el.tagName.toLowerCase();
     if (!isVisible(el)) return null;
+    // v2.8.1 (FIX 1): tokenii din blacklist-ul semantic de `newChat` (buton de
+    // atașare/voce/meniu) — vezi NEWCHAT_SEMANTIC_BLACKLIST.
+    let semanticReject: string[] | undefined;
 
     /* v0.9.3 FIX Kimi: slotul `response` NU poate fi căsuța de input.
        Healer-ul alesese `div.chat-input-editor[role="textbox"]` (composer-ul
@@ -1837,6 +1888,20 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
           s -= 25;
           why.push('penal:not-newchat-' + wrongSlot[1]);
         }
+        // v2.8.1 (FIX 1): blacklist-ul semantic COMPLET — atributele ȘI textul
+        // elementului (un `<button>Add files</button>` fără aria-label poartă
+        // tokenul doar în text). -40 per token, iar candidatul iese din cursă
+        // înainte de pragul de scor (vezi `semantic` în healSlot).
+        const newChatHay = phraseHay((labelHay + ' ' + textOf(el)).toLowerCase());
+        const semanticHits: string[] = [];
+        for (const bad of NEWCHAT_SEMANTIC_BLACKLIST) {
+          if (flatTokenHit(newChatHay, bad)) semanticHits.push(bad);
+        }
+        if (semanticHits.length) {
+          s -= NEWCHAT_SEMANTIC_PENALTY * semanticHits.length;
+          semanticReject = semanticHits;
+          why.push('penal:semantic-' + semanticHits.join('+'));
+        }
         try {
           if (el.closest('header, [role="banner"], aside, nav, [class*="sidebar" i]')) {
             s += 3;
@@ -1915,8 +1980,11 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
       }
     }
 
-    if (s <= 0) return null;
-    return { score: s, why };
+    // v2.8.1 (FIX 1): un candidat respins SEMANTIC se întoarce chiar și cu scor
+    // negativ — doar ca healer-ul să-l raporteze ca atare; lista de învățare îl
+    // exclude pe baza câmpului `semantic` (vezi healSlot).
+    if (s <= 0 && !semanticReject) return null;
+    return { score: s, why, semantic: semanticReject };
   };
 
   interface ScanItem {
@@ -1926,6 +1994,8 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
     why: string[];
     preview: string;
     len: number;
+    /** v2.8.1 (FIX 1): tokenii din blacklist-ul semantic (doar `newChat`). */
+    semantic?: string[];
   }
 
   const items: ScanItem[] = [];
@@ -1940,7 +2010,8 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
       score: r.score,
       why: r.why,
       preview: text.slice(0, 60) || signalText(el).slice(0, 60),
-      len: text.length
+      len: text.length,
+      semantic: r.semantic
     });
   }
 
@@ -1970,7 +2041,8 @@ const scanCandidates = (args: ScanArgs): ScanResult[] => {
       selector: sel,
       score: item.score,
       why: item.why,
-      preview: item.preview
+      preview: item.preview,
+      semantic: item.semantic
     });
   }
   return out;
@@ -2709,7 +2781,10 @@ export async function healSlot(
     }
 
     const usable = (found || []).filter(
-      (c) => isUsableSelector(c.selector) && !isPersistBlocked(slot, c.selector)
+      (c) =>
+        !(c.semantic || []).length &&
+        isUsableSelector(c.selector) &&
+        !isPersistBlocked(slot, c.selector)
     );
     // v2.8 (FIX 1/4 — audit M1): pragul de scor se aplică ÎNAINTE de partiția
     // stable/fragile și de bugetul de `HEALER_MAX_FUNCTIONAL_TRIES` încercări.
@@ -2718,6 +2793,20 @@ export async function healSlot(
     // candidat fragil dar VALID nu era niciodată examinat („tier 3 (healer)
     // found no candidate that passed the score/functional test", deși exista).
     const minScore = minHealerScore(slot);
+    // v2.8.1 (FIX 1): candidații respinși SEMANTIC (buton de atașare/voce/meniu
+    // propus pentru `newChat`) se raportează ca atare și ies din cursă ÎNAINTE de
+    // pragul de scor — nu consumă buget de test funcțional și nu ajung la
+    // `learn()` nici dacă rămân cei mai bine cotați. Vezi NEWCHAT_SEMANTIC_BLACKLIST.
+    const semanticRejected = (found || []).filter((c) => (c.semantic || []).length > 0);
+    for (const c of semanticRejected.slice(0, HEALER_MAX_FUNCTIONAL_TRIES)) {
+      healLog('candidate rejected: ' + c.selector + ' (semantic)');
+    }
+    if (semanticRejected.length > HEALER_MAX_FUNCTIONAL_TRIES) {
+      healLog(
+        semanticRejected.length - HEALER_MAX_FUNCTIONAL_TRIES +
+          ' more candidate(s) rejected on semantics'
+      );
+    }
     const eligible = usable.filter((c) => c.score >= minScore);
     const belowScore = usable.filter((c) => c.score < minScore);
     for (const c of belowScore.slice(0, HEALER_MAX_FUNCTIONAL_TRIES)) {

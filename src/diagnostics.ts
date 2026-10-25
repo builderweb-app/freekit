@@ -5,6 +5,7 @@ import { initLogChannel, logLine } from './log';
 import { ollamaBaseUrl } from './providers/ollama';
 import { mcp } from './mcp/manager';
 import { voiceBackendInfo } from './voiceRecorder';
+import { canaryStatusText } from './canary';
 
 /* =========================================================================
  * v0.3.0 (P0.5) — comanda "Freekit: Diagnostics"
@@ -122,6 +123,9 @@ export async function runDiagnostics(
 
   // v1.7.3: captarea audio pentru voice input (rulează în Extension Host)
   lines.push('Voice input (captare): ' + (await voiceBackendInfo()));
+
+  // v2.9.0: canary health check + publicarea reparațiilor AI în Gist
+  lines.push('Canary: ' + (await canaryStatusText(ctx)));
 
   for (const line of lines) logLine('diagnostics', line);
   channel.show();

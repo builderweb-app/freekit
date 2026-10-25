@@ -206,6 +206,9 @@ Additional safeguards:
 | `Freekit: Unlock broken selectors (provider...)` | Same as above, but you pick a single provider. Each provider also has its own `Freekit: Unlock broken — ChatGPT` / `Claude` / `DeepSeek` / `Mistral` / `Gemini` / `Qwen` command |
 | `Freekit: Reset selector failure counters` | Reset `_meta.failures` for all six providers (give user-locked selectors a fresh 3-failure budget) |
 | `Freekit: Reset selector failure counters (provider...)` | Reset `_meta.failures` for a single provider |
+| `Freekit: Run Canary Check Now` | Run the background canary immediately: verify `input` / `newChat` / `response` for **every** provider in `selectors.json`, repair what is broken and publish AI repairs to the Gist |
+| `Freekit: Canary Status` | Interval, last run and whether hive-mind publishing is configured (Gist + token) |
+| `Freekit: Set Gist Token` | Store (or remove) the GitHub token used to publish repaired selectors to the Gist — kept in Secret Storage |
 
 ---
 
@@ -255,6 +258,9 @@ Additional safeguards:
 | `freekit.reporting.healthCheck` | `true` | Periodically verify the selectors of providers that already have a tab open |
 | `freekit.reporting.healthCheckIntervalHours` | `6` | Hours between two automatic selector health checks |
 | `freekit.reporting.selectorsIntervalHours` | `24` | Hours between two automatic fetches of repaired selectors |
+| `freekit.canary.enabled` | `true` | Background canary: verify all providers from `selectors.json` every few hours and repair broken slots |
+| `freekit.canary.intervalHours` | `6` | Hours between two canary checks (1–720) |
+| `freekit.canary.publishToGist` | `true` | Publish AI-Finder repairs to the Gist from `freekit.selectorsUrl` (needs a token with the `gist` scope) |
 
 ---
 
@@ -293,6 +299,17 @@ Freekit can feed a central reporting server (`https://api.builderweb.app` by def
 - **Health check every 6 h** — for every provider that already has a tab open, the `input` and `newChat` selectors are verified. Broken slots are repaired locally first; only if that also fails is a report sent.
 - **Selector updates every 24 h** — the extension asks for new selectors and applies them.
 - **Privacy** — nothing from your code, prompts or files is ever sent. The optional DOM snapshot is off by default.
+
+### Canary health check & hive-mind healing
+
+The reporting health check only looks at providers that already have a tab open. The **canary** covers all of them:
+
+1. Every 6 h (`freekit.canary.intervalHours`) it opens one dedicated tab in the Freekit Chrome profile and visits each provider from `selectors.json` — no messages are sent, the tab is closed at the end, and your chat tab is never touched. Chrome is never started just for this.
+2. `input`, `newChat` and `response` are checked with `count() > 0` + visibility. `response` is only verified when the page really contains a conversation (an empty chat would look “broken”); on a provider with a tab open, that tab is used to read a conversation.
+3. A missing slot goes through the local healer (fingerprint) and then the AI Finder.
+4. When the **AI Finder** produced the repair and a Gist is configured, it is published (`PATCH`) so every installation gets it: set `freekit.selectorsUrl` to a Gist raw URL, then run `Freekit: Set Gist Token` with a GitHub token that has the `gist` scope (stored in Secret Storage, never in settings). Turn it off with `freekit.canary.publishToGist`.
+
+Safety: a provider that lands on a login/landing page, or whose DOM contains none of the critical slots, is skipped entirely — nothing is repaired or published for it, so an AI guess made on a signed-out page can never reach the shared Gist.
 
 ### MCP servers
 

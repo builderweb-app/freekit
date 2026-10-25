@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.8.8",
+  "version": "2.9.0",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -208,6 +208,21 @@
         "command": "freekit.resetSelectorFailuresProvider",
         "title": "Freekit: Reset selector failure counters (provider...)",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "freekit.canaryRunNow",
+        "title": "Freekit: Run Canary Check Now",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "freekit.canaryStatus",
+        "title": "Freekit: Canary Status",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "freekit.canarySetGistToken",
+        "title": "Freekit: Set Gist Token",
+        "icon": "$(key)"
       }
     ],
     "configuration": {
@@ -514,6 +529,23 @@
           "minimum": 1,
           "maximum": 720,
           "markdownDescription": "Hours between two automatic fetches of repaired selectors from the server (default **24**). Newly received selectors are applied immediately and used on the next message."
+        },
+        "freekit.canary.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Background **canary**: every few hours, open a dedicated tab in the Freekit Chrome profile and verify the `input`, `newChat` and `response` selectors of every provider from `selectors.json` — including providers you have no tab open for. A broken slot is repaired locally (fingerprint, then AI Finder). Chrome is never started just for this check, and the tab is closed when it ends."
+        },
+        "freekit.canary.intervalHours": {
+          "type": "number",
+          "default": 6,
+          "minimum": 1,
+          "maximum": 720,
+          "markdownDescription": "Hours between two canary checks (default **6**). The first check runs about 3 minutes after startup; the due time is checked every 30 minutes."
+        },
+        "freekit.canary.publishToGist": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "**Hive-mind healing**: when the AI Finder repairs a selector, publish it to the public Gist configured in `freekit.selectorsUrl`, so every installation picks it up. Needs a GitHub token with the `gist` scope (`Freekit: Set Gist Token`, stored in Secret Storage). Without a Gist or a token, the repair stays local."
         }
       }
     }

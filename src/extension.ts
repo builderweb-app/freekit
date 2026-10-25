@@ -31,6 +31,11 @@ import {
 import { ollamaBaseUrl, OLLAMA_DOWNLOAD_URL } from './providers/ollama';
 import { getProviderStatus, ollamaInstallState, PROVIDER_LABELS } from './providers';
 import { ReportingService } from './reporting';
+import {
+  CanaryService,
+  GIST_TOKEN_KEY,
+  canaryStatusText
+} from './canary';
 import { isRestricted, promptForTrust, showRestrictedNotification } from './trust';
 
 /** v0.3.0 (P0.1): opțiunile browserului, citite live din setări. */
@@ -174,11 +179,87 @@ export async function activate(ctx: vscode.ExtensionContext) {
   });
   ctx.subscriptions.push(reporting);
 
+  // v2.9.0 — canary health check: verifică în fundal TOȚI providerii din
+  // selectors.json (nu doar tab-urile deschise) și publică în Gist reparațiile
+  // făcute de AI Finder (hive-mind), ca să ajungă la toți clienții.
+  const canary = new CanaryService(ctx, browser);
+  ctx.subscriptions.push(canary);
+
+  // v2.9.0: rulare manuală + tokenul GitHub pentru publicare (SecretStorage,
+  // niciodată în settings/globalState — nu apare în sync sau în log-uri).
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand('freekit.canaryRunNow', async () => {
+      if (isRestricted()) {
+        showRestrictedNotification(true);
+        return;
+      }
+      const out = await canary.runNow();
+      const checked = out.providers.filter((p) => !p.skipped);
+      if (!checked.length) {
+        vscode.window.showInformationMessage(
+          'Freekit canary: nothing was checked — ' + (out.skipped ?? 'no provider available') + '.'
+        );
+        return;
+      }
+      vscode.window.showInformationMessage(
+        'Freekit canary: ' +
+          checked.length +
+          ' provider(s) checked — ' +
+          out.healed +
+          ' healed, ' +
+          out.broken +
+          ' still broken, ' +
+          out.published +
+          ' published to the Gist.'
+      );
+    })
+  );
+
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand('freekit.canarySetGistToken', async () => {
+      if (isRestricted()) {
+        showRestrictedNotification(true);
+        return;
+      }
+      const existing = await ctx.secrets.get(GIST_TOKEN_KEY);
+      const value = await vscode.window.showInputBox({
+        title: 'Freekit: GitHub token for the selectors Gist',
+        prompt:
+          'A GitHub token with the “gist” scope, used to publish AI-repaired selectors. ' +
+          (existing ? 'A token is already stored. ' : '') +
+          'Leave empty to remove it.',
+        password: true,
+        ignoreFocusOut: true,
+        placeHolder: existing ? '•••••••• (leave empty to remove)' : 'ghp_… or github_pat_…'
+      });
+      if (value === undefined) return;
+      if (!value.trim()) {
+        await ctx.secrets.delete(GIST_TOKEN_KEY);
+        vscode.window.showInformationMessage('Freekit: the Gist token was removed.');
+        return;
+      }
+      await ctx.secrets.store(GIST_TOKEN_KEY, value.trim());
+      vscode.window.showInformationMessage('Freekit: the Gist token was stored.');
+    })
+  );
+
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand('freekit.canaryStatus', async () => {
+      const text = 'Freekit canary — ' + (await canaryStatusText(ctx));
+      logLine('canary', 'status: ' + text);
+      const pick = await vscode.window.showInformationMessage(text, 'Run canary check now');
+      if (pick === 'Run canary check now') {
+        await vscode.commands.executeCommand('freekit.canaryRunNow');
+      }
+    })
+  );
+
   // v2.4.1: serviciile care scriu în globalState, vorbesc cu serverul de
   // raportare sau pornesc procese MCP nu pornesc în Restricted Mode; ele sunt
   // activate automat în momentul în care Trust-ul e acordat.
   const startTrustedFeatures = () => {
     reporting.start();
+    canary.start();
     void mcp.init(ctx, (text) => chatView.postNotice(text));
   };
 

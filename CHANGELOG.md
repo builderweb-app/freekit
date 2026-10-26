@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.9.2
+
+**„deschide proiectul C:\...\brandidentity.agency-src" nu mai trece prin LLM: comenzile de deschidere sunt recunoscute determinist și executate cu `vscode.openFolder`. Înainte, mesajul era clasificat drept ÎNTREBARE, primea promptul scurt fără unelte, iar modelul răspundea textual („no valid tool call, final answer") în loc să deschidă folderul.**
+
+- **Router determinist (modul nou `src/directCommands.ts`).** `extractOpenFolderPath()` + `tryDirectOpenFolder()` rulează în handler-ul de chat **înainte** de clasificare și de orice apel la provider. Dacă mesajul e o comandă de deschidere, folderul se deschide direct, iar fluxul se oprește (`[router] mode=action source=direct`) — fără LLM, deci fără clasa de erori „modelul a răspuns cu text".
+- **Verbe în 9 limbi + formate de cale.** `deschide/deschideți/open/abre/abrir/ouvre/ouvrir/öffne/öffnen/apri/aprire/открой/открыть/打开/打开项目/開く/열기`, cu sau fără cuvântul-proiect (`proiect/proiectul/project/projekt/proyecto/progetto/projeto/projet/проект/项目/project/folder/dossier/carpeta`). Acceptă Windows (`C:\`, `C:/`), UNC (`\\server\share`), Unix (`/...`), home (`~/`, `~\`) și mesajul format doar din cale.
+- **Ghilimele și spații.** `deschide "C:\Program Files\My App"` (ghilimele drepte, simple sau backtick) funcționează; fără ghilimele, calea cu spații e păstrată întreagă, iar dacă nu există se încearcă prefixele tăiate la conectori de frază (`și/apoi/then/and/…`) — așa „deschide C:\x **și rulează testele**" deschide `C:\x`, nu o cale inventată.
+- **Erori clare, nu halucinații.** Folderul lipsă → `Folderul nu există: <path>`; cale către un fișier → `Calea nu este un folder: <path>`; acces refuzat → `Nu am acces la folderul: <path>` (`ENOENT`/`EACCES`/`EPERM` sunt distinse). În toate cazurile mesajul e marcat ca tratat, ca să nu ajungă la model.
+- **Clasificator reparat.** `extractOpenFolderPath` non-null ⇒ `task`. Verbele de acțiune (rulează/run/execute/creează/create/editează/edit/citește/read/șterge/delete/listează/list, în mai multe limbi) plus o cale absolută ⇒ `task`. Întrebările clare rămân `question` — inclusiv „ce este un folder?" (cuvântul „folder" singur nu mai face un task) și „How do I open a folder in VS Code?".
+- **Question mode nu mai scoate uneltele.** `QUESTION_SYSTEM_PROMPT` enumeră uneltele reale (`read_file`, `write_file`, `edit_file`, `list_files`, `search_files`, `run_command`, `delete_file`, `project_info`) și formatul de acțiune `{"action":"…","args":{…}}`, păstrând regula „răspunde direct la întrebare, fără plan".
+- **Retry + fallback pentru acțiuni.** Dacă mesajul cere o acțiune și primul răspuns nu conține niciun tool call, se trimite **o singură** corecție („You did not call a tool… Respond ONLY with a JSON tool call") împreună cu nudge-ul existent. Dacă nici după ea nu vine un tool call, în loc să afișeze textul modelului ca succes, chatul spune: „Nu am putut executa comanda automat. Reformulează cu o cale explicită, ex: deschide C:\Users\...\folder".
+- **Teste.** `npm test` rulează `node --test` (fără dependențe noi) peste `src/tests/directCommands.test.ts`: 9 teste, inclusiv toate cele 11 formulări cerute în spec (9 limbi + ghilimele + doar calea), cale cu spații, UNC/Unix/home, cazurile negative („ce este un folder?", „deschide folderul?", cale relativă) și `expandHome`. Verificat separat pe filesystem real: 6 comenzi (RO/EN/DE/RU + coadă de frază) deschid folderul corect cu `forceReuseWindow`, întrebarea e ignorată, iar folderul inexistent și fișierul produc mesajele corecte.
+- Build: version **2.9.1 → 2.9.2**.
+
 ## v2.9.1
 
 **`deepseek.newChat` e reparat: butonul „New chat" nu mai e un `<button aria-label>` — e un `div[tabindex="0"]` fără `aria-label` și fără `data-testid`, deci toți cei 5 selectori din v1.5.4 returnau 0 potriviri (raportat de 13 instalări, 36 de ori).**

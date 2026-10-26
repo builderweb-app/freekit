@@ -28,6 +28,9 @@ node_modules/.package-lock.json
 !media/marked.min.js
 !media/purify.min.js
 !package.json
+# v2.9.2: testele compilate (build separat) nu se livrează cu extensia
+out-test/**
+tsconfig.test.json
 # v2.4.1: dev-only packages never shipped
 @img/
 sharp/

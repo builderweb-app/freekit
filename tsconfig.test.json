@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "out-test"
+  },
+  "include": ["src/tests/**/*.ts"],
+  "exclude": ["node_modules", "out", "out-test", "bootcamp-test", "bootcamp-test*"]
+}

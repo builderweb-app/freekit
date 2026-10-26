@@ -19,6 +19,7 @@ import {
   ProviderStatusInfo
 } from './providers';
 import { pickProjectFolder } from './openFolder';
+import { extractOpenFolderPath, tryDirectOpenFolder } from './directCommands';
 import { pullOllamaModel, startOllamaServer } from './providers/ollama';
 import {
   detectHardware,
@@ -212,6 +213,56 @@ const TASK_KEYWORDS = [
 ];
 
 /**
+ * v2.9.2: cuvinte care descriu doar un OBIECT (nu o acțiune) — „ce este un
+ * folder?" nu trebuie să devină task doar pentru că apare „folder".
+ */
+const NOUN_ONLY_KEYWORDS = new Set([
+  'fișier', 'fisier', 'file', 'folder', 'director'
+]);
+
+/**
+ * v2.9.2: verbe de ACȚIUNE, în mai multe limbi. Un mesaj cu verb de acțiune
+ * nu mai poate fi tratat ca întrebare, oricât de mult seamănă cu una.
+ */
+const ACTION_VERB_RE = new RegExp(
+  '(?<![\\p{L}\\p{N}_])(?:' +
+    [
+      // deschidere
+      'deschide', 'deschideți', 'deschideti', 'open', 'abre', 'abrir', 'ouvre',
+      'ouvrir', 'öffne', 'oeffne', 'öffnen', 'apri', 'aprire', 'открой',
+      'открыть', '打开项目', '打开', '開く', '열기',
+      // execuție / creare / editare / citire / ștergere / listare
+      'rulează', 'ruleaza', 'execută', 'executa', 'run', 'execute', 'exec',
+      'start', 'creează', 'creeaza', 'crează', 'create', 'scrie', 'write',
+      'editează', 'editeaza', 'edit', 'modifică', 'modifica', 'modify',
+      'citește', 'citeste', 'read', 'șterge', 'sterge', 'delete', 'remove',
+      'listează', 'listeaza', 'list'
+    ].join('|') +
+    ')',
+  'iu'
+);
+
+/** v2.9.2: o cale absolută oriunde în mesaj (Windows / UNC / Unix / home). */
+const ABS_PATH_ANY_RE = /(?:[A-Za-z]:[\\/]|\\\\[^\s]|\/(?:[\w.-]+\/)+|~[\\/])/;
+
+/** v2.9.2: mesajul e o întrebare clară (formă de întrebare + fără verb de acțiune). */
+function looksLikePlainQuestion(text: string): boolean {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  // Formulare interogativă de la început („How do I open a folder?") = întrebare,
+  // chiar dacă înăuntru apare un verb de acțiune.
+  const startsWithQuestionWord =
+    /^[\s"'(]*(?:ce|care|cum|de ce|când|cand|unde|why|what|how|which|when|where|explain|explică|explica|qué|que|was|wie|comment|почему|что|为什么|什麼)\b/iu.test(
+      t
+    );
+  if (startsWithQuestionWord) return !ABS_PATH_ANY_RE.test(t);
+  // Altfel: semn de întrebare la final și NICIUN verb de acțiune (imperativ).
+  if (!/\?\s*$/.test(t)) return false;
+  if (ACTION_VERB_RE.test(t)) return false;
+  return !ABS_PATH_ANY_RE.test(t);
+}
+
+/**
  * v2.5.71 FIX 1: „write" / „scrie" SINGURE nu fac dintr-un prompt un task —
  * „Write a recursive Python function for factorial." cere cod ÎN CHAT, nu un
  * fișier scris. Devenin task doar împreună cu o țintă de tip fișier/cale.
@@ -243,10 +294,24 @@ function matchKeyword(lower: string, keyword: string): boolean {
  * Prompturile lungi (> 300 de caractere) sunt considerate task (ca în spec).
  */
 export function classifyPrompt(text: string): 'question' | 'task' {
+  // v2.9.2: „deschide proiectul <cale>" e ACȚIUNE, indiferent de limbă —
+  // nu depindem de cuvinte-cheie și nici de LLM.
+  if (extractOpenFolderPath(text)) return 'task';
   const lower = text.toLowerCase();
   const hasTaskKeyword = TASK_KEYWORDS.some((k) => matchKeyword(lower, k));
   const hasWriteVerb = WRITE_VERBS.some((k) => matchKeyword(lower, k));
+  // v2.9.2: verb de acțiune + cale absolută = task (ex: „rulează C:\proj\x.ps1")
+  if (ACTION_VERB_RE.test(text) && ABS_PATH_ANY_RE.test(text)) return 'task';
   if (hasTaskKeyword || (hasWriteVerb && FILE_TARGET_RE.test(text))) {
+    // v2.9.2: o întrebare clară care conține doar un cuvânt-OBIECT
+    // („ce este un folder?") rămâne întrebare.
+    const onlyNounKeywords =
+      hasTaskKeyword &&
+      !WRITE_VERBS.some((k) => matchKeyword(lower, k)) &&
+      TASK_KEYWORDS.filter((k) => matchKeyword(lower, k)).every((k) =>
+        NOUN_ONLY_KEYWORDS.has(k)
+      );
+    if (onlyNounKeywords && looksLikePlainQuestion(text)) return 'question';
     return 'task';
   }
   if (text.length > 300) return 'task';
@@ -282,10 +347,16 @@ export function needsCrossProviderHandoff(args: {
  * trebuie să emită acțiuni în loc să răspundă la întrebare).
  */
 export const QUESTION_SYSTEM_PROMPT =
-  "You are a helpful assistant. Answer the user's question directly with " +
-  'the actual answer. Do NOT use tools. Do NOT give a plan or a list of steps. ' +
-  'If the user asks for code, give the code. ' +
-  'If the user asks for an explanation, give the explanation.';
+  'You are Freekit, a VS Code agent. You have local tools: read_file(path), ' +
+  'write_file(path, content), edit_file(path, ...), list_files(path), ' +
+  'search_files(pattern), run_command(command, cwd), delete_file(path), project_info().\n' +
+  "If the user asks a QUESTION, answer directly with the actual answer — no plan, " +
+  'no list of steps, no tool call.\n' +
+  'If the user asks for an ACTION (open/read/write/run something), respond with ' +
+  'exactly one single-line JSON action and nothing else: ' +
+  '{"action":"read_file","args":{"path":"src/index.ts"}}\n' +
+  'Never claim you did something unless you called the tool. ' +
+  'If no tool is needed, answer normally.';
 
 /**
  * v2.5.48: câte rezultate de unealtă se lipesc în ACELAȘI chat web înainte de a
@@ -2087,6 +2158,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const userText: string = msg.text;
     // v2.0.4: retry = reluarea ultimului prompt (vezi mai sus)
     const isRetry = msg.retry === true;
+    /**
+     * v2.9.2 (bug „deschide proiectul <path>"): comenzile de deschidere se
+     * execută DETERMINIST, înainte de clasificare și de LLM. Înainte, mesajul
+     * era clasificat drept întrebare, primea promptul scurt fără unelte și
+     * modelul răspundea textual („no valid tool call, final answer").
+     */
+    if (!isRetry && (await tryDirectOpenFolder(userText))) {
+      log('[router] mode=action source=direct');
+      this.post('busy', '0');
+      return;
+    }
     // v1.4.0: id-ul mesajului (generat de webview) → leagă mesajul de checkpoint
     const msgId =
       typeof msg.msgId === 'string' && MSG_ID_RE.test(msg.msgId)
@@ -2571,6 +2653,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       let timedOut = false;
       // v1.1.2: auto-retry — câte nudge-uri „text în loc de tool call" am trimis
       let textRetries = 0;
+      // v2.9.2: un mesaj cu verb de ACȚIUNE trebuie să producă un tool call —
+      // altfel cerem o corecție o singură dată și, dacă tot nu vine, spunem
+      // explicit că nu am putut executa (nu afișăm textul modelului ca succes).
+      const actionRequested = promptKind === 'task' && ACTION_VERB_RE.test(userText);
       // v2.5.3 FIX 7: câte nudge-uri „tool call malformat" am trimis (max 1)
       let malformedRetries = 0;
       // v2.5.14 (bug #38): câte nudge-uri „refuz al protocolului de unelte"
@@ -2782,10 +2868,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           if (
             promptKind === 'task' &&
             textRetries < MAX_TEXT_RETRIES &&
-            looksLikeIntentOnly(aiReply) &&
-            !looksLikeToolCallAttempt(aiReply)
+            (looksLikeIntentOnly(aiReply) ||
+              (actionRequested && iterations === 0 && !looksLikeToolCallAttempt(aiReply)))
           ) {
             textRetries++;
+            const correction =
+              'You did not call a tool. The user asked for an action: "' +
+              userText.slice(0, 200).replace(/\s+/g, ' ') +
+              '". Respond ONLY with a JSON tool call.';
             log(
               'text instead of tool call — auto-retry ' +
                 textRetries +
@@ -2807,7 +2897,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               text: 'Replied with text instead of a tool call — asking again for the action JSON.',
               status: 'done'
             });
-            aiReply = await provider.send(page, TEXT_RETRY_NUDGE, signal, followUpOpts);
+            aiReply = await provider.send(
+              page,
+              correction + '\n\n' + TEXT_RETRY_NUDGE,
+              signal,
+              followUpOpts
+            );
             continue;
           }
           // v2.4.8: răspunsul e o ÎNCERCARE de tool call pe care extractorul
@@ -2988,6 +3083,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             status: 'done'
           });
           log('no valid tool call, final answer (iteration ' + iterations + ')');
+          // v2.9.2: utilizatorul a cerut o ACȚIUNE și modelul a răspuns doar cu
+          // text, fără să execute nimic — nu prezentăm textul ca succes.
+          if (actionRequested && iterations === 0) {
+            log('[router] action requested but no tool call — fallback notice shown');
+            aiReply =
+              'Nu am putut executa comanda automat. Reformulează cu o cale explicită, ' +
+              'ex: deschide C:\\Users\\...\\folder';
+          }
           break;
         }
 

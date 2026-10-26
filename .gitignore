@@ -1,6 +1,7 @@
 # Node / build
 node_modules/
 out/
+out-test/
 *.tsbuildinfo
 
 # Artefacte de build (VSIX se generează la nevoie; nu se comit)

@@ -433,8 +433,10 @@ async function openFolder(
 
 /**
  * Deschide folderul cerut, dacă mesajul este o comandă de deschidere.
- * Întoarce `true` când mesajul a fost TRATAT (deschis, refuzat prin
- * confirmare sau eroare afișată) — atunci nu mai are rost să fie trimis la LLM.
+ * Întoarce `true` doar când mesajul a fost TRATAT complet (folder deschis sau
+ * eroare afișată pentru o cerere explicită). Întrebările, verbele distructive,
+ * refuzul confirmării, căile inexistente pomenite în alt context și folderul
+ * deja deschis întorc `false` — mesajul merge mai departe pe fluxul normal.
  */
 export async function tryDirectOpenFolder(text: string): Promise<boolean> {
   const plan = planOpenFolder(text);

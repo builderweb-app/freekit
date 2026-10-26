@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.9.4
+
+**Fix de encoding: `package.json` livrat în 2.9.3 avea em dash-ul (`—`) și en dash-ul (`–`) transformate în „â€”" / „â€“", așa că numele extensiei apărea ca „Freekit â€” Free AI Coding Agent" în Marketplace și în lista de extensii. Textul original e restaurat; router-ul de comenzi din 2.9.3 rămâne neschimbat.**
+
+- **Cauza.** La bump-ul de versiune pentru 2.9.3, `package.json` a trecut prin `Get-Content -Raw` + `Set-Content -Encoding utf8`. PowerShell 5.1 citește fișierele fără BOM cu codepage-ul legacy (nu UTF-8), deci fiecare caracter non-ASCII a fost citit greșit și rescris ca atare — clasic mojibake. Fișierul a fost restaurat din git (`e35b4a9`) și versiunea a fost setată cu un script Node care citește/scrie explicit UTF-8 și refuză să continue dacă găsește mojibake.
+- **Ce era afectat:** `displayName`, `description`, titlurile comenzilor `Freekit: Unlock broken — <provider>`, `deprecationMessage` / `markdownDescription` pentru `freekit.selectorHealer` și descrierile enum-urilor din setări. Toate revin la textul corect.
+- **Verificat:** scanare a tuturor fișierelor text din repo (`package.json`, `README.md`, `CHANGELOG.md`, `.vscodeignore`, `src/**/*.ts`, `src/**/*.json`) după secvențele de mojibake — singurul fișier afectat era `package.json`, iar acum nu mai există niciuna.
+- Build: version **2.9.3 → 2.9.4**.
+
 ## v2.9.3
 
 **Router-ul de comenzi nu se mai bazează pe verbe: detectează ÎNTÂI căile — Windows (`C:\`, `C:/`), UNC (`\\server\share`), Unix (`/`), home (`~/`, `~\`) și relative (`./`, `../`) — oriunde în mesaj, verifică pe filesystem dacă sunt foldere și abia apoi decide: deschide direct, cere confirmare, sau nu execută nimic (întrebări, verbe distructive).**

@@ -1,8 +1,8 @@
 {
   "name": "freekit",
-  "displayName": "Freekit â€” Free AI Coding Agent",
-  "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) â€” or a local Ollama model â€” to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.9.3",
+  "displayName": "Freekit — Free AI Coding Agent",
+  "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
+  "version": "2.9.4",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -177,27 +177,27 @@
       },
       {
         "command": "freekit.unlockBrokenSelectorsChatgpt",
-        "title": "Freekit: Unlock broken â€” ChatGPT"
+        "title": "Freekit: Unlock broken — ChatGPT"
       },
       {
         "command": "freekit.unlockBrokenSelectorsClaude",
-        "title": "Freekit: Unlock broken â€” Claude"
+        "title": "Freekit: Unlock broken — Claude"
       },
       {
         "command": "freekit.unlockBrokenSelectorsDeepseek",
-        "title": "Freekit: Unlock broken â€” DeepSeek"
+        "title": "Freekit: Unlock broken — DeepSeek"
       },
       {
         "command": "freekit.unlockBrokenSelectorsMistral",
-        "title": "Freekit: Unlock broken â€” Mistral"
+        "title": "Freekit: Unlock broken — Mistral"
       },
       {
         "command": "freekit.unlockBrokenSelectorsGemini",
-        "title": "Freekit: Unlock broken â€” Gemini"
+        "title": "Freekit: Unlock broken — Gemini"
       },
       {
         "command": "freekit.unlockBrokenSelectorsQwen",
-        "title": "Freekit: Unlock broken â€” Qwen"
+        "title": "Freekit: Unlock broken — Qwen"
       },
       {
         "command": "freekit.resetSelectorFailures",
@@ -256,8 +256,8 @@
         "freekit.aiSelectorFinder": {
           "type": "boolean",
           "default": false,
-          "deprecationMessage": "Deprecated â€” use `freekit.aiSelectorFinder.mode` instead.",
-          "markdownDescription": "**Deprecated** â€” use `freekit.aiSelectorFinder.mode` instead. Kept so older settings files keep working: if `freekit.aiSelectorFinder.mode` is **not** set explicitly and this is set to `false`, the AI selector finder is disabled (equivalent to `mode: \"off\"`). Any other value (or leaving it untouched) defers to `freekit.aiSelectorFinder.mode`."
+          "deprecationMessage": "Deprecated — use `freekit.aiSelectorFinder.mode` instead.",
+          "markdownDescription": "**Deprecated** — use `freekit.aiSelectorFinder.mode` instead. Kept so older settings files keep working: if `freekit.aiSelectorFinder.mode` is **not** set explicitly and this is set to `false`, the AI selector finder is disabled (equivalent to `mode: \"off\"`). Any other value (or leaving it untouched) defers to `freekit.aiSelectorFinder.mode`."
         },
         "freekit.aiSelectorFinder.mode": {
           "type": "string",
@@ -268,18 +268,18 @@
             "api-proxy"
           ],
           "enumDescriptions": [
-            "Disabled â€” the automatic selector repair stops after the fingerprint healer.",
-            "Local Ollama model (3â€“5 min per analysis, needs a chat model installed).",
-            "A new Chrome tab asking ChatGPT (15â€“30s). No API key, no install.",
-            "Hosted selector proxy (usually 3â€“5s); falls back to browser mode on failure."
+            "Disabled — the automatic selector repair stops after the fingerprint healer.",
+            "Local Ollama model (3–5 min per analysis, needs a chat model installed).",
+            "A new Chrome tab asking ChatGPT (15–30s). No API key, no install.",
+            "Hosted selector proxy (usually 3–5s); falls back to browser mode on failure."
           ],
           "default": "api-proxy",
-          "markdownDescription": "How Freekit repairs a broken selector automatically: `off` = disabled, `ollama` = local Ollama (3â€“5 min), `browser` = ChatGPT in a new Chrome tab (15â€“30s, **no API key needed**), `api-proxy` = hosted selector proxy (usually 3â€“5s, with browser fallback on failure). Repair is fully automatic: no cards, no questions â€” details go to **Output â†’ Freekit**. The manual `Freekit: Repair Selectors` command uses the same mode."
+          "markdownDescription": "How Freekit repairs a broken selector automatically: `off` = disabled, `ollama` = local Ollama (3–5 min), `browser` = ChatGPT in a new Chrome tab (15–30s, **no API key needed**), `api-proxy` = hosted selector proxy (usually 3–5s, with browser fallback on failure). Repair is fully automatic: no cards, no questions — details go to **Output → Freekit**. The manual `Freekit: Repair Selectors` command uses the same mode."
         },
         "freekit.aiFinderModel": {
           "type": "string",
           "default": "auto",
-          "markdownDescription": "Ollama model used by the **AI selector finder** when `freekit.aiSelectorFinder.mode` is `ollama` (independent of `freekit.ollamaModel`). `auto` = the best installed chat model: `gemma3:12b` when available, otherwise the first match by preference (`qwen2.5-coder` â†’ `qwen-coder` â†’ `qwen` â†’ `llama` â†’ `mistral` â†’ any other). Embeddings models (`nomic-embed-*`, `bge-*`, â€¦) are never used. Set a specific name (e.g. `qwen2.5-coder:7b`) to force one; when it is not installed the analysis is skipped with a warning in the log."
+          "markdownDescription": "Ollama model used by the **AI selector finder** when `freekit.aiSelectorFinder.mode` is `ollama` (independent of `freekit.ollamaModel`). `auto` = the best installed chat model: `gemma3:12b` when available, otherwise the first match by preference (`qwen2.5-coder` → `qwen-coder` → `qwen` → `llama` → `mistral` → any other). Embeddings models (`nomic-embed-*`, `bge-*`, …) are never used. Set a specific name (e.g. `qwen2.5-coder:7b`) to force one; when it is not installed the analysis is skipped with a warning in the log."
         },
         "freekit.aiFinderTimeoutSeconds": {
           "type": "number",
@@ -291,14 +291,14 @@
         "freekit.aiFinderProxyUrl": {
           "type": "string",
           "default": "https://freekitproxy.identitate-brand.workers.dev",
-          "markdownDescription": "Endpoint used by `freekit.aiSelectorFinder.mode = api-proxy`. Freekit POSTs `{ prompt, dom }` and expects an OpenAI-compatible reply (`choices[0].message.content`); the Gemini key lives on the server, so nothing sensitive is stored locally. Change it only when you run your own proxy â€” an invalid value falls back to the default. Over 12 000 chars the DOM snapshot is truncated before the request."
+          "markdownDescription": "Endpoint used by `freekit.aiSelectorFinder.mode = api-proxy`. Freekit POSTs `{ prompt, dom }` and expects an OpenAI-compatible reply (`choices[0].message.content`); the Gemini key lives on the server, so nothing sensitive is stored locally. Change it only when you run your own proxy — an invalid value falls back to the default. Over 12 000 chars the DOM snapshot is truncated before the request."
         },
         "freekit.providerTimeout": {
           "type": "number",
           "default": 90,
           "minimum": 10,
           "maximum": 1800,
-          "markdownDescription": "How long (seconds, 10â€“1800) to wait for one response from the web chat (ChatGPT/Claude/Gemini/DeepSeek/Mistral/Qwen). Default **90** (replaces the old `freekit.responseTimeoutMs`, which waited 300s; there is no backwards compatibility). While the provider shows it is working (Stop button, thinking/generating/reasoning/stop generating text, a new/growing answer, or a changed URL) the wait continues up to this budget; at 90s with **no sign of activity at all** Freekit first retries **once** with `Previous response timed out. Reply with a shorter answer.` and, if that also gets nothing, stops with `[<provider>] no response after 90s â€” provider stuck, try again or switch.` At expiry it still makes a last-chance read of the assistant bubble and returns it when it looks like a real answer; long answers that contain a whole file can take minutes â€” raise this only if you see such timeouts."
+          "markdownDescription": "How long (seconds, 10–1800) to wait for one response from the web chat (ChatGPT/Claude/Gemini/DeepSeek/Mistral/Qwen). Default **90** (replaces the old `freekit.responseTimeoutMs`, which waited 300s; there is no backwards compatibility). While the provider shows it is working (Stop button, thinking/generating/reasoning/stop generating text, a new/growing answer, or a changed URL) the wait continues up to this budget; at 90s with **no sign of activity at all** Freekit first retries **once** with `Previous response timed out. Reply with a shorter answer.` and, if that also gets nothing, stops with `[<provider>] no response after 90s — provider stuck, try again or switch.` At expiry it still makes a last-chance read of the assistant bubble and returns it when it looks like a real answer; long answers that contain a whole file can take minutes — raise this only if you see such timeouts."
         },
         "freekit.cdpPort": {
           "type": "number",
@@ -321,24 +321,24 @@
             "type": "string"
           },
           "default": [],
-          "markdownDescription": "List of external paths Freekit may use, even though they are not open in the workspace â€” e.g. `Z:\\home` (a WordPress install on a RaiDrive/network drive) or `D:\\projects`. Both reads and writes are allowed inside them (writes still require approval), so the AI can inspect and, if you ask it to, modify that folder. Every allowed external path is logged in **Output â†’ Freekit** as `[scope] allowed external path: <path>`; anything outside the workspace and this list is refused with `[scope] refused: <path>`."
+          "markdownDescription": "List of external paths Freekit may use, even though they are not open in the workspace — e.g. `Z:\\home` (a WordPress install on a RaiDrive/network drive) or `D:\\projects`. Both reads and writes are allowed inside them (writes still require approval), so the AI can inspect and, if you ask it to, modify that folder. Every allowed external path is logged in **Output → Freekit** as `[scope] allowed external path: <path>`; anything outside the workspace and this list is refused with `[scope] refused: <path>`."
         },
         "freekit.handoffThreshold": {
           "type": "number",
           "default": 20,
           "minimum": 0,
           "maximum": 100,
-          "markdownDescription": "Number of tool results pasted into the **same** browser chat before starting a **new chat** with a full handoff. A large tool payload makes ChatGPT/Claude/Gemini process every later message slowly, and the accumulated context can hit the site's â€žChat memory fullâ€ limit â€” a fresh chat keeps the paste small and fast. Raise it for long tasks (more context kept in one chat); lower it if the web app gets slow. **0** disables the handoff entirely (the chat is only restarted when the site reports a full context). Note: the handoff is never triggered for tasks that read *many* files and summarize them (â€žread every file in src/ and summarizeâ€), because the new chat would have to re-read everything."
+          "markdownDescription": "Number of tool results pasted into the **same** browser chat before starting a **new chat** with a full handoff. A large tool payload makes ChatGPT/Claude/Gemini process every later message slowly, and the accumulated context can hit the site's „Chat memory full” limit — a fresh chat keeps the paste small and fast. Raise it for long tasks (more context kept in one chat); lower it if the web app gets slow. **0** disables the handoff entirely (the chat is only restarted when the site reports a full context). Note: the handoff is never triggered for tasks that read *many* files and summarize them („read every file in src/ and summarize”), because the new chat would have to re-read everything."
         },
         "freekit.chunkedWrites": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Splits large files into chunks so a browser chat (â‰ˆ8k tokens per reply) does not truncate them. When a written file ends with a continuation marker (`// CONTINUARE`, `<!-- CONTINUARE -->`, `/* CONTINUARE */` or `# CONTINUARE`), Freekit automatically asks the model to continue with an `edit_file` that replaces the marker â€” repeating until the marker is gone (max **10** parts per file, logged as `[write] file <path> part K/10`)."
+          "markdownDescription": "Splits large files into chunks so a browser chat (≈8k tokens per reply) does not truncate them. When a written file ends with a continuation marker (`// CONTINUARE`, `<!-- CONTINUARE -->`, `/* CONTINUARE */` or `# CONTINUARE`), Freekit automatically asks the model to continue with an `edit_file` that replaces the marker — repeating until the marker is gone (max **10** parts per file, logged as `[write] file <path> part K/10`)."
         },
         "freekit.autoVerify": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "After every file write (`write_file` / `edit_file` / `write_files`), automatically verifies the project (`astro check`, `tsc --noEmit` or the detected build/typecheck/lint script). On failure the error is **parsed and traced to its root cause** (`[diagnose] parsed: â€¦` / `[diagnose] root cause: â€¦`) and only a compact diagnostic is sent to the AI, together with the exact fix; the AI must answer with **one `edit_file`** (band-aid fixes â€” `?.` on `.map()`, `|| []`, `if (!x) return` â€” are rejected and re-prompted). Max **3 repair cycles**; if it still fails, the changes are rolled back automatically (**rollback** to the last verified-good state) and, when there is no verified-good state, you are told honestly that the error is still present."
+          "markdownDescription": "After every file write (`write_file` / `edit_file` / `write_files`), automatically verifies the project (`astro check`, `tsc --noEmit` or the detected build/typecheck/lint script). On failure the error is **parsed and traced to its root cause** (`[diagnose] parsed: …` / `[diagnose] root cause: …`) and only a compact diagnostic is sent to the AI, together with the exact fix; the AI must answer with **one `edit_file`** (band-aid fixes — `?.` on `.map()`, `|| []`, `if (!x) return` — are rejected and re-prompted). Max **3 repair cycles**; if it still fails, the changes are rolled back automatically (**rollback** to the last verified-good state) and, when there is no verified-good state, you are told honestly that the error is still present."
         },
         "freekit.screenshotOpenMode": {
           "type": "string",
@@ -358,22 +358,22 @@
         "freekit.promptCheckpoints": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Before every message, creates a **git checkpoint** (commit `freekit-prompt:<id>` with the entire working tree) and shows the âŸ² button above the message, to return to that state (`git reset --hard`, with an automatic backup of the current state before the reset). In folders without git, the repo is initialized automatically (see `freekit.autoInitGit`)."
+          "markdownDescription": "Before every message, creates a **git checkpoint** (commit `freekit-prompt:<id>` with the entire working tree) and shows the ⟲ button above the message, to return to that state (`git reset --hard`, with an automatic backup of the current state before the reset). In folders without git, the repo is initialized automatically (see `freekit.autoInitGit`)."
         },
         "freekit.autoInitGit": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "If the project folder is not a git repo yet, initializes it automatically (`git init` + a minimal `.gitignore`, only if missing) on the first message, so checkpoints and the âŸ² restore button always work. Disable if you don't want Freekit to create a git repo in the project."
+          "markdownDescription": "If the project folder is not a git repo yet, initializes it automatically (`git init` + a minimal `.gitignore`, only if missing) on the first message, so checkpoints and the ⟲ restore button always work. Disable if you don't want Freekit to create a git repo in the project."
         },
         "freekit.selectorsUrl": {
           "type": "string",
           "default": "",
-          "markdownDescription": "**Raw** URL of a public GitHub Gist with `selectors.json` (same structure as the bundled one + `version`/`updated`/`changelog`). Empty = remote selectors disabled â€” only the selectors bundled with the extension are used. Example: `https://gist.githubusercontent.com/<user>/<id>/raw/selectors.json`"
+          "markdownDescription": "**Raw** URL of a public GitHub Gist with `selectors.json` (same structure as the bundled one + `version`/`updated`/`changelog`). Empty = remote selectors disabled — only the selectors bundled with the extension are used. Example: `https://gist.githubusercontent.com/<user>/<id>/raw/selectors.json`"
         },
         "freekit.checkSelectorsOnStartup": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "On startup, checks whether the Gist in `freekit.selectorsUrl` has a newer selector version. Rate limiting: at most once every 24 hours â€” the \"Freekit: Update Selectors\" command works anytime, on demand. Only takes effect if the URL is set."
+          "markdownDescription": "On startup, checks whether the Gist in `freekit.selectorsUrl` has a newer selector version. Rate limiting: at most once every 24 hours — the \"Freekit: Update Selectors\" command works anytime, on demand. Only takes effect if the URL is set."
         },
         "freekit.humanTyping": {
           "type": "boolean",
@@ -388,12 +388,12 @@
         "freekit.mutationObserver": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Uses `MutationObserver` for fast detection (experimental â€” can be flaky with offscreen Chrome: JS is suspended for invisible windows). Disabled = classic 500ms polling (reliable). Recommended: `false`."
+          "markdownDescription": "Uses `MutationObserver` for fast detection (experimental — can be flaky with offscreen Chrome: JS is suspended for invisible windows). Disabled = classic 500ms polling (reliable). Recommended: `false`."
         },
         "freekit.autoAcceptPopups": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Automatically closes consent popups (cookie / terms / \"OK\" / \"Got it\" / \"Accept all\"â€¦) after a page loads and before typing in the chat. Safe matches only: visible buttons, exact acceptance texts at 3 confidence tiers (\"OK\" only inside dialogs); **Reject / Only necessary / Customize / Not now** texts are ignored completely."
+          "markdownDescription": "Automatically closes consent popups (cookie / terms / \"OK\" / \"Got it\" / \"Accept all\"…) after a page loads and before typing in the chat. Safe matches only: visible buttons, exact acceptance texts at 3 confidence tiers (\"OK\" only inside dialogs); **Reject / Only necessary / Customize / Not now** texts are ignored completely."
         },
         "freekit.sttLanguage": {
           "type": "string",
@@ -406,17 +406,17 @@
             "English (US)"
           ],
           "default": "ro-RO",
-          "markdownDescription": "Language for **voice input** (the ðŸŽ¤ button in the chat): the recording is transcribed **locally, offline, with Whisper** and added to the message box. `ro-RO` = Romanian, `en-US` = English."
+          "markdownDescription": "Language for **voice input** (the 🎤 button in the chat): the recording is transcribed **locally, offline, with Whisper** and added to the message box. `ro-RO` = Romanian, `en-US` = English."
         },
         "freekit.whisperCliPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Path to `whisper-cli` (whisper.cpp) for offline voice input. Empty = automatic detection: globalStorage (`whisper/bin`) â†’ classic whisper.cpp locations â†’ PATH."
+          "markdownDescription": "Path to `whisper-cli` (whisper.cpp) for offline voice input. Empty = automatic detection: globalStorage (`whisper/bin`) → classic whisper.cpp locations → PATH."
         },
         "freekit.whisperModelPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Path to the Whisper ggml model (e.g. `ggml-base.bin`). Empty = automatic detection: globalStorage (`whisper/models`) â†’ next to the CLI â†’ `whisper.cpp/models`."
+          "markdownDescription": "Path to the Whisper ggml model (e.g. `ggml-base.bin`). Empty = automatic detection: globalStorage (`whisper/models`) → next to the CLI → `whisper.cpp/models`."
         },
         "freekit.whisperTimeoutSeconds": {
           "type": "number",
@@ -434,18 +434,18 @@
             "high"
           ],
           "enumDescriptions": [
-            "Off â€” no reasoning pass (fastest)",
-            "Low â€” quick reasoning",
-            "Medium â€” balanced (default)",
-            "High â€” deepest reasoning"
+            "Off — no reasoning pass (fastest)",
+            "Low — quick reasoning",
+            "Medium — balanced (default)",
+            "High — deepest reasoning"
           ],
           "default": "medium",
-          "markdownDescription": "Thinking level selected by the **chip in the composer** (Off / Low / Medium / High). Stored now and applied by the agent loop in a future release â€” the setting alone does not change the model behavior yet."
+          "markdownDescription": "Thinking level selected by the **chip in the composer** (Off / Low / Medium / High). Stored now and applied by the agent loop in a future release — the setting alone does not change the model behavior yet."
         },
         "freekit.mcpEnabled": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Starts the configured **MCP (Model Context Protocol)** servers and exposes their tools to the AI agent as extra tools (`mcp_<server>_<tool>`). Servers are configured in `.vscode/mcp.json` (format `{\"servers\": {...}}`) or in the `freekit.mcpServers` setting. Every MCP call requires approval (automatic only with âš¡ auto-approve enabled)."
+          "markdownDescription": "Starts the configured **MCP (Model Context Protocol)** servers and exposes their tools to the AI agent as extra tools (`mcp_<server>_<tool>`). Servers are configured in `.vscode/mcp.json` (format `{\"servers\": {...}}`) or in the `freekit.mcpServers` setting. Every MCP call requires approval (automatic only with ⚡ auto-approve enabled)."
         },
         "freekit.mcpServers": {
           "type": "object",
@@ -462,17 +462,17 @@
         "freekit.semanticIndex.enabled": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Enables **semantic code search** (the `search_semantic` tool + the index commands). The workspace is embedded locally with Ollama (`nomic-embed-text` by default) and stored as a JSON vector store in globalStorage â€” no new npm dependencies. Disabled = the AI falls back to `search_files`."
+          "markdownDescription": "Enables **semantic code search** (the `search_semantic` tool + the index commands). The workspace is embedded locally with Ollama (`nomic-embed-text` by default) and stored as a JSON vector store in globalStorage — no new npm dependencies. Disabled = the AI falls back to `search_files`."
         },
         "freekit.semanticIndex.model": {
           "type": "string",
           "default": "nomic-embed-text",
-          "markdownDescription": "Ollama embedding model used for the semantic index (install with `ollama pull nomic-embed-text`). Changing it invalidates the existing index â€” re-run **Freekit: Index Workspace**."
+          "markdownDescription": "Ollama embedding model used for the semantic index (install with `ollama pull nomic-embed-text`). Changing it invalidates the existing index — re-run **Freekit: Index Workspace**."
         },
         "freekit.semanticIndex.onSave": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Automatically re-indexes a file when it is **saved** (incremental â€” only that file's chunks are recomputed, debounced 1.5 s). Requires an existing index; does nothing if the workspace was never indexed."
+          "markdownDescription": "Automatically re-indexes a file when it is **saved** (incremental — only that file's chunks are recomputed, debounced 1.5 s). Requires an existing index; does nothing if the workspace was never indexed."
         },
         "freekit.semanticIndex.maxFileKb": {
           "type": "number",
@@ -494,12 +494,12 @@
             "type": "string"
           },
           "default": [],
-          "markdownDescription": "Extra directory/file **names** to exclude from indexing, on top of the built-in list (`node_modules`, `.git`, `out`, `dist`, `build`, `.next`, `coverage`, `venv`, `target`, lockfiles, minified filesâ€¦). Example: `[\"fixtures\", \"snapshots\"]`."
+          "markdownDescription": "Extra directory/file **names** to exclude from indexing, on top of the built-in list (`node_modules`, `.git`, `out`, `dist`, `build`, `.next`, `coverage`, `venv`, `target`, lockfiles, minified files…). Example: `[\"fixtures\", \"snapshots\"]`."
         },
         "freekit.reporting.enabled": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Master switch for the **Freekit reporting server** integration. When on, the extension registers once (anonymous installation id), periodically checks that the web-AI selectors still work, tries to repair them locally first, and â€” only if the repair fails â€” reports the broken selector so a fix can be published to everyone. No code, files or messages are ever sent; disable to opt out completely."
+          "markdownDescription": "Master switch for the **Freekit reporting server** integration. When on, the extension registers once (anonymous installation id), periodically checks that the web-AI selectors still work, tries to repair them locally first, and — only if the repair fails — reports the broken selector so a fix can be published to everyone. No code, files or messages are ever sent; disable to opt out completely."
         },
         "freekit.reporting.endpoint": {
           "type": "string",
@@ -509,7 +509,7 @@
         "freekit.reporting.shareDomSnapshot": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "When reporting a broken selector, also send a **cleaned DOM snapshot** of the page (scripts, styles, media and input values are stripped, truncated to a few thousand characters). It makes fixing the selector far easier, but it does send a fragment of the page's HTML â€” off by default."
+          "markdownDescription": "When reporting a broken selector, also send a **cleaned DOM snapshot** of the page (scripts, styles, media and input values are stripped, truncated to a few thousand characters). It makes fixing the selector far easier, but it does send a fragment of the page's HTML — off by default."
         },
         "freekit.reporting.healthCheck": {
           "type": "boolean",
@@ -533,7 +533,7 @@
         "freekit.canary.enabled": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Background **canary**: every few hours, open a dedicated tab in the Freekit Chrome profile and verify the `input`, `newChat` and `response` selectors of every provider from `selectors.json` â€” including providers you have no tab open for. A broken slot is repaired locally (fingerprint, then AI Finder). Chrome is never started just for this check, and the tab is closed when it ends."
+          "markdownDescription": "Background **canary**: every few hours, open a dedicated tab in the Freekit Chrome profile and verify the `input`, `newChat` and `response` selectors of every provider from `selectors.json` — including providers you have no tab open for. A broken slot is repaired locally (fingerprint, then AI Finder). Chrome is never started just for this check, and the tab is closed when it ends."
         },
         "freekit.canary.intervalHours": {
           "type": "number",

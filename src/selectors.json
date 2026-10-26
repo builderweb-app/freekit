@@ -1,7 +1,7 @@
 {
-  "version": "1.5.4",
-  "updated": "2026-10-07",
-  "changelog": "v1.5.4: refreshed bundled Qwen and Mistral selectors for current composer, assistant response, and new-chat elements.",
+  "version": "1.5.5",
+  "updated": "2026-10-26",
+  "changelog": "v1.5.5: DeepSeek's 'New chat' is no longer a <button aria-label> — it is a div[tabindex=0] with no aria-label/data-testid, so every selector in v1.5.4 matched nothing (36 reports / 13 installations). The primary is now text-based, with a language-independent CSS fallback; the fingerprint tags also collect div[tabindex=0] so the healer can rediscover it.",
   "providers": {
     "deepseek": {
       "url": "https://chat.deepseek.com/",
@@ -36,15 +36,15 @@
         }
       },
       "newChat": {
-        "primary": "button[aria-label*='New chat' i]",
+        "primary": "div[tabindex='0']:has-text('New chat')",
         "alternatives": [
-          "button[aria-label*='chat nou' i]",
+          "div[tabindex='0']:has-text('Chat nou')",
+          "div[tabindex='0'][style*='justify-content']",
           "[class*='new-chat']",
-          "[data-testid*='new-chat']",
           "a[href='/']"
         ],
         "fingerprint": {
-          "tags": ["button", "a"],
+          "tags": ["button", "a", "div[tabindex='0']"],
           "nearbyText": ["New chat", "Chat nou", "Conversation"],
           "position": "top"
         }

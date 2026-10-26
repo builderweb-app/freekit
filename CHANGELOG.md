@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.9.1
+
+**`deepseek.newChat` e reparat: butonul „New chat" nu mai e un `<button aria-label>` — e un `div[tabindex="0"]` fără `aria-label` și fără `data-testid`, deci toți cei 5 selectori din v1.5.4 returnau 0 potriviri (raportat de 13 instalări, 36 de ori).**
+
+- **Cauza.** Pe chat.deepseek.com elementul e `<div class="_5a8ac7a a084f19e" tabindex="0" style="justify-content: center;">` cu un `.ds-icon` și un `<span>New chat</span>`. Clasele sunt hash-uite (se schimbă la fiecare build), iar `aria-label`/`data-testid`/`title` lipsesc complet — deci `button[aria-label*='New chat' i]`, `[class*='new-chat']` și `a[href='/']` nu puteau potrivi nimic. Healer-ul nu putea nici el să repare: fingerprint-ul lui `tags: ["button","a"]` nu colecta niciun `div`, deci raporta „local heal found nothing".
+- **Fix în `selectors.json` (v1.5.4 → v1.5.5).** `primary` e acum `div[tabindex='0']:has-text('New chat')`, cu alternative pentru UI românesc (`Chat nou`), un fallback **independent de limbă** (`div[tabindex='0'][style*='justify-content']` — singurul element cu acea combinație, verificat în ambele stări: chat nou și conversație deschisă), plus selectorii vechi păstrați la coadă.
+- **Fingerprint corectat.** `tags` include acum `div[tabindex='0']`, deci dacă toți selectorii cad, healer-ul poate redescoperi butonul singur. Verificat cu `scanCandidates` pe pagina reală: înainte 5 candidați (toți linkuri de conversație, score ≤ 6, sub prag), după 8 candidați cu `div._5a8ac7a.a084f19e` la **score 95** (treapta soft) — peste pragul de 50.
+- **Verificat funcțional pe chat.deepseek.com**, cu sesiune reală logată: selectorul găsește exact 1 element vizibil pe `/` și pe `/a/chat/s/<id>`; click-ul din conversație duce înapoi la `/` și textarea e prezent (`chat nou creat`). Toate cele 3 variante trec `isUsableSelector()` și `learn(..., 'server')`, deci pot fi publicate și prin serverul de raportare (unde ajung la clienții existenți fără update de extensie).
+- **Distribuție.** Pentru instalările existente: publică selectorul pe raportul `deepseek.newChat` din dashboard („Publish & fix") — clienții îl iau la fetch-ul de 24h. Pentru instalări noi: versiunea asta, cu `selectors.json` v1.5.5 bundled.
+- Build: version **2.9.0 → 2.9.1**.
+
 ## v2.9.0
 
 **Canary health check: la fiecare 6 ore, Freekit verifică singur selectorii TUTUROR providerilor din `selectors.json` — nu doar ai tab-urilor deschise — într-un tab dedicat din profilul Freekit, repară slotul stricat (fingerprint → AI Finder) și publică reparația AI în Gist-ul remote, ca să ajungă la toate instalările (hive-mind).**

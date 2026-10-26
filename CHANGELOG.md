@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.9.3
+
+**Router-ul de comenzi nu se mai bazează pe verbe: detectează ÎNTÂI căile — Windows (`C:\`, `C:/`), UNC (`\\server\share`), Unix (`/`), home (`~/`, `~\`) și relative (`./`, `../`) — oriunde în mesaj, verifică pe filesystem dacă sunt foldere și abia apoi decide: deschide direct, cere confirmare, sau nu execută nimic (întrebări, verbe distructive).**
+
+- **Decizia nu mai depinde de verbe.** `src/directCommands.ts` are acum `findPathCandidates()` (toate căile din mesaj, în ordinea apariției, cu ghilimele drepte/tipografice `„…”`, spații, Unicode, diacritice și caractere non-latine) și `planOpenFolder()` (planul: cale + variante de încercat + `explicit` + `blocked`). Verbele de deschidere (9 limbi) rămân doar un semnal care sare peste confirmare, nu criteriul de decizie.
+- **Regulile de execuție (conform spec-ului).** Dacă mesajul conține o cale care există și este folder: doar calea SAU un verb de deschidere cunoscut ⇒ `vscode.openFolder` direct; altfel ⇒ dialog modal „Open this folder in the current window?" cu calea în `detail`. Refuzul nu consumă mesajul — cererea merge pe fluxul normal, exact cum a fost scrisă.
+- **Nu se execută automat** când mesajul conține și marcaje de întrebare (`?`, `cum/how/why/ce/de ce/explain/...`) sau verbe distructive (`șterge/delete/remove/move/...`). Cuvintele-cheie sunt căutate în mesajul **fără cale**, deci `deschide C:\how\delete-me` rămâne o comandă validă, iar `C:\x cum funcționează?` nu deschide nimic.
+- **Remote și cross-OS.** Existența se verifică prin `vscode.workspace.fs` (nu cu `fs` local), `vscode.env.remoteName` e logat și folosit la maparea URI-ului (`vscode-remote://<authority>/...`). Un path Windows pe macOS/Linux (și invers) nu se încearcă deloc: apare o eroare clară, cu host-ul real („… it is a Windows path, but VS Code is running on the remote host (wsl+Ubuntu · Linux)"). Un folder deja deschis în fereastră nu mai produce reload.
+- **UI în engleza de bază a VS Code**, nu în limba presupusă a utilizatorului: `Freekit: folder does not exist: …`, `Freekit: that path is a file, not a folder: …`, `Freekit: permission denied for folder: …`. Mesajele de eroare apar doar pentru cereri explicite de deschidere; dacă utilizatorul doar a pomenit o cale într-o altă cerere, mesajul merge la model. Nimic nu anunță „am deschis" înainte ca `vscode.openFolder` să fi reușit.
+- **Coada de frază și căile cu spații.** `deschide C:\Program Files\My App și rulează testele` → se încearcă întâi calea completă, apoi prefixele tăiate la conectori (`și/and/with/puis/und/...`) și la cuvinte de intenție; `compare C:\a with C:\b` alege prima cale, nu „C:\a with".
+- **Teste.** `src/tests/directCommands.test.ts` acoperă 21 de cazuri: cele 11 formulări din spec (9 limbi + ghilimele + doar calea), detecție fără verb, confirmare, blocare pe întrebări (6 limbi de marcaje) și pe verbe distructive, cuvinte de intenție în interiorul căii, ghilimele tipografice + Unicode + non-latin, mai multe căi în același mesaj, tăierea cozii de frază, `pathFlavor`/`isPathUsableOnHost` (Windows vs macOS/Linux) și căile relative ignorate. Verificat separat pe filesystem real, cu un `vscode` fals: deschidere directă, confirmare acceptată/refuzată, folder inexistent, fișier, path Unix pe Windows, remote Linux cu path Windows, folder deja deschis.
+- Build: version **2.9.2 → 2.9.3**.
+
 ## v2.9.2
 
 **„deschide proiectul C:\...\brandidentity.agency-src" nu mai trece prin LLM: comenzile de deschidere sunt recunoscute determinist și executate cu `vscode.openFolder`. Înainte, mesajul era clasificat drept ÎNTREBARE, primea promptul scurt fără unelte, iar modelul răspundea textual („no valid tool call, final answer") în loc să deschidă folderul.**

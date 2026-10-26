@@ -294,8 +294,10 @@ function matchKeyword(lower: string, keyword: string): boolean {
  * Prompturile lungi (> 300 de caractere) sunt considerate task (ca în spec).
  */
 export function classifyPrompt(text: string): 'question' | 'task' {
-  // v2.9.2: „deschide proiectul <cale>" e ACȚIUNE, indiferent de limbă —
-  // nu depindem de cuvinte-cheie și nici de LLM.
+  // v2.9.2/v2.9.3: un mesaj cu o cale care există și e folder e ACȚIUNE,
+  // indiferent de limbă și fără să depindem de verbe (întrebările și
+  // mesajele cu verbe distructive rămân pe fluxul lor — `planOpenFolder` le
+  // marchează `blocked`, deci `extractOpenFolderPath` întoarce `null`).
   if (extractOpenFolderPath(text)) return 'task';
   const lower = text.toLowerCase();
   const hasTaskKeyword = TASK_KEYWORDS.some((k) => matchKeyword(lower, k));
@@ -2159,10 +2161,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // v2.0.4: retry = reluarea ultimului prompt (vezi mai sus)
     const isRetry = msg.retry === true;
     /**
-     * v2.9.2 (bug „deschide proiectul <path>"): comenzile de deschidere se
-     * execută DETERMINIST, înainte de clasificare și de LLM. Înainte, mesajul
-     * era clasificat drept întrebare, primea promptul scurt fără unelte și
-     * modelul răspundea textual („no valid tool call, final answer").
+     * v2.9.2 (bug „deschide proiectul <path>") + v2.9.3 (detectare universală):
+     * mesajele care conțin o cale se rezolvă DETERMINIST, înainte de clasificare
+     * și de LLM. Înainte, mesajul era clasificat drept întrebare, primea
+     * promptul scurt fără unelte și modelul răspundea textual („no valid tool
+     * call, final answer"). Router-ul întoarce `true` doar când mesajul a fost
+     * tratat complet; întrebările, verbele distructive, refuzul confirmării și
+     * căile inexistente (pomenite în alt context) merg mai departe normal.
      */
     if (!isRetry && (await tryDirectOpenFolder(userText))) {
       log('[router] mode=action source=direct');

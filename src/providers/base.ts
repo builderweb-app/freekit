@@ -22,7 +22,7 @@ import {
   humanType
 } from '../human-behavior';
 import { installMutationTracker, waitForAbort, waitStep } from '../mutation';
-import { autoAcceptPopups } from '../popups';
+import { autoAcceptPopups, dismissPromoPopups } from '../popups';
 import { logLine } from '../log';
 import { isProviderCurrentlyUnhealthy, UNHEALTHY_TTL_MS } from '../providerHealth';
 import {
@@ -37,6 +37,19 @@ import {
 } from '../providerErrors';
 
 const log = (msg: string) => console.log('[Freekit]', msg);
+
+/**
+ * v2.9.6: inchide popup-urile de consimtamant SI overlay-urile promo/upsell
+ * (ex: modalul de pricing ChatGPT "Try Plus free for 1 month") care pot
+ * acoperi composerul. Fiecare pas e independent si nu arunca niciodata.
+ */
+async function clearBlockingPopups(
+  page: Page
+): Promise<{ consent: string[]; promo: string[] }> {
+  const consent = await autoAcceptPopups(page, { log }).catch(() => []);
+  const promo = await dismissPromoPopups(page, { log }).catch(() => []);
+  return { consent, promo };
+}
 
 /** Momentele (ms de la trimitere) la care verificăm dacă e nevoie de reparare. */
 const HEAL_CHECKPOINTS = [4000, 9000, 20000, 40000];
@@ -849,8 +862,8 @@ export async function openProvider(page: Page, providerId: string, label: string
   }
 
   if (current.startsWith(host)) {
-    // v1.8.0: popup-uri de consimțământ care pot bloca inputul
-    await autoAcceptPopups(page, { log }).catch(() => []);
+    // v2.9.6: consimtamant + overlay-uri promo care pot bloca inputul
+    await clearBlockingPopups(page);
     await validateConnectSelectors(page, providerId, label);
     if (await inputAvailable(page, providerId, 200)) {
       return;
@@ -859,8 +872,8 @@ export async function openProvider(page: Page, providerId: string, label: string
   }
 
   await page.goto(url, { waitUntil: 'domcontentloaded' });
-  // v1.8.0: acceptă automat popup-urile de cookie/terms după încărcare
-  await autoAcceptPopups(page, { log }).catch(() => []);
+  // v2.9.6: accepta automat popup-urile de cookie/terms + promo dupa incarcare
+  await clearBlockingPopups(page);
   // FIX v2: dacă aterizăm tot pe login (ex: Claude fără sesiune), nu mai
   // lăsăm healer-ul să rătăcească prin pagina de login (#email).
   if (isLoginUrl(page.url())) {
@@ -873,8 +886,8 @@ export async function openProvider(page: Page, providerId: string, label: string
 
 /** Chat nou: buton dedicat -> auto-reparare (DOAR dacă butonul nu mai există) -> navigare. */
 export async function newChatVia(page: Page, providerId: string, label: string) {
-  // v1.8.0: popup-uri de consimțământ care pot acoperi butonul de chat nou
-  await autoAcceptPopups(page, { log }).catch(() => []);
+  // v2.9.6: popup-uri de consimtamant + promo care pot acoperi butonul de chat nou
+  await clearBlockingPopups(page);
   // v2.5.10 (bug #20): URL-ul dinainte de click — dacă se schimbă, chatul nou
   // a fost creat și nu mai insistăm cu alți candidați.
   const beforeUrl = page.url();
@@ -895,7 +908,7 @@ export async function newChatVia(page: Page, providerId: string, label: string) 
       // conversații goale în sidebar-ul site-ului).
       if (page.url() !== beforeUrl) {
         try {
-          await autoAcceptPopups(page, { log }).catch(() => []);
+          await clearBlockingPopups(page);
           await findInput(page, providerId, label, 15000);
           selectors.note(providerId, 'newChat', sel);
           log(label + ': new chat via ' + sel + ' (URL changed)');
@@ -938,8 +951,8 @@ export async function newChatVia(page: Page, providerId: string, label: string) 
   const url = selectors.url(providerId);
   log(label + ': new chat fallback, navigating to ' + url);
   await page.goto(url, { waitUntil: 'domcontentloaded' });
-  // v1.8.0: popup-uri de cookie/terms după navigarea proaspătă
-  await autoAcceptPopups(page, { log }).catch(() => []);
+  // v2.9.6: popup-uri de cookie/terms + promo dupa navigarea proaspata
+  await clearBlockingPopups(page);
   // v0.9.1: sesiunea poate expira între open() și newChat() — același răspuns
   // ca la openProvider (chatView aduce Chrome în față și așteaptă login-ul).
   if (isLoginUrl(page.url())) throw loginError(providerId, page.url());
@@ -978,11 +991,11 @@ export async function resumeConversation(
   url: string,
   label: string
 ): Promise<void> {
-  await autoAcceptPopups(page, { log }).catch(() => []);
+  await clearBlockingPopups(page);
   if (normalizeNavUrl(page.url()) !== normalizeNavUrl(url)) {
     log(label + ': resuming the browser conversation at ' + url);
     await page.goto(url, { waitUntil: 'domcontentloaded' });
-    await autoAcceptPopups(page, { log }).catch(() => []);
+    await clearBlockingPopups(page);
     // v0.9.1: sesiunea poate expira între mesaje — același flux de login ca la open()
     if (isLoginUrl(page.url())) {
       notifyNotReady(providerId, 'login page?');
@@ -1023,7 +1036,7 @@ export async function rotateChatVia(
   if (stillSameChat) {
     log(label + ': rotate — still on the same conversation, navigating to a fresh chat');
     await page.goto(selectors.url(providerId), { waitUntil: 'domcontentloaded' });
-    await autoAcceptPopups(page, { log }).catch(() => []);
+    await clearBlockingPopups(page);
     if (isLoginUrl(page.url())) {
       notifyNotReady(providerId, 'login page?');
       throw loginError(providerId, page.url());
@@ -2050,10 +2063,13 @@ export async function sendAndWait(
   // fundal prin flag-urile de lansare + override-ul de vizibilitate (browser.ts).
   // Aducerea în față rămâne doar pentru login/CAPTCHA (BrowserManager.show()).
 
-  // v1.8.0: închide popup-urile de consimțământ care ar putea bloca căsuța de input
-  const popupsClosed = await autoAcceptPopups(page, { log }).catch(() => []);
+  // v2.9.6: consimtamant + overlay-uri promo (ex: pricing ChatGPT)
+  const { consent: popupsClosed, promo: promosClosed } = await clearBlockingPopups(page);
   if (popupsClosed.length) {
     cfg.onNotice?.('🍪 Popup closed automatically: “' + popupsClosed.join('”, “') + '”.');
+  }
+  if (promosClosed.length) {
+    cfg.onNotice?.('📢 Promo popup closed automatically: “' + promosClosed.join('”, “') + '”.');
   }
 
   // FAZA II (A): fișierele (imagini/binare) se încarcă în chat ÎNAINTE de text

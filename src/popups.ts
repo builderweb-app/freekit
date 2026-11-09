@@ -18,16 +18,21 @@ import type { Page } from 'playwright';
 export interface PopupSettings {
   /** freekit.autoAcceptPopups — închide automat popup-urile de consimțământ. */
   enabled: boolean;
+  /** freekit.dismissPromoPopups - inchide overlay-urile promo/upsell. */
+  dismissPromos: boolean;
 }
 
-const DEFAULT_SETTINGS: PopupSettings = { enabled: true };
+const DEFAULT_SETTINGS: PopupSettings = { enabled: true, dismissPromos: true };
 
 /** Setările popup-urilor (require lazy de vscode — teste Node safe). */
 export function popupSettings(): PopupSettings {
   try {
     const v = require('vscode') as typeof import('vscode');
     const cfg = v.workspace.getConfiguration('freekit');
-    return { enabled: cfg.get<boolean>('autoAcceptPopups', true) };
+    return {
+      enabled: cfg.get<boolean>('autoAcceptPopups', true),
+      dismissPromos: cfg.get<boolean>('dismissPromoPopups', true)
+    };
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
@@ -244,4 +249,308 @@ export async function autoAcceptPopups(
     opts.log?.('autoAcceptPopups a eșuat: ' + (e?.message ?? String(e)));
   }
   return accepted;
+}
+
+/* =========================================================================
+ * v2.9.6 - INCHIDE OVERLAY-URILE PROMO / UPSELL ("publicitate")
+ *
+ * ChatGPT deschide un modal de pricing ("Try Plus free for 1 month", cu
+ * "Ad supported" la planul Free) cand se apasa "Free offer" / "Claim offer"
+ * sau cand pagina e reluata cu `#pricing` in URL. Modalul acopera composerul,
+ * iar `autoAcceptPopups` NU il atinge: butonul lui are `aria-label="Close
+ * pricing"`, iar "close" e exclus intentionat la consimtamant. Aici il
+ * inchidem tintit:
+ *   - doar overlay-uri VIZIBILE si mari (dialog / aria-modal / pricing);
+ *   - doar daca textul overlay-ului suna a promo (upgrade/pricing/offer/...);
+ *   - doar controale de inchidere ("Close pricing", "Dismiss", "Not now"...);
+ *     CTA-urile de cumparare ("Claim offer", "Upgrade"...) nu sunt apasate;
+ *   - maximum 2 click-uri, plus Escape o singura data daca nu exista buton.
+ * Setarea `freekit.dismissPromoPopups` (implicit true) dezactiveaza totul.
+ * ========================================================================= */
+
+/** Semnaturile de text care arata ca un dialog este promo/upsell. */
+export const PROMO_CONTEXT_REGEX_SOURCE =
+  '(?:upgrade|pricing|free offer|claim offer|special offer|limited time|' +
+  'free trial|subscri\\w*|ad[ -]supported|no ads|billing|promo\\w*|discount|' +
+  'your plan|see all plans|compare plans|ofert\\w*|reducere|abonament|publicitate)';
+
+/** Anunturi de functii noi ("Now you can make GIFs with ChatGPT"). */
+export const ANNOUNCEMENT_CONTEXT_REGEX_SOURCE =
+  '(?:what s new|whats new|new feature|introducing|now you can|you can now|' +
+  'available now|now available|just launched|is here|are here|rolling out|' +
+  'say hello to)';
+
+/** "GIF" singur e prea larg; cere si un verb de actiune in acelasi dialog. */
+export const GIF_CONTEXT_REGEX_SOURCE = '\\bgifs?\\b';
+export const GIF_ACTION_REGEX_SOURCE =
+  '\\b(?:make|create|generate|try|new|now|with chatgpt)\\b';
+
+/** Texte exacte (normalizate, ASCII) care inchid un overlay promo. */
+export const PROMO_DISMISS_TEXTS = [
+  'close',
+  'close dialog',
+  'close popup',
+  'dismiss',
+  'dismiss banner',
+  'not now',
+  'no thanks',
+  'no thank you',
+  'maybe later',
+  'later',
+  'remind me later',
+  'not right now',
+  'skip',
+  'skip for now',
+  'stay on free plan',
+  'continue with free',
+  'continue with free plan',
+  'got it',
+  'ok',
+  'okay',
+  'inchide',
+  'nu acum',
+  'nu multumesc',
+  'mai tarziu'
+];
+
+/** Pliere ASCII pentru potrivire, ca lista sa ramana fara diacritice. */
+function foldAscii(raw: string): string {
+  return String(raw ?? '')
+    .replace(/[\u0103\u00e2]/g, 'a')
+    .replace(/\u00ee/g, 'i')
+    .replace(/[\u0219\u015f]/g, 's')
+    .replace(/[\u021b\u0163]/g, 't');
+}
+
+/** true daca textul (brut) arata a promo/upsell sau anunt de functie noua. */
+export function isPromoDialogText(raw: string): boolean {
+  const text = foldAscii(normalizePopupText(raw));
+  if (!text) return false;
+  if (new RegExp(PROMO_CONTEXT_REGEX_SOURCE, 'i').test(text)) return true;
+  if (new RegExp(ANNOUNCEMENT_CONTEXT_REGEX_SOURCE, 'i').test(text)) return true;
+  return (
+    new RegExp(GIF_CONTEXT_REGEX_SOURCE, 'i').test(text) &&
+    new RegExp(GIF_ACTION_REGEX_SOURCE, 'i').test(text)
+  );
+}
+
+/** true daca textul e un control sigur de inchidere a unui overlay promo. */
+export function promoDismissIntent(rawText: string): boolean {
+  const text = foldAscii(normalizePopupText(rawText));
+  if (!text) return false;
+  if (PROMO_DISMISS_TEXTS.includes(text)) return true;
+  return (
+    /^(close|dismiss)\b/.test(text) &&
+    !/\b(claim|upgrade|buy|subscribe|purchase)\b/.test(text)
+  );
+}
+
+interface PromoScanArgs {
+  dismissTexts: string[];
+  promoSource: string;
+  announceSource: string;
+  gifSource: string;
+  gifActionSource: string;
+}
+
+interface PromoOutcome {
+  /** Textul butonului apasat, sau null cand overlay-ul nu are buton vizibil. */
+  closed: string | null;
+  /** true cand a fost gasit un overlay promo vizibil. */
+  overlay: boolean;
+  /** Inceputul textului overlay-ului (pentru log). */
+  text: string;
+}
+
+/**
+ * Ruleaza IN PAGINA: gaseste overlay-ul promo vizibil si apasa butonul lui de
+ * inchidere. Intoarce ce a apasat (sau doar faptul ca overlay-ul exista).
+ * (Serializata de Playwright - toate constantele vin prin `args`.)
+ */
+const scanPromoPopupsInPage = (args: PromoScanArgs): PromoOutcome | null => {
+  const norm = (s: string): string =>
+    String(s ?? '')
+      .toLowerCase()
+      .replace(/[\u0103\u00e2]/g, 'a')
+      .replace(/\u00ee/g, 'i')
+      .replace(/[\u0219\u015f]/g, 's')
+      .replace(/[\u021b\u0163]/g, 't')
+      .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  const isVisible = (el: Element): boolean => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) return false;
+    const s = window.getComputedStyle(el as HTMLElement);
+    return s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity) > 0.05;
+  };
+  const promoRe = new RegExp(args.promoSource, 'i');
+  const announceRe = new RegExp(args.announceSource, 'i');
+  const gifRe = new RegExp(args.gifSource, 'i');
+  const gifActionRe = new RegExp(args.gifActionSource, 'i');
+  const isPromoContext = (text: string): boolean =>
+    promoRe.test(text) ||
+    announceRe.test(text) ||
+    (gifRe.test(text) && gifActionRe.test(text));
+  const overlaySel =
+    '[role="dialog"],[role="alertdialog"],[aria-modal="true"],dialog,' +
+    '[data-codex-pricing-overlay],[role="status"],[role="alert"],' +
+    '[class*="pricing" i],[class*="upsell" i],[class*="paywall" i],' +
+    '[class*="modal" i],[class*="overlay" i],[class*="popup" i],' +
+    '[class*="announce" i],[class*="whats-new" i],[class*="whatsnew" i],' +
+    '[class*="composerbanner" i],[class*="toast" i],' +
+    '[data-radix-popper-content-wrapper]';
+
+  const all = Array.prototype.slice.call(
+    document.querySelectorAll(overlaySel)
+  ) as HTMLElement[];
+  const overlays: HTMLElement[] = [];
+  for (const el of all) {
+    if (!isVisible(el)) continue;
+    const r = el.getBoundingClientRect();
+    // Doar dialoguri reale, straturi fixed mari sau containere de anunt; un
+    // card promo inline din sidebar nu trebuie confundat cu un modal.
+    const roleOverlay = el.matches(
+      '[role="dialog"],[role="alertdialog"],[aria-modal="true"],dialog,' +
+        '[data-codex-pricing-overlay],[role="status"],[role="alert"]'
+    );
+    const announceEl = el.matches(
+      '[class*="announce" i],[class*="whats-new" i],[class*="whatsnew" i],' +
+        '[class*="composerbanner" i],[class*="toast" i],' +
+        '[data-testid*="announce" i],[data-radix-popper-content-wrapper]'
+    );
+    // Bannerele de anunt pot fi joase (o linie + buton); restul trebuie sa
+    // fie suficient de mari cat sa fie un popup, nu un tooltip.
+    if (r.width < 220 || r.height < (announceEl ? 40 : 120)) continue;
+    const style = window.getComputedStyle(el);
+    const fixedOverlay =
+      style.position === 'fixed' &&
+      r.width >= window.innerWidth * 0.4 &&
+      r.height >= window.innerHeight * 0.3;
+    if (!roleOverlay && !fixedOverlay && !announceEl) continue;
+    let nested = false;
+    for (let p = el.parentElement; p; p = p.parentElement) {
+      if (overlays.indexOf(p as HTMLElement) >= 0) {
+        nested = true;
+        break;
+      }
+    }
+    if (!nested) overlays.push(el);
+  }
+
+  let overlay: HTMLElement | null = null;
+  let overlayText = '';
+  for (const el of overlays) {
+    const text = norm(el.innerText);
+    if (!text || !isPromoContext(text)) continue;
+    overlay = el;
+    overlayText = text;
+    break;
+  }
+  if (!overlay) return null;
+
+  const controls = Array.prototype.slice.call(
+    overlay.querySelectorAll(
+      'button,[role="button"],a,input[type="button"],input[type="submit"]'
+    )
+  ) as HTMLElement[];
+  const candidates: Array<{ el: HTMLElement; text: string; score: number }> = [];
+  for (const el of controls) {
+    if ((el as unknown as { disabled?: boolean }).disabled) continue;
+    if (el.getAttribute('aria-disabled') === 'true') continue;
+    // Marcaj cu timestamp: acelasi buton nu e apasat de doua ori in acelasi
+    // apel, dar un modal redeschis mai tarziu poate fi inchis din nou.
+    const markedAt = Number(el.getAttribute('data-freekit-dismissed') ?? 0);
+    if (markedAt && Date.now() - markedAt < 3000) continue;
+    if (!isVisible(el)) continue;
+    const textLabel = norm(el.innerText);
+    const ariaLabel = norm(el.getAttribute('aria-label') ?? '');
+    const titleLabel = norm(el.getAttribute('title') ?? '');
+    let chosen = '';
+    for (const n of [textLabel, ariaLabel, titleLabel]) {
+      if (!n) continue;
+      const exact = args.dismissTexts.indexOf(n) >= 0;
+      const closePrefix =
+        /^(close|dismiss)\b/.test(n) &&
+        !/\b(claim|upgrade|buy|subscribe|purchase)\b/.test(n);
+      if (exact || closePrefix) {
+        chosen = n;
+        break;
+      }
+    }
+    if (!chosen) continue;
+    const isButton =
+      el.tagName === 'BUTTON' ||
+      el.tagName === 'INPUT' ||
+      el.getAttribute('role') === 'button';
+    // Butonul-iconita cu aria-label ("Close pricing") e cel mai sigur.
+    candidates.push({
+      el,
+      text: chosen,
+      score: (!textLabel && ariaLabel ? 10 : 0) + (isButton ? 5 : 0)
+    });
+  }
+
+  if (!candidates.length) {
+    return { closed: null, overlay: true, text: overlayText.slice(0, 200) };
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  const winner = candidates[0];
+  // Marcam INAINTE de click: acelasi buton nu mai e apasat la runda urmatoare.
+  winner.el.setAttribute('data-freekit-dismissed', String(Date.now()));
+  try {
+    winner.el.click();
+  } catch {
+    return { closed: null, overlay: true, text: overlayText.slice(0, 200) };
+  }
+  return { closed: winner.text, overlay: true, text: overlayText.slice(0, 200) };
+};
+
+/**
+ * Inchide overlay-urile promo/upsell vizibile (publicitate, pricing, "Try
+ * Plus free for 1 month"). Intoarce textele butoanelor apasate. Nu arunca.
+ */
+export async function dismissPromoPopups(
+  page: Page,
+  opts: AutoAcceptOptions = {}
+): Promise<string[]> {
+  const dismissed: string[] = [];
+  try {
+    if (!popupSettings().dismissPromos) return dismissed;
+    const args: PromoScanArgs = {
+      dismissTexts: PROMO_DISMISS_TEXTS,
+      promoSource: PROMO_CONTEXT_REGEX_SOURCE,
+      announceSource: ANNOUNCEMENT_CONTEXT_REGEX_SOURCE,
+      gifSource: GIF_CONTEXT_REGEX_SOURCE,
+      gifActionSource: GIF_ACTION_REGEX_SOURCE
+    };
+    for (let round = 0; round < 2; round++) {
+      let found: PromoOutcome | null = null;
+      for (const frame of page.frames()) {
+        try {
+          const res = await frame.evaluate(scanPromoPopupsInPage, args);
+          if (res && res.overlay) {
+            found = res;
+            break;
+          }
+        } catch {
+          /* frame detasat / navigare in curs */
+        }
+      }
+      if (!found) break;
+      if (found.closed) {
+        dismissed.push(found.closed);
+        opts.log?.('promo popup inchis: "' + found.closed + '"');
+        await sleep(700);
+        continue;
+      }
+      // Fara buton vizibil: Escape inchide dialogul Radix; o singura incercare.
+      await page.keyboard.press('Escape').catch(() => {});
+      opts.log?.('promo popup inchis cu Escape (fara buton vizibil)');
+      break;
+    }
+  } catch (e: any) {
+    opts.log?.('dismissPromoPopups a esuat: ' + (e?.message ?? String(e)));
+  }
+  return dismissed;
 }

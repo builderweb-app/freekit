@@ -2,7 +2,7 @@
   "name": "freekit",
   "displayName": "Freekit — Free AI Coding Agent",
   "description": "Connect web AI chats (DeepSeek, ChatGPT, Gemini, Claude, Mistral, Qwen) — or a local Ollama model — to VS Code, with a built-in MCP (Model Context Protocol) client for external tools and a local semantic code index",
-  "version": "2.9.5",
+  "version": "2.9.6",
   "publisher": "builderweb",
   "license": "SEE LICENSE IN LICENSE.txt",
   "repository": {
@@ -394,6 +394,11 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Automatically closes consent popups (cookie / terms / \"OK\" / \"Got it\" / \"Accept all\"…) after a page loads and before typing in the chat. Safe matches only: visible buttons, exact acceptance texts at 3 confidence tiers (\"OK\" only inside dialogs); **Reject / Only necessary / Customize / Not now** texts are ignored completely."
+        },
+        "freekit.dismissPromoPopups": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Automatically closes advertising/upgrade overlays and feature announcements on the AI sites (pricing plans, free-offer modals, \"Try Plus free for 1 month\", \"Now you can make GIFs with ChatGPT\"...) that can cover the chat composer. Only visible dialogs/banners with promo or announcement text and their **Close / Dismiss / Not now / Got it** controls are clicked; purchase CTAs (\"Claim offer\", \"Upgrade\") and \"Try it\" are never pressed."
         },
         "freekit.sttLanguage": {
           "type": "string",

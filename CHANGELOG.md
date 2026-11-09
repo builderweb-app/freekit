@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.9.6
+
+**Popup-urile promo si anunturile de functii noi din ChatGPT ("Try Plus free for 1 month", "Now you can make GIFs with ChatGPT") nu mai raman peste composer: Freekit le detecteaza si le inchide singur, fara sa apese vreodata butonul de cumparare sau CTA-ul "Try it".**
+
+- **Cauza.** `autoAcceptPopups` exclude intentionat orice text cu "close" / "not now" (ca sa nu inchida dialoguri de consimtamant gresite), iar modalul de pricing are exact `aria-label="Close pricing"` - deci ramanea deschis si acoperea casuta de input. Popup-ul de pricing apare cand se apasa "Free offer" / "Claim offer" in ChatGPT sau cand pagina e reluata cu `#pricing` in URL. Anuntul de functie noua ("Now you can make GIFs with ChatGPT") nu era recunoscut de niciun pass: nu e consimtamant, iar scanner-ul promo nu avea semnaturi de anunt / GIF.
+- **`dismissPromoPopups` (nou in `src/popups.ts`).** Gaseste overlay-urile vizibile de tip dialog / aria-modal / pricing / anunt, verifica textul lor (upgrade / pricing / free offer / trial / subscription / ad supported / billing / promo / discount, plus "what's new" / "now you can" / "introducing" / "available now") si apasa doar controlul de inchidere. Anunturile GIF sunt recunoscute cand textul contine "GIF" si un verb de actiune ("make" / "create" / "generate" / "try" / "new" / "now"), ca sa nu inchidem un dialog oarecare care pomeneste GIF-uri. Maximum 2 click-uri per apel; daca nu exista buton vizibil, apasa Escape o singura data (dialogurile Radix se inchid asa).
+- **Bannere de anunt.** Pe langa dialoguri, scanner-ul accepta containere de tip `announce` / `whats-new` / `ComposerBanner` / toast / popover Radix (inclusiv bare joase, de la 40 px inaltime) si click-eaza "Got it" / "OK" / "Close" / "Dismiss".
+- **Siguranta.** CTA-urile de cumparare ("Claim offer", "Upgrade", "Buy", "Subscribe") si CTA-ul de anunt ("Try it") sunt excluse explicit; se accepta doar `Close...` / `Dismiss...` (inclusiv "Close pricing") si textele exacte "Not now", "No thanks", "Maybe later", "Skip", "Stay on free plan", "Continue with free", "Got it", "OK", "Inchide", "Nu acum", "Nu multumesc", "Mai tarziu". Potrivirea trece printr-o pliere ASCII, deci lista din cod ramane fara diacritice, dar variantele accentuate se potrivesc. Elementele apasate sunt marcate `data-freekit-dismissed` cu timestamp (3 s) ca sa nu fie apasate de doua ori in acelasi apel, dar un modal redeschis mai tarziu poate fi inchis din nou.
+- **Apelare.** `clearBlockingPopups()` din `src/providers/base.ts` ruleaza ambele pass-uri (consimtamant + promo) la deschiderea providerului, la chat nou, la reluarea conversatiei, la rotire si inainte de trimiterea fiecarui mesaj. Notificarea din chat distinge cele doua cazuri ("Popup closed automatically" vs "Promo popup closed automatically").
+- **Setare noua.** `freekit.dismissPromoPopups` (implicit `true`).
+- **Teste.** `src/tests/popups.test.ts` acopera detectia modalului de pricing, anunturile de functii noi (inclusiv "Now you can make GIFs with ChatGPT", dar nu si un text obisnuit care pomeneste GIF-uri), lista de inchidere (inclusiv variantele cu diacritice, scrise cu escape-uri) si refuzul CTA-urilor; `popupIntent` continua sa ignore "Close pricing" / "Free offer".
+- Build: version **2.9.5 -> 2.9.6**.
+
 ## v2.9.5
 
 **Selectorii publicați de serverul de raportare sunt din nou aplicați: registrul nu trimite un `slot`, doar o cheie `<domeniu>:<slug>` — acum cheia e mapată strict la slot, iar cheile ambigue sunt ignorate. În plus, `hidden` nu mai e raportat când primul match al unui selector larg e ascuns, iar intrarea `chat.deepseek.com:new-chat` din registru a fost actualizată la selectorul v1.5.5.**

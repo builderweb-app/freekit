@@ -234,6 +234,7 @@ Additional safeguards:
 | `freekit.humanBehavior` | `true` | Small mouse moves before clicks + occasional gentle scroll (anti-detect) |
 | `freekit.mutationObserver` | `false` | Experimental: end-of-generation detection via MutationObserver |
 | `freekit.autoAcceptPopups` | `true` | Automatically accept consent popups (cookie / terms / OK / Got it) |
+| `freekit.dismissPromoPopups` | `true` | Automatically close advertising/upgrade overlays and feature announcements (pricing, free offer, "Try Plus free for 1 month", "Now you can make GIFs with ChatGPT") that block the chat composer |
 | `freekit.sttLanguage` | `ro-RO` | Language for voice input (local Whisper) — `ro-RO` or `en-US` |
 | `freekit.whisperCliPath` | *(empty)* | Path to `whisper-cli` for offline voice input |
 | `freekit.whisperModelPath` | *(empty)* | Path to the Whisper ggml model (e.g. `ggml-base.bin`) |

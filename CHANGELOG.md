@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.9.5
+
+**Selectorii publicați de serverul de raportare sunt din nou aplicați: registrul nu trimite un `slot`, doar o cheie `<domeniu>:<slug>` — acum cheia e mapată strict la slot, iar cheile ambigue sunt ignorate. În plus, `hidden` nu mai e raportat când primul match al unui selector larg e ascuns, iar intrarea `chat.deepseek.com:new-chat` din registru a fost actualizată la selectorul v1.5.5.**
+
+- **Cauza.** `/api/v1/selectors` întoarce intrări `{ key, domain, selector, ... }` fără `slot`, iar `applyServerSelectors()` accepta doar `entry.slot` sau chei per-slot → toate cele 9 intrări erau ignorate. `chat.deepseek.com:new-chat` rămăsese pe `button[aria-label*='New chat' i]` (selectorul vechi, rupt), deci bucla „hive-mind” nu putea repara nimic.
+- **Mapare strictă cheie → slot** (`src/selectorKeys.ts`): `new-chat`/`new-chat-button`/`temporary-chat` → `newChat`; `textarea`/`contenteditable`/`prosemirror`/`ql-editor` → `input`; `assistant-message`/`message-content`/`chat-response`/`model-response` → `response`; `stop` → `stopButton`. Un slug care indică două sloturi (ex. `assistant-message-contenteditable`) sau niciunul (hash-uri de tip `div-9a2f8e4`) e ignorat și logat.
+- **Selectorii de la server sunt fallback.** `candidates()` pune override-urile `how: 'server'` la coada listei, după selectorii bundled: o intrare veche/greșită nu mai poate umbri un selector care încă funcționează. `selectorType` `text`/`role`/`xpath` primește prefixul Playwright corespunzător.
+- **`hidden` corect.** `selectorUsable()` verifică TOATE potrivirile, nu doar `.first()`; un selector larg (12 elemente) nu mai raportează `hidden` doar pentru că primul element e ascuns.
+- **Registru.** `chat.deepseek.com:new-chat` a fost rezolvat la `div[tabindex='0']:has-text('New chat')` (v2); cele trei candidaturi DeepSeek eșuate (`div._9a2f8e4`, `a._546d736…`, `div.ds-button…`) au fost marcate `deprecated`. Rapoartele rămase (`#15`, `#12`, `#11`, `#3`, `#6`, `#13`, `#14`) au fost triate cu note.
+- **Teste.** `src/tests/selectorKeys.test.ts` acoperă maparea (camelCase/kebab/snake, chei valide, hash-uri, ambiguități). `npm test` → 27 pass.
+- Build: version **2.9.4 → 2.9.5**.
+
 ## v2.9.4
 
 **Fix de encoding: `package.json` livrat în 2.9.3 avea em dash-ul (`—`) și en dash-ul (`–`) transformate în „â€”" / „â€“", așa că numele extensiei apărea ca „Freekit â€” Free AI Coding Agent" în Marketplace și în lista de extensii. Textul original e restaurat; router-ul de comenzi din 2.9.3 rămâne neschimbat.**

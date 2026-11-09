@@ -16,6 +16,8 @@ import {
   normalizeHost,
   waitForAny
 } from './selectorHealth';
+// v2.9.5: registrul de selectori nu trimite un `slot` — îl deducem din cheie.
+import { normalizeSlotName, slotFromRegistryKey } from './selectorKeys';
 
 export type { FailureType, ReportPayload } from './selectorHealth';
 export { normalizeHost };
@@ -143,21 +145,39 @@ function pickSelector(value: unknown): string | null {
   return null;
 }
 
+/**
+ * v2.9.5: serverul poate trimite selectorul ca `text`, `role` sau `xpath` —
+ * `page.locator()` are nevoie de prefixul corespunzător. Selectorii CSS rămân
+ * neschimbați.
+ */
+function withServerType(entry: Record<string, any>, selector: string): string {
+  if (/^(?:text|role|xpath)=/i.test(selector)) return selector;
+  const type = String(entry.selectorType ?? entry.selector_type ?? 'css').toLowerCase();
+  if (type === 'text') return 'text=' + selector;
+  if (type === 'role') return 'role=' + selector;
+  if (type === 'xpath') return 'xpath=' + selector;
+  return selector;
+}
+
 /** Extrage perechile (slot, selector) dintr-o intrare a serverului. */
 function slotsFromEntry(entry: Record<string, any>): Array<{ slot: SlotName; selector: string }> {
   const out: Array<{ slot: SlotName; selector: string }> = [];
   const direct = pickSelector(entry.selector ?? entry.value ?? entry.css);
-  if (direct && SLOTS.includes(entry.slot)) {
-    out.push({ slot: entry.slot as SlotName, selector: direct });
+  // `slot` explicit (dacă serverul îl trimite) are prioritate; altfel îl
+  // deducem din cheia registrului (`<domeniu>:new-chat`, `:textarea`, ...).
+  const explicitSlot = normalizeSlotName(entry.slot);
+  const slot = explicitSlot ?? slotFromRegistryKey(entry.key);
+  if (direct && slot) {
+    out.push({ slot, selector: withServerType(entry, direct) });
   }
   const map =
     entry.selectors && typeof entry.selectors === 'object' && !Array.isArray(entry.selectors)
       ? (entry.selectors as Record<string, unknown>)
       : (entry as Record<string, unknown>);
-  for (const slot of SLOTS) {
-    if (out.some((o) => o.slot === slot)) continue;
-    const sel = pickSelector(map?.[slot]);
-    if (sel) out.push({ slot, selector: sel });
+  for (const slotName of SLOTS) {
+    if (out.some((o) => o.slot === slotName)) continue;
+    const sel = pickSelector(map?.[slotName]);
+    if (sel) out.push({ slot: slotName, selector: withServerType(entry, sel) });
   }
   return out;
 }
@@ -191,6 +211,7 @@ export function applyServerSelectors(list: unknown): AppliedSelector[] {
   const applied: AppliedSelector[] = [];
   if (!Array.isArray(list) || !list.length) return applied;
   const known = selectors.info().providers;
+  const skipped: string[] = [];
   for (const raw of list) {
     if (!raw || typeof raw !== 'object') continue;
     const entry = raw as Record<string, any>;
@@ -209,18 +230,30 @@ export function applyServerSelectors(list: unknown): AppliedSelector[] {
       log('selectors: server entry ignored — unknown domain "' + domain + '"');
       continue;
     }
-    for (const { slot, selector } of slotsFromEntry(entry)) {
+    if (typeof entry.status === 'string' && entry.status !== 'active') {
+      skipped.push(String(entry.key ?? domain) + ' (status ' + entry.status + ')');
+      continue;
+    }
+    const slots = slotsFromEntry(entry);
+    if (!slots.length) {
+      skipped.push(String(entry.key ?? domain) + ' (no slot)');
+      continue;
+    }
+    for (const { slot, selector } of slots) {
       if (selectors.learn(pid, slot, selector, 'server')) {
         applied.push({ provider: pid, slot, selector });
       }
     }
+  }
+  if (skipped.length) {
+    log('selectors: ignored ' + skipped.length + ' server entry(ies): ' + skipped.join(', '));
   }
   if (applied.length) {
     log(
       'selectors: applied ' +
         applied.length +
         ' server update(s): ' +
-        applied.map((a) => a.provider + '.' + a.slot).join(', ')
+        applied.map((a) => a.provider + '.' + a.slot + ' -> ' + a.selector).join(', ')
     );
   }
   return applied;
@@ -230,9 +263,15 @@ export function applyServerSelectors(list: unknown): AppliedSelector[] {
 
 async function selectorUsable(page: Page, selector: string): Promise<boolean> {
   try {
-    const loc = page.locator(selector).first();
-    if ((await loc.count()) === 0) return false;
-    return await loc.isVisible();
+    // v2.9.5: un selector larg poate potrivi mai multe elemente; primul poate fi
+    // ascuns (ex. un buton din sidebar-ul pliat) cât timp altul e vizibil.
+    // `hidden` se raportează doar când NICIUN match nu e vizibil.
+    const loc = page.locator(selector);
+    const count = await loc.count();
+    for (let i = 0; i < count; i++) {
+      if (await loc.nth(i).isVisible()) return true;
+    }
+    return false;
   } catch {
     return false;
   }

@@ -297,7 +297,7 @@ Freekit can feed a central reporting server (`https://api.builderweb.app` by def
 
 - **Register once** — on first start, the extension creates a random installation id and exchanges it for an `apiKey`.
 - **Health check every 6 h** — for every provider that already has a tab open, the `input` and `newChat` selectors are verified. Broken slots are repaired locally first; only if that also fails is a report sent.
-- **Selector updates every 24 h** — the extension asks for new selectors and applies them.
+- **Selector updates every 24 h** — the extension asks for new selectors and applies the ones whose registry key maps unambiguously to a slot (`<domain>:new-chat`, `:textarea`, `:…-assistant-message`, …). Ambiguous keys are ignored, and server selectors are tried only after the bundled ones, so a stale entry cannot shadow a working selector.
 - **Privacy** — nothing from your code, prompts or files is ever sent. The optional DOM snapshot is off by default.
 
 ### Canary health check & hive-mind healing

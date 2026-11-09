@@ -762,7 +762,10 @@ export class SelectorStore {
       const learnedList = [learned.selector, ...(learned.selectors ?? [])];
       const extra = learnedList.filter((sel, i) => !!sel && learnedList.indexOf(sel) === i && list.indexOf(sel) < 0);
       if (extra.length) {
-        if (learned.how === 'fragile') list.push(...extra);
+        // v2.9.5: selectorii de la server sunt NEVERIFICAȚI local — stau la
+        // coadă, ca o intrare veche/greșită (ex. vechiul buton DeepSeek) să nu
+        // umbrească selectorii bundled care încă funcționează.
+        if (learned.how === 'fragile' || learned.how === 'server') list.push(...extra);
         else list.unshift(...extra);
       }
     }
@@ -986,10 +989,14 @@ export class SelectorStore {
     this.unlockedUserLocks.delete(key);
     log('selector repaired: ' + key + ' -> ' + selector + ' (' + how + ')');
     void this.persist();
-    try {
-      this.notifier?.(entry);
-    } catch (e: any) {
-      log('notifier failed: ' + (e?.message ?? String(e)));
+    // v2.9.5: update-urile de la server sunt anunțate o singură dată, în sumar
+    // (ReportingService.selectorTick) — nu câte un „repaired" pentru fiecare.
+    if (how !== 'server') {
+      try {
+        this.notifier?.(entry);
+      } catch (e: any) {
+        log('notifier failed: ' + (e?.message ?? String(e)));
+      }
     }
     return true;
   }
@@ -1048,10 +1055,13 @@ export class SelectorStore {
         (list.length > 1 ? ', ' + list.length + ' candidates' : '') + ')'
     );
     void this.persist();
-    try {
-      this.notifier?.(entry);
-    } catch (e: any) {
-      log('notifier failed: ' + (e?.message ?? String(e)));
+    // v2.9.5: vezi learn() — sumarul din ReportingService acoperă serverul.
+    if (how !== 'server') {
+      try {
+        this.notifier?.(entry);
+      } catch (e: any) {
+        log('notifier failed: ' + (e?.message ?? String(e)));
+      }
     }
     return list;
   }
